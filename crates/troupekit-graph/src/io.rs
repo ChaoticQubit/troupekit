@@ -83,6 +83,7 @@ impl Emitter<'_> {
 struct NodeSink<'a> {
     emitter: &'a Emitter<'a>,
     node: &'a str,
+    persona: &'a str,
 }
 
 impl EventSink for NodeSink<'_> {
@@ -92,8 +93,9 @@ impl EventSink for NodeSink<'_> {
             | EventBody::RunFinished { .. }
             | EventBody::RunPaused { .. }
             | EventBody::RunFailed { .. } => return,
-            EventBody::StepStarted { step } => EventBody::StepStarted {
+            EventBody::StepStarted { step, .. } => EventBody::StepStarted {
                 step: format!("{}/{step}", self.node),
+                persona: Some(self.persona.to_string()),
             },
             EventBody::StepFinished { step, usage } => EventBody::StepFinished {
                 step: format!("{}/{step}", self.node),
@@ -107,20 +109,25 @@ impl EventSink for NodeSink<'_> {
 
 /// The `AgentIo` an agent node steps with: the graph's agent io, except
 /// that events go out under the graph run id and `seq`, step names gain a
-/// `node/` prefix and the agent's own run lifecycle events are dropped.
+/// `node/` prefix, step starts name the node's persona slug and the
+/// agent's own run lifecycle events are dropped.
 pub(crate) struct NodeIo<'a> {
     inner: &'a dyn AgentIo,
     sink: NodeSink<'a>,
 }
 
 impl<'a> NodeIo<'a> {
-    /// Builds the io for agent node `node`, emitting through `emitter`.
-    /// Everything else delegates to the emitter's agent io.
-    /// Returns the io.
-    pub fn new(emitter: &'a Emitter<'a>, node: &'a str) -> Self {
+    /// Builds the io for agent node `node` running persona slug `persona`,
+    /// emitting through `emitter`. Everything else delegates to the
+    /// emitter's agent io. Returns the io.
+    pub fn new(emitter: &'a Emitter<'a>, node: &'a str, persona: &'a str) -> Self {
         Self {
             inner: emitter.io,
-            sink: NodeSink { emitter, node },
+            sink: NodeSink {
+                emitter,
+                node,
+                persona,
+            },
         }
     }
 }

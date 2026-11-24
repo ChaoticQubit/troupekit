@@ -201,14 +201,22 @@ async fn linear_agent_then_tool_finishes() {
         count(|b| matches!(b, EventBody::RunFailed { .. } | EventBody::RunPaused { .. })),
         0
     );
-    let steps: Vec<String> = events
+    let steps: Vec<(String, Option<String>)> = events
         .iter()
         .filter_map(|e| match &e.body {
-            EventBody::StepStarted { step } => Some(step.clone()),
+            EventBody::StepStarted { step, persona } => Some((step.clone(), persona.clone())),
             _ => None,
         })
         .collect();
-    assert_eq!(steps, vec!["plan/call_model", "plan/check", "save/tool"]);
+    let planner = Some("planner".to_string());
+    assert_eq!(
+        steps,
+        vec![
+            ("plan/call_model".to_string(), planner.clone()),
+            ("plan/check".to_string(), planner),
+            ("save/tool".to_string(), None),
+        ]
+    );
     assert!(matches!(events[0].body, EventBody::RunStarted { .. }));
     assert!(matches!(
         events.last().unwrap().body,

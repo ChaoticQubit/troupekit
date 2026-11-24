@@ -740,8 +740,8 @@ impl GraphRun {
                     }
                     let node = wf.node(&b.node).expect("branches sit at workflow nodes");
                     match (&mut b.at, &node.kind) {
-                        (At::Agent { run, .. }, _) => {
-                            let nio = NodeIo::new(em, &node.id);
+                        (At::Agent { run, .. }, NodeKind::Agent { persona, .. }) => {
+                            let nio = NodeIo::new(em, &node.id, persona);
                             Work::Agent(run.step(&nio).await)
                         }
                         (At::Enter, NodeKind::Tool { tool }) => {
@@ -931,7 +931,7 @@ async fn call_tool(
     })?;
     let key = ctx.idempotency_key.clone().expect("for_call sets the key");
     let step = format!("{}/tool", node.id);
-    em.emit(EventBody::StepStarted { step: step.clone() });
+    em.emit(EventBody::StepStarted { step: step.clone(), persona: None });
     em.emit(EventBody::ToolCallStarted {
         call_id: key.clone(),
         name: tool.to_string(),

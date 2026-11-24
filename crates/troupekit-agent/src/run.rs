@@ -273,7 +273,13 @@ impl AgentRun {
         }
         self.steps += 1;
         let name = self.state.step_name();
-        self.emit(io, EventBody::StepStarted { step: name.into() });
+        self.emit(
+            io,
+            EventBody::StepStarted {
+                step: name.into(),
+                persona: None,
+            },
+        );
         let mut used = Usage::default();
         let outcome = match self.state.clone() {
             RunState::CallModel => self.call_model(io, &mut used).await,

@@ -42,19 +42,43 @@ pub enum PauseReason {
 
 /// What happened in a run.
 /// One enum feeds the UI stream, telemetry and checkpoints.
-/// Serializes with a `type` tag in snake case.
+/// Serializes with a `type` tag in snake case; `StepStarted` names the
+/// persona slug of an agent node's step, left out when there is none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventBody {
-    RunStarted { workflow: String },
-    StepStarted { step: String },
-    TextDelta { text: String },
-    ToolCallStarted { call_id: String, name: String },
-    ToolCallFinished { call_id: String, is_error: bool },
-    StepFinished { step: String, usage: Usage },
-    RunPaused { reason: PauseReason },
-    RunFinished { usage: Usage },
-    RunFailed { error: String },
+    RunStarted {
+        workflow: String,
+    },
+    StepStarted {
+        step: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona: Option<String>,
+    },
+    TextDelta {
+        text: String,
+    },
+    ToolCallStarted {
+        call_id: String,
+        name: String,
+    },
+    ToolCallFinished {
+        call_id: String,
+        is_error: bool,
+    },
+    StepFinished {
+        step: String,
+        usage: Usage,
+    },
+    RunPaused {
+        reason: PauseReason,
+    },
+    RunFinished {
+        usage: Usage,
+    },
+    RunFailed {
+        error: String,
+    },
 }
 
 /// One numbered event of one run.
@@ -88,5 +112,16 @@ mod tests {
         assert_eq!(v["body"], json!({"type":"run_paused","reason":{"kind":"approval","node":"approve_plan"}}));
         let back: Event = serde_json::from_value(v).unwrap();
         assert_eq!(back, e);
+    }
+
+    #[test]
+    fn step_started_persona_is_optional() {
+        let old: EventBody = serde_json::from_value(json!({"type":"step_started","step":"plan/call_model"})).unwrap();
+        assert_eq!(old, EventBody::StepStarted { step: "plan/call_model".into(), persona: None });
+        assert_eq!(serde_json::to_value(&old).unwrap(), json!({"type":"step_started","step":"plan/call_model"}));
+        let new = EventBody::StepStarted { step: "plan/call_model".into(), persona: Some("goal-planner".into()) };
+        let v = serde_json::to_value(&new).unwrap();
+        assert_eq!(v, json!({"type":"step_started","step":"plan/call_model","persona":"goal-planner"}));
+        assert_eq!(serde_json::from_value::<EventBody>(v).unwrap(), new);
     }
 }
