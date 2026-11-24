@@ -1,0 +1,25 @@
+{
+  "systemInstruction": {"parts": [{"text": "You plan workouts."}]},
+  "contents": [
+    {"role": "user", "parts": [{"text": "Plan my week"}, {"inlineData": {"mimeType": "image/png", "data": "aGk="}}]},
+    {"role": "model", "parts": [{"text": "Checking the calendar."}, {"functionCall": {"name": "calendar", "args": {"days": 7}}}]},
+    {"role": "user", "parts": [{"functionResponse": {"name": "calendar", "response": {"output": "free: mon, wed"}}}]}
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "calendar",
+          "description": "Reads free slots",
+          "parametersJsonSchema": {"type": "object", "properties": {"days": {"type": "integer"}}, "required": ["days"]}
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 1024,
+    "temperature": 0.5,
+    "responseMimeType": "application/json",
+    "responseJsonSchema": {"type": "object", "properties": {"plan": {"type": "string"}}}
+  }
+}

@@ -1,0 +1,198 @@
+[[vendor]]
+id = "anthropic"
+name = "Anthropic"
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+auth = "x-api-key"
+price_source = "https://platform.claude.com/docs/en/about-claude/pricing"
+quirks = { temperature = false }
+search_usd_micros = 10000
+
+[[vendor.model]]
+id = "claude-opus-5-5"
+context_window = 1000000
+input_usd_micros_per_mtok = 4000000
+output_usd_micros_per_mtok = 20000000
+price_verified = true
+
+[[vendor.model]]
+id = "claude-sonnet-5-5"
+context_window = 1000000
+input_usd_micros_per_mtok = 2000000
+output_usd_micros_per_mtok = 10000000
+price_verified = true
+
+[[vendor.model]]
+id = "claude-haiku-5-5"
+context_window = 1000000
+input_usd_micros_per_mtok = 100000
+output_usd_micros_per_mtok = 500000
+price_verified = true
+long_context = { above_input_tokens = 100000, input_usd_micros_per_mtok = 500000, output_usd_micros_per_mtok = 2500000 }
+
+[[vendor]]
+id = "openai"
+name = "OpenAI"
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+auth = "bearer"
+price_source = "https://developers.openai.com/api/docs/pricing"
+quirks = { max_tokens_field = "max_completion_tokens", temperature = false }
+
+[[vendor.model]]
+id = "gpt-6.2-sol"
+context_window = 1050000
+input_usd_micros_per_mtok = 2000000
+output_usd_micros_per_mtok = 10000000
+price_verified = true
+long_context = { above_input_tokens = 272000, input_usd_micros_per_mtok = 4000000, output_usd_micros_per_mtok = 15000000 }
+
+[[vendor.model]]
+id = "gpt-6.1-terra"
+context_window = 1050000
+input_usd_micros_per_mtok = 1000000
+output_usd_micros_per_mtok = 5000000
+price_verified = true
+long_context = { above_input_tokens = 272000, input_usd_micros_per_mtok = 2000000, output_usd_micros_per_mtok = 7500000 }
+
+[[vendor.model]]
+id = "gpt-6-luna"
+context_window = 1050000
+input_usd_micros_per_mtok = 100000
+output_usd_micros_per_mtok = 500000
+price_verified = true
+long_context = { above_input_tokens = 272000, input_usd_micros_per_mtok = 200000, output_usd_micros_per_mtok = 750000 }
+
+[[vendor]]
+id = "google"
+name = "Google Gemini"
+protocol = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+auth = "x-goog-api-key"
+price_source = "https://ai.google.dev/gemini-api/docs/pricing"
+
+[[vendor.model]]
+id = "gemini-3.8-flash"
+context_window = 1048576
+input_usd_micros_per_mtok = 1500000
+output_usd_micros_per_mtok = 7500000
+price_verified = true
+
+[[vendor.model]]
+id = "gemini-3.5-flash-lite"
+context_window = 1048576
+input_usd_micros_per_mtok = 300000
+output_usd_micros_per_mtok = 2500000
+price_verified = true
+
+[[vendor.model]]
+id = "gemini-3.1-pro-preview"
+context_window = 1048576
+input_usd_micros_per_mtok = 2000000
+output_usd_micros_per_mtok = 12000000
+price_verified = true
+long_context = { above_input_tokens = 200000, input_usd_micros_per_mtok = 4000000, output_usd_micros_per_mtok = 18000000 }
+
+[[vendor]]
+id = "openrouter"
+name = "OpenRouter"
+protocol = "openai_compatible"
+base_url = "https://openrouter.ai/api/v1"
+auth = "bearer"
+quirks = { stream_usage = false }
+
+[[vendor.model]]
+id = "anthropic/claude-opus-5.5"
+context_window = 1000000
+input_usd_micros_per_mtok = 0
+output_usd_micros_per_mtok = 0
+price_verified = false
+
+[[vendor.model]]
+id = "anthropic/claude-haiku-5.5"
+context_window = 1000000
+input_usd_micros_per_mtok = 0
+output_usd_micros_per_mtok = 0
+price_verified = false
+
+[[vendor]]
+id = "groq"
+name = "Groq"
+protocol = "openai_compatible"
+base_url = "https://api.groq.com/openai/v1"
+auth = "bearer"
+
+[[vendor.model]]
+id = "llama-3.3-70b-versatile"
+context_window = 131072
+input_usd_micros_per_mtok = 0
+output_usd_micros_per_mtok = 0
+price_verified = false
+
+[[vendor.model]]
+id = "openai/gpt-oss-120b"
+context_window = 131072
+input_usd_micros_per_mtok = 0
+output_usd_micros_per_mtok = 0
+price_verified = false
+
+[[vendor]]
+id = "deepseek"
+name = "DeepSeek"
+protocol = "openai_compatible"
+base_url = "https://api.deepseek.com"
+auth = "bearer"
+quirks = { output_schema = "none" }
+
+[[vendor.model]]
+id = "deepseek-v4-pro"
+context_window = 1048576
+input_usd_micros_per_mtok = 0
+output_usd_micros_per_mtok = 0
+price_verified = false
+
+[[vendor.model]]
+id = "deepseek-v4-flash"
+context_window = 1048576
+input_usd_micros_per_mtok = 0
+output_usd_micros_per_mtok = 0
+price_verified = false
+
+[[vendor]]
+id = "mistral"
+name = "Mistral"
+protocol = "openai_compatible"
+base_url = "https://api.mistral.ai/v1"
+auth = "bearer"
+quirks = { stream_usage = false }
+
+[[vendor.model]]
+id = "mistral-large-latest"
+context_window = 1048576
+input_usd_micros_per_mtok = 0
+output_usd_micros_per_mtok = 0
+price_verified = false
+
+[[vendor.model]]
+id = "mistral-small-latest"
+context_window = 262144
+input_usd_micros_per_mtok = 0
+output_usd_micros_per_mtok = 0
+price_verified = false
+
+[[vendor]]
+id = "ollama"
+name = "Ollama (local)"
+protocol = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+auth = "none"
+open_models = true
+
+[[vendor]]
+id = "lmstudio"
+name = "LM Studio (local)"
+protocol = "openai_compatible"
+base_url = "http://localhost:1234/v1"
+auth = "none"
+open_models = true
+quirks = { stream_usage = false }

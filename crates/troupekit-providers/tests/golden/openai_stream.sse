@@ -1,0 +1,18 @@
+data: {"id":"c","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"usage":null}
+
+data: {"id":"c","choices":[{"index":0,"delta":{"content":"Mon: run "},"finish_reason":null}],"usage":null}
+
+data: {"id":"c","choices":[{"index":0,"delta":{"content":"5k."},"finish_reason":null}],"usage":null}
+
+data: {"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{"name":"calendar","arguments":""}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"days\":"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"3}"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}
+
+data: {"id":"c","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":30,"total_tokens":42}}
+
+data: [DONE]
+

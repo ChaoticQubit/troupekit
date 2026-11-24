@@ -1,0 +1,36 @@
+{
+  "model": "gpt-6.2-sol",
+  "messages": [
+    {"role": "system", "content": "You plan workouts."},
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Plan my week"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}}
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "Checking the calendar.",
+      "tool_calls": [
+        {"id": "call_1", "type": "function", "function": {"name": "calendar", "arguments": "{\"days\":7}"}}
+      ]
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": "free: mon, wed"}
+  ],
+  "max_completion_tokens": 1024,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "calendar",
+        "description": "Reads free slots",
+        "parameters": {"type": "object", "properties": {"days": {"type": "integer"}}, "required": ["days"]}
+      }
+    }
+  ],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {"name": "output", "schema": {"type": "object", "properties": {"plan": {"type": "string"}}}}
+  }
+}

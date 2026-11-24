@@ -1,0 +1,37 @@
+{
+  "model": "claude-opus-5-5",
+  "max_tokens": 1024,
+  "system": "You plan workouts.",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Plan my week"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {"type": "text", "text": "Checking the calendar."},
+        {"type": "tool_use", "id": "call_1", "name": "calendar", "input": {"days": 7}}
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {"type": "tool_result", "tool_use_id": "call_1", "content": "free: mon, wed", "is_error": false}
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "calendar",
+      "description": "Reads free slots",
+      "input_schema": {"type": "object", "properties": {"days": {"type": "integer"}}, "required": ["days"]}
+    }
+  ],
+  "output_config": {
+    "format": {"type": "json_schema", "schema": {"type": "object", "properties": {"plan": {"type": "string"}}}}
+  }
+}

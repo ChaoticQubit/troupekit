@@ -1,0 +1,47 @@
+{
+  "query": "rust tools",
+  "number_of_results": 0,
+  "results": [
+    {
+      "url": "https://example.com/rust/tools",
+      "title": "The Rust toolchain",
+      "content": "Install Rust and its tools with rustup.",
+      "engine": "duckduckgo",
+      "parsed_url": ["https", "example.com", "/rust/tools", "", "", ""],
+      "template": "default.html",
+      "engines": ["duckduckgo", "brave"],
+      "positions": [1, 2],
+      "score": 3.0,
+      "category": "general"
+    },
+    {
+      "url": null,
+      "title": "An answer without a link",
+      "content": "No URL here.",
+      "engine": "wikidata",
+      "score": 1.0,
+      "category": "general"
+    },
+    {
+      "url": "https://example.org/cargo",
+      "title": "Cargo book",
+      "content": "Cargo is the Rust package manager.",
+      "engine": "brave",
+      "score": 1.5,
+      "category": "general"
+    },
+    {
+      "url": "https://example.net/clippy",
+      "title": "Clippy lints",
+      "content": "",
+      "engine": "brave",
+      "score": 1.0,
+      "category": "general"
+    }
+  ],
+  "answers": [],
+  "corrections": [],
+  "infoboxes": [],
+  "suggestions": ["rust tools list"],
+  "unresponsive_engines": []
+}

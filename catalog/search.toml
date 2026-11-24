@@ -1,0 +1,11 @@
+[[instance]]
+name = "brave"
+adapter = "brave"
+base_url = "https://api.search.brave.com"
+key_env = "BRAVE_SEARCH_API_KEY"
+
+[[instance]]
+name = "searxng-local"
+adapter = "searxng"
+base_url = "http://127.0.0.1:8888"
+allow_private = true

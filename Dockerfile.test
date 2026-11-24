@@ -1,0 +1,5 @@
+FROM rust:1-slim
+WORKDIR /src
+COPY . .
+RUN sh scripts/check-boundary.sh && cargo test --workspace --no-run
+CMD ["sh", "-c", "sh scripts/check-boundary.sh && cargo test --workspace"]

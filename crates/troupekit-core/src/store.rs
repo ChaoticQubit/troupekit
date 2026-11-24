@@ -1,0 +1,105 @@
+use crate::error::CoreError;
+use crate::ids::RunId;
+use crate::message::Message;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// Saved state of a run after one step.
+/// Steps start at 0 and rise by one per saved checkpoint.
+/// `state` is the run's serialized state machine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub run_id: RunId,
+    pub step: u64,
+    pub state: Value,
+}
+
+/// Durable run snapshots.
+/// `save` accepts only the next step and returns `CoreError::Conflict` otherwise,
+/// so two workers can never both advance the same run.
+#[async_trait]
+pub trait CheckpointStore: Send + Sync {
+    async fn save(&self, cp: Checkpoint) -> Result<(), CoreError>;
+    async fn latest(&self, run_id: RunId) -> Result<Option<Checkpoint>, CoreError>;
+}
+
+/// Append-only message logs keyed by name.
+/// `append` succeeds only when the log still has `expected_len` entries and
+/// returns the new length; otherwise it returns `CoreError::Conflict`.
+#[async_trait]
+pub trait MemoryLog: Send + Sync {
+    async fn append(&self, log: &str, expected_len: u64, entries: Vec<Message>) -> Result<u64, CoreError>;
+    async fn read(&self, log: &str) -> Result<Vec<Message>, CoreError>;
+}
+
+/// One embedded chunk stored in a `VectorStore`.
+/// Holds the id, the embedding, the source text and string metadata
+/// used by `Filter`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VectorRecord {
+    pub id: String,
+    pub vector: Vec<f32>,
+    pub text: String,
+    pub meta: BTreeMap<String, String>,
+}
+
+/// A search hit from a `VectorStore`.
+/// Carries the record's id, text and metadata plus its cosine similarity
+/// to the query; higher scores are closer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Scored {
+    pub id: String,
+    pub score: f32,
+    pub text: String,
+    pub meta: BTreeMap<String, String>,
+}
+
+/// Equality filter on record metadata.
+/// Every key and value pair in the filter must match the record;
+/// an empty filter matches every record.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Filter(pub BTreeMap<String, String>);
+
+impl Filter {
+    /// Checks the filter against a record's `meta`.
+    /// Returns true when every filter pair is present in `meta`
+    /// with the same value.
+    pub fn matches(&self, meta: &BTreeMap<String, String>) -> bool {
+        self.0.iter().all(|(k, v)| meta.get(k) == Some(v))
+    }
+}
+
+/// Object-safe vector index of a fixed dimension, so a store can be chosen
+/// at runtime. `upsert` and `search` return `CoreError::DimensionMismatch`
+/// for vectors whose length is not `dims`.
+#[async_trait]
+pub trait VectorStore: Send + Sync {
+    fn dims(&self) -> usize;
+    async fn upsert(&self, records: Vec<VectorRecord>) -> Result<(), CoreError>;
+    async fn search(&self, query: &[f32], k: usize, filter: &Filter) -> Result<Vec<Scored>, CoreError>;
+}
+
+/// Byte storage by path, for attached files and media.
+/// `put` replaces any existing bytes at the path.
+/// `get` of an unknown path returns `CoreError::NotFound`.
+#[async_trait]
+pub trait BlobStore: Send + Sync {
+    async fn put(&self, path: &str, bytes: Vec<u8>) -> Result<(), CoreError>;
+    async fn get(&self, path: &str) -> Result<Vec<u8>, CoreError>;
+}
+
+/// Cosine similarity of vectors `a` and `b`, which must have equal length.
+/// Returns a value in -1.0..=1.0, or 0.0 when either vector is all zeros.
+/// Panics on unequal lengths; callers check dimensions first.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len(), "cosine of unequal lengths");
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na * nb)
+}

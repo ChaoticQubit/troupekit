@@ -1,0 +1,6 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Mon: run "}]},"index":0}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15}}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"5k."}]},"index":0}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":6,"totalTokenCount":18}}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"calendar","args":{"days":3}}}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":25,"thoughtsTokenCount":5,"totalTokenCount":42}}
+

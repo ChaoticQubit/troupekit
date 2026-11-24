@@ -1,0 +1,43 @@
+{
+  "type": "search",
+  "query": {
+    "original": "rust tools",
+    "more_results_available": true
+  },
+  "mixed": {
+    "type": "mixed",
+    "main": [{ "type": "web", "index": 0, "all": false }]
+  },
+  "web": {
+    "type": "search",
+    "family_friendly": true,
+    "results": [
+      {
+        "type": "search_result",
+        "title": "The <strong>Rust</strong> toolchain",
+        "url": "https://example.com/rust/tools",
+        "is_source_local": false,
+        "is_source_both": false,
+        "description": "Install <strong>Rust</strong> &amp; its <strong>tools</strong> with rustup.",
+        "page_age": "2026-10-01T00:00:00",
+        "language": "en",
+        "family_friendly": true,
+        "profile": { "name": "Example", "url": "https://example.com/rust/tools", "long_name": "example.com" }
+      },
+      {
+        "type": "search_result",
+        "title": "Cargo book",
+        "url": "https://example.org/cargo",
+        "description": "Cargo is the <strong>Rust</strong> package manager.",
+        "language": "en"
+      },
+      {
+        "type": "search_result",
+        "title": "Clippy lints",
+        "url": "https://example.net/clippy",
+        "description": "A collection of lints.",
+        "extra_snippets": ["Catch common mistakes."]
+      }
+    ]
+  }
+}

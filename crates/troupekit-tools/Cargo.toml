@@ -1,0 +1,28 @@
+[package]
+name = "troupekit-tools"
+description = "Tools for the Troupekit agent framework: tool trait, registry, guarded web fetch, web search and declarative HTTP tools."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+troupekit-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["net", "time"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+url = "2"
+percent-encoding = "2"
+toml = "1"
+schemars = "1"
+jsonschema = { version = "0.60", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

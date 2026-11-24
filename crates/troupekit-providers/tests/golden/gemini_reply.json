@@ -1,0 +1,17 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {"text": "Weighing rest days.", "thought": true},
+          {"text": "Mon: run 5k."},
+          {"functionCall": {"name": "calendar", "args": {"days": 3}}}
+        ]
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 25, "thoughtsTokenCount": 5, "totalTokenCount": 42}
+}

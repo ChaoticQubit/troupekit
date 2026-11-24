@@ -1,0 +1,27 @@
+[package]
+name = "troupekit-graph"
+description = "Durable TOML workflows for the Troupekit agent framework: agent, tool, human, router, join and end nodes run by a checkpointable graph run."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+troupekit-core.workspace = true
+troupekit-agent = { path = "../troupekit-agent", version = "0.1.0" }
+troupekit-providers = { path = "../troupekit-providers", version = "0.1.0", default-features = false }
+troupekit-tools = { path = "../troupekit-tools", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+toml.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+schemars = "1"

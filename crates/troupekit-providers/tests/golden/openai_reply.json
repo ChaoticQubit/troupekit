@@ -1,0 +1,19 @@
+{
+  "id": "chatcmpl-1",
+  "object": "chat.completion",
+  "model": "gpt-6.2-sol",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Mon: run 5k.",
+        "tool_calls": [
+          {"id": "toolu_1", "type": "function", "function": {"name": "calendar", "arguments": "{\"days\":3}"}}
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {"prompt_tokens": 12, "completion_tokens": 30, "total_tokens": 42}
+}
