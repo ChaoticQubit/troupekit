@@ -217,3 +217,26 @@ fn defaults_are_the_safe_values() {
     assert!(!s.follow_symlinks());
     assert!(s.skip_hidden());
 }
+
+#[cfg(unix)]
+#[test]
+fn non_regular_files_are_skipped_not_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "a.txt", b"a");
+    let status = std::process::Command::new("mkfifo").arg(dir.path().join("waiting.txt")).status().unwrap();
+    assert!(status.success());
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(walk(&root, &LoadSettings::default())).unwrap());
+    let walked = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("walk blocked on a FIFO").unwrap();
+    assert_eq!(sources(&walked), ["a.txt"]);
+    assert_eq!(walked.unsupported, 1);
+    let follow = LoadSettings::default().with_follow_symlinks(true);
+    std::os::unix::fs::symlink(dir.path().join("waiting.txt"), dir.path().join("link.md")).unwrap();
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(walk(&root, &follow)).unwrap());
+    let walked = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("walk blocked on a linked FIFO").unwrap();
+    assert_eq!(sources(&walked), ["a.txt"]);
+    assert_eq!(walked.unsupported, 2);
+}

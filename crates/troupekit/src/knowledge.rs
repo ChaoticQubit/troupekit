@@ -1,12 +1,15 @@
 //! Ingest a folder into a named vector index in the store file. Unchanged
-//! files are skipped by content hash, changed files are replaced whole and
-//! a file that fails is recorded and the walk goes on.
+//! files are skipped by content hash, changed files are replaced whole, a
+//! file that fails is recorded and the walk goes on, and the sources of
+//! files gone from the folder are removed.
 
+use std::collections::HashSet;
 use std::path::Path;
 use troupekit_context::chunk::ChunkConfig;
 use troupekit_context::embed::Embedder;
 use troupekit_context::ingest::{document_records, Document, Origin};
 use troupekit_context::load::{walk, LoadSettings};
+use troupekit_context::text::stable_hash;
 use troupekit_context::ContextError;
 use troupekit_core::clock::{Clock, SystemClock};
 use troupekit_store_sqlite::SqliteVectors;
@@ -18,7 +21,7 @@ const CHUNK_OVERLAP_TOKENS_DEFAULT: usize = 20;
 /// Settings for `ingest_dir`. Defaults: scope `docs`, chunks of 200
 /// tokens with 20 of overlap, the safe folder walk of `LoadSettings` and
 /// `Origin::External`, so folder text is fenced as untrusted in prompts.
-/// Built with `Default` and the `with_*` setters.
+/// A changed origin or chunk config re-ingests every file on the next run.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestSettings {
@@ -102,25 +105,27 @@ impl IngestSettings {
 }
 
 /// What one `ingest_dir` call did: files added, replaced and skipped as
-/// unchanged, files the walk passed over (`unsupported`, `symlinks`),
-/// failed files with their error, and the chunks written.
+/// unchanged, sources removed because their file is gone, files the walk
+/// passed over (`unsupported`, `symlinks`), failed files with their error,
+/// and the chunks written.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestReport {
     pub added: usize,
     pub replaced: usize,
     pub skipped: usize,
+    pub removed: usize,
     pub unsupported: usize,
     pub symlinks: usize,
     pub failed: Vec<(String, String)>,
     pub chunks: usize,
 }
 
-/// Ingests every loadable file under `dir` into `vectors`. A file whose
-/// hash matches its last successful ingest is skipped without embedding;
-/// any other is chunked, embedded and swapped in with `replace_source`.
+/// Ingests every loadable file under `dir` into `vectors`: unchanged
+/// files are skipped, others swapped in with `replace_source`, and after
+/// a complete walk the sources of the scope with no file are removed.
 /// Output: the report, or an error for a walk cap, a blank scope or a
-/// store that cannot record a failed file.
+/// store write that fails.
 pub async fn ingest_dir(vectors: &SqliteVectors, embedder: &dyn Embedder, dir: &Path, settings: &IngestSettings) -> Result<IngestReport, ContextError> {
     if settings.scope.trim().is_empty() {
         return Err(ContextError::Invalid("scope must not be empty".into()));
@@ -130,15 +135,18 @@ pub async fn ingest_dir(vectors: &SqliteVectors, embedder: &dyn Embedder, dir: &
         added: 0,
         replaced: 0,
         skipped: 0,
+        removed: 0,
         unsupported: walked.unsupported,
         symlinks: walked.symlinks,
         failed: Vec::new(),
         chunks: 0,
     };
     let at_ms = SystemClock.now_ms();
+    let present: HashSet<String> = walked.files.iter().map(|f| f.source.clone()).collect();
     for file in walked.files {
+        let ingest_hash = ingest_hash(&file.content_hash, settings);
         let previous = vectors.source_hash(&settings.scope, &file.source).await?;
-        if previous.as_deref() == Some(file.content_hash.as_str()) {
+        if previous.as_deref() == Some(ingest_hash.as_str()) {
             report.skipped += 1;
             continue;
         }
@@ -152,7 +160,7 @@ pub async fn ingest_dir(vectors: &SqliteVectors, embedder: &dyn Embedder, dir: &
         };
         let outcome = match document_records(embedder, &doc, &settings.chunk).await {
             Ok(records) => vectors
-                .replace_source(&settings.scope, &file.source, records, &file.content_hash)
+                .replace_source(&settings.scope, &file.source, records, &ingest_hash)
                 .await
                 .map_err(ContextError::from),
             Err(e) => Err(e),
@@ -173,7 +181,25 @@ pub async fn ingest_dir(vectors: &SqliteVectors, embedder: &dyn Embedder, dir: &
             }
         }
     }
+    for source in vectors.sources(&settings.scope).await? {
+        if !present.contains(&source) {
+            vectors.remove_source(&settings.scope, &source).await?;
+            report.removed += 1;
+        }
+    }
     let handled = report.added + report.replaced + report.skipped + report.failed.len();
     assert!(handled <= settings.load.max_files(), "more files handled than the walk allows");
     Ok(report)
+}
+
+/// Hash stored per source: the file's content hash together with the
+/// origin and chunk config its chunks were made with, so a settings
+/// change no longer matches and the file is ingested again.
+/// Input: the content hash and the settings. Output: 16 hex chars.
+fn ingest_hash(content_hash: &str, settings: &IngestSettings) -> String {
+    let max = settings.chunk.max_tokens.to_string();
+    let overlap = settings.chunk.overlap_tokens.to_string();
+    let hash = format!("{:016x}", stable_hash(&[content_hash, settings.origin.as_str(), &max, &overlap]));
+    assert_eq!(hash.len(), 16, "ingest hash is 16 hex chars");
+    hash
 }

@@ -169,8 +169,9 @@ pub struct LoadedFile {
 }
 
 /// The result of one walk: the loaded files sorted by `source`, the
-/// count of files with an unsupported extension and the count of
-/// symlinks not followed. Hidden entries are neither entered nor counted.
+/// count of entries skipped as unsupported (extension, or not a regular
+/// file such as a FIFO) and the count of symlinks not followed.
+/// Hidden entries are neither entered nor counted.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Walked {
@@ -205,14 +206,15 @@ pub fn walk(dir: &Path, settings: &LoadSettings) -> Result<Walked, ContextError>
                 continue;
             }
             let file_type = entry.file_type().map_err(|e| invalid(dir, &path, &e.to_string()))?;
-            let is_dir = if file_type.is_symlink() {
+            let (is_dir, is_file) = if file_type.is_symlink() {
                 if !settings.follow_symlinks {
                     walked.symlinks += 1;
                     continue;
                 }
-                fs::metadata(&path).map_err(|e| invalid(dir, &path, &e.to_string()))?.is_dir()
+                let target = fs::metadata(&path).map_err(|e| invalid(dir, &path, &e.to_string()))?;
+                (target.is_dir(), target.is_file())
             } else {
-                file_type.is_dir()
+                (file_type.is_dir(), file_type.is_file())
             };
             if is_dir {
                 if depth + 1 > settings.max_depth {
@@ -221,7 +223,7 @@ pub fn walk(dir: &Path, settings: &LoadSettings) -> Result<Walked, ContextError>
                 pending.push((path, depth + 1));
                 continue;
             }
-            let Some(ext) = extension(&path, settings) else {
+            let Some(ext) = extension(&path, settings).filter(|_| is_file) else {
                 walked.unsupported += 1;
                 continue;
             };
@@ -253,14 +255,21 @@ fn extension(path: &Path, settings: &LoadSettings) -> Option<String> {
 fn load_file(root: &Path, path: &Path, ext: &str, settings: &LoadSettings) -> Result<LoadedFile, ContextError> {
     let source = source_of(root, path)?;
     let fail = |why: String| ContextError::Invalid(format!("{source}: {why}"));
-    let size = fs::metadata(path).map_err(|e| fail(e.to_string()))?.len();
+    let checked = if settings.follow_symlinks { fs::metadata(path) } else { fs::symlink_metadata(path) }.map_err(|e| fail(e.to_string()))?;
+    if !checked.is_file() {
+        return Err(fail("not a regular file".into()));
+    }
+    let file = fs::File::open(path).map_err(|e| fail(e.to_string()))?;
+    let opened = file.metadata().map_err(|e| fail(e.to_string()))?;
+    if !opened.is_file() || !same_file(&checked, &opened) {
+        return Err(fail("changed between check and open".into()));
+    }
+    let size = opened.len();
     if size > settings.max_file_bytes {
         return Err(fail(format!("{size} bytes, over max_file_bytes {}", settings.max_file_bytes)));
     }
     let mut bytes = Vec::new();
-    fs::File::open(path)
-        .and_then(|f| f.take(settings.max_file_bytes.saturating_add(1)).read_to_end(&mut bytes))
-        .map_err(|e| fail(e.to_string()))?;
+    file.take(settings.max_file_bytes.saturating_add(1)).read_to_end(&mut bytes).map_err(|e| fail(e.to_string()))?;
     if bytes.len() as u64 > settings.max_file_bytes {
         return Err(fail(format!("grew over max_file_bytes {} while read", settings.max_file_bytes)));
     }
@@ -275,6 +284,23 @@ fn load_file(root: &Path, path: &Path, ext: &str, settings: &LoadSettings) -> Re
     let content_hash = format!("{:016x}", stable_hash(&[&text]));
     assert_eq!(content_hash.len(), 16, "hash is 16 hex chars");
     Ok(LoadedFile { source, text, content_hash })
+}
+
+/// Tells whether two metadata records name the same file: same device
+/// and inode on Unix, so a path swapped for a symlink after the check is
+/// refused. Input: the checked and the opened metadata. Output: the answer.
+#[cfg(unix)]
+fn same_file(checked: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    checked.dev() == opened.dev() && checked.ino() == opened.ino()
+}
+
+/// Tells whether two metadata records name the same file. Without inode
+/// numbers it compares length and modification time, the best std offers.
+/// Input: the checked and the opened metadata. Output: the answer.
+#[cfg(not(unix))]
+fn same_file(checked: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    checked.len() == opened.len() && checked.modified().ok() == opened.modified().ok()
 }
 
 /// Drops markdown front matter: a first line `---` up to the next line

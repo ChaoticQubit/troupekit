@@ -10,6 +10,7 @@ use troupekit_index::{new_index, HnswParams, IndexError, IndexKind, PageChange, 
 const NAME_BYTES_MAX: usize = 64;
 const ID_BYTES_MAX: usize = 256;
 const ERROR_BYTES_MAX: usize = 1024;
+const SNAPSHOT_TRIES: usize = 4;
 const HASH_BYTES_MAX: usize = 256;
 const MAX_TEXT_BYTES_DEFAULT: usize = 1024 * 1024;
 const MAX_META_PAIRS_DEFAULT: usize = 64;
@@ -339,21 +340,28 @@ impl SqliteStore {
                     }
                 };
                 assert_eq!(state.dims, settings.dims, "cached dims differ from the stored row");
-                {
-                    let mut cached = write_cached(&state);
-                    if cached.settings != settings {
-                        cached.settings = settings;
-                        cached.stale = true;
-                    }
-                    if kind_changed {
-                        cached.stale = true;
-                        rebuild_kind(&tx, &state, &mut cached)?;
-                    } else {
-                        reload_if_needed(&tx, &state, &mut cached)?;
-                    }
-                    assert!(!cached.stale, "an opened index is fresh");
+                let mut cached = write_cached(&state);
+                if cached.settings != settings {
+                    cached.settings = settings;
+                    cached.stale = true;
                 }
-                tx.commit().map_err(db)?;
+                let rebuilt_at = if kind_changed {
+                    cached.stale = true;
+                    Some(rebuild_kind(&tx, &state, &mut cached)?)
+                } else {
+                    reload_if_needed(&tx, &state, &mut cached)?;
+                    None
+                };
+                if let Err(e) = tx.commit() {
+                    cached.stale = true;
+                    return Err(db(e));
+                }
+                if let Some(generation) = rebuilt_at {
+                    cached.generation = generation;
+                    cached.stale = false;
+                }
+                assert!(!cached.stale, "an opened index is fresh");
+                drop(cached);
                 Ok(state)
             })
             .await?;
@@ -414,23 +422,14 @@ impl SqliteVectors {
                 let mut cached = write_cached(&state);
                 reload_if_needed(&tx, &state, &mut cached)?;
                 cached.stale = true;
-                let old: Vec<(i64, String)> = {
-                    let mut stmt = tx
-                        .prepare(
-                            "SELECT c.key, c.text FROM chunk c \
-                             JOIN chunk_meta s ON s.chunk_key = c.key AND s.key = ?2 AND s.value = ?3 \
-                             JOIN chunk_meta o ON o.chunk_key = c.key AND o.key = ?4 AND o.value = ?5 \
-                             WHERE c.index_name = ?1 ORDER BY c.key",
-                        )
-                        .map_err(db)?;
-                    let rows = stmt
-                        .query_map(params![state.name, SCOPE_KEY, scope, SOURCE_KEY, source], |row| Ok((row.get(0)?, row.get(1)?)))
-                        .map_err(db)?;
-                    rows.collect::<Result<_, _>>().map_err(db)?
-                };
-                for (key, text) in &old {
-                    delete_row(&tx, *key, text)?;
-                    cached.index.remove(to_id(*key)?);
+                delete_source_rows(&tx, &state, &mut cached, &scope, &source)?;
+                {
+                    let mut owned = tx.prepare_cached("SELECT 1 FROM chunk WHERE index_name = ?1 AND id = ?2").map_err(db)?;
+                    for record in &records {
+                        if owned.exists(params![state.name, record.id]).map_err(db)? {
+                            return Err(CoreError::Store(format!("record id {} belongs to another source", cut_utf8(&record.id, 64))));
+                        }
+                    }
                 }
                 let keys = write_rows(&tx, &state.name, &records)?;
                 for (key, record) in keys.iter().zip(&records) {
@@ -451,6 +450,56 @@ impl SqliteVectors {
                 cached.generation = generation;
                 cached.stale = false;
                 Ok(records.len())
+            })
+            .await
+    }
+
+    /// Lists every source of `scope` that has an ingest status row, done
+    /// or failed, sorted. Input: the scope. Output: the sources, so a
+    /// folder ingest can find the ones whose file is gone.
+    pub async fn sources(&self, scope: &str) -> Result<Vec<String>, CoreError> {
+        let state = Arc::clone(&self.state);
+        let scope = scope.to_string();
+        self.store
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT source FROM ingest_source WHERE index_name = ?1 AND scope = ?2 ORDER BY source")
+                    .map_err(db)?;
+                let rows = stmt.query_map(params![state.name, scope], |row| row.get(0)).map_err(db)?;
+                rows.collect::<Result<Vec<String>, _>>().map_err(db)
+            })
+            .await
+    }
+
+    /// Removes one source in one transaction: its chunk, meta and keyword
+    /// rows, its index entries and pages, and its ingest status row.
+    /// Input: the scope and source. Output: the chunks removed, 0 when
+    /// the source had none, or an error that removes nothing.
+    pub async fn remove_source(&self, scope: &str, source: &str) -> Result<usize, CoreError> {
+        let settings = read_cached(&self.state).settings.clone();
+        check_source(scope, source, &settings)?;
+        let state = Arc::clone(&self.state);
+        let scope = scope.to_string();
+        let source = source.to_string();
+        self.store
+            .call(move |conn| {
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db)?;
+                let mut cached = write_cached(&state);
+                reload_if_needed(&tx, &state, &mut cached)?;
+                cached.stale = true;
+                let removed = delete_source_rows(&tx, &state, &mut cached, &scope, &source)?;
+                let changes = cached.index.take_changes();
+                write_pages(&tx, &state.name, changes)?;
+                tx.execute(
+                    "DELETE FROM ingest_source WHERE index_name = ?1 AND scope = ?2 AND source = ?3",
+                    params![state.name, scope, source],
+                )
+                .map_err(db)?;
+                let generation = bump_generation(&tx, &state.name)?;
+                tx.commit().map_err(db)?;
+                cached.generation = generation;
+                cached.stale = false;
+                Ok(removed)
             })
             .await
     }
@@ -568,42 +617,84 @@ impl VectorStore for SqliteVectors {
         let pairs: Vec<(String, String)> = filter.0.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         self.store
             .call(move |conn| {
-                refresh(conn, &state)?;
-                let tx = conn.transaction().map_err(db)?;
-                let allowed = if pairs.is_empty() { None } else { Some(allowed_keys(&tx, &state.name, &pairs)?) };
-                if allowed.as_ref().is_some_and(HashSet::is_empty) {
-                    return Ok(Vec::new());
-                }
-                let neighbors = {
+                for _ in 0..SNAPSHOT_TRIES {
+                    let tx = conn.transaction().map_err(db)?;
+                    let generation = read_generation(&tx, &state.name)?;
                     let cached = read_cached(&state);
-                    let allow_fn = |id: u64| allowed.as_ref().is_none_or(|set| set.contains(&id));
-                    let allow: Option<&dyn Fn(u64) -> bool> = if allowed.is_some() { Some(&allow_fn) } else { None };
-                    cached.index.search(&query, k, allow).map_err(index_err)?
-                };
-                let mut stmt = tx
-                    .prepare_cached("SELECT id, text, meta_json FROM chunk WHERE key = ?1 AND index_name = ?2")
-                    .map_err(db)?;
-                let mut hits = Vec::with_capacity(neighbors.len());
-                for neighbor in &neighbors {
-                    let key = i64::try_from(neighbor.id).map_err(|_| CoreError::Store("index id out of range".into()))?;
-                    let row: Option<(String, String, String)> = stmt
-                        .query_row(params![key, state.name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                        .optional()
-                        .map_err(db)?;
-                    let Some((id, text, meta_json)) = row else {
+                    if state.cached.is_poisoned() || cached.stale || cached.generation != generation {
+                        drop(cached);
+                        drop(tx);
+                        refresh(conn, &state)?;
                         continue;
-                    };
-                    let meta: BTreeMap<String, String> =
-                        serde_json::from_str(&meta_json).map_err(|e| CoreError::Store(format!("corrupt store: chunk meta: {e}")))?;
-                    hits.push(Scored { id, score: neighbor.score, text, meta });
+                    }
+                    return search_snapshot(&tx, &state, &cached, &query, k, &pairs);
                 }
-                drop(stmt);
-                tx.commit().map_err(db)?;
-                assert!(hits.len() <= k, "search returned more than k hits");
-                Ok(hits)
+                Err(CoreError::Store(format!("index changed under {SNAPSHOT_TRIES} searches in a row; try again")))
             })
             .await
     }
+}
+
+/// Deletes every chunk of one source, with its meta and keyword rows,
+/// and removes the chunks from the cached index, inside the caller's
+/// write transaction. Input: the transaction, state, cache, scope and
+/// source. Output: the number of chunks deleted.
+fn delete_source_rows(tx: &Connection, state: &IndexState, cached: &mut Cached, scope: &str, source: &str) -> Result<usize, CoreError> {
+    assert!(cached.stale, "source rows change only under a stale cache");
+    let old: Vec<(i64, String)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT c.key, c.text FROM chunk c \
+                 JOIN chunk_meta s ON s.chunk_key = c.key AND s.key = ?2 AND s.value = ?3 \
+                 JOIN chunk_meta o ON o.chunk_key = c.key AND o.key = ?4 AND o.value = ?5 \
+                 WHERE c.index_name = ?1 ORDER BY c.key",
+            )
+            .map_err(db)?;
+        let rows = stmt
+            .query_map(params![state.name, SCOPE_KEY, scope, SOURCE_KEY, source], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(db)?;
+        rows.collect::<Result<_, _>>().map_err(db)?
+    };
+    for (key, text) in &old {
+        delete_row(tx, *key, text)?;
+        cached.index.remove(to_id(*key)?);
+    }
+    Ok(old.len())
+}
+
+/// Searches the cached index and reads the hits inside one read
+/// transaction whose generation matches the cache, so a hit's score and
+/// its text come from the same committed version. Input: the open
+/// transaction, the state, its matching cache, query, k and filter pairs.
+fn search_snapshot(tx: &rusqlite::Transaction<'_>, state: &IndexState, cached: &Cached, query: &[f32], k: usize, pairs: &[(String, String)]) -> Result<Vec<Scored>, CoreError> {
+    let allowed = if pairs.is_empty() { None } else { Some(allowed_keys(tx, &state.name, pairs)?) };
+    if allowed.as_ref().is_some_and(HashSet::is_empty) {
+        return Ok(Vec::new());
+    }
+    let neighbors = {
+        let allow_fn = |id: u64| allowed.as_ref().is_none_or(|set| set.contains(&id));
+        let allow: Option<&dyn Fn(u64) -> bool> = if allowed.is_some() { Some(&allow_fn) } else { None };
+        cached.index.search(query, k, allow).map_err(index_err)?
+    };
+    let mut stmt = tx
+        .prepare_cached("SELECT id, text, meta_json FROM chunk WHERE key = ?1 AND index_name = ?2")
+        .map_err(db)?;
+    let mut hits = Vec::with_capacity(neighbors.len());
+    for neighbor in &neighbors {
+        let key = i64::try_from(neighbor.id).map_err(|_| CoreError::Store("index id out of range".into()))?;
+        let row: Option<(String, String, String)> = stmt
+            .query_row(params![key, state.name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .optional()
+            .map_err(db)?;
+        let Some((id, text, meta_json)) = row else {
+            continue;
+        };
+        let meta: BTreeMap<String, String> =
+            serde_json::from_str(&meta_json).map_err(|e| CoreError::Store(format!("corrupt store: chunk meta: {e}")))?;
+        hits.push(Scored { id, score: neighbor.score, text, meta });
+    }
+    assert!(hits.len() <= k, "search returned more than k hits");
+    Ok(hits)
 }
 
 #[async_trait]
@@ -755,10 +846,10 @@ fn reload_if_needed(conn: &Connection, state: &IndexState, cached: &mut Cached) 
 }
 
 /// Rebuilds the index under the kind in `cached.settings`, rewrites all
-/// pages and stores the new kind, all in the caller's transaction.
-/// Input: a connection inside a write transaction. Output: `Ok` with
-/// `cached` fresh at the bumped generation.
-fn rebuild_kind(conn: &Connection, state: &IndexState, cached: &mut Cached) -> Result<(), CoreError> {
+/// pages and stores the new kind, all in the caller's transaction. The
+/// cache stays stale: the caller publishes the generation after commit.
+/// Input: a connection inside a write transaction. Output: the new generation.
+fn rebuild_kind(conn: &Connection, state: &IndexState, cached: &mut Cached) -> Result<i64, CoreError> {
     let kind = cached.settings.kind.clone();
     let index = build_from_file(conn, &kind, state.dims, cached.settings.quantization, &state.name)?;
     conn.execute(
@@ -770,10 +861,10 @@ fn rebuild_kind(conn: &Connection, state: &IndexState, cached: &mut Cached) -> R
     conn.execute("DELETE FROM index_page WHERE index_name = ?1", [&state.name]).map_err(db)?;
     let changes = cached.index.take_changes();
     write_pages(conn, &state.name, changes)?;
-    cached.generation = bump_generation(conn, &state.name)?;
-    cached.stale = false;
+    let generation = bump_generation(conn, &state.name)?;
+    assert!(cached.stale, "a rebuilt index stays stale until its commit");
     cached.report.loads += 1;
-    Ok(())
+    Ok(generation)
 }
 
 /// Builds a fresh index by inserting every stored vector of `name`.

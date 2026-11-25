@@ -291,6 +291,33 @@ async fn switching_kind_rebuilds_and_keeps_results() {
 }
 
 #[tokio::test]
+async fn failed_kind_switch_never_publishes_its_generation() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let brute = docs(&store).await;
+    brute.upsert(vec![rec("first", vec![1.0; DIMS], "t", &[])]).await.unwrap();
+    let before = count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'");
+    rusqlite::Connection::open(&t.path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_switch AFTER UPDATE OF generation ON vector_index WHEN NEW.kind = 'hnsw' \
+             BEGIN SELECT RAISE(ABORT, 'switch refused'); END;",
+        )
+        .unwrap();
+    let hnsw = VectorSettings::new(DIMS).with_kind(IndexKind::Hnsw(HnswParams::default()));
+    assert!(store.vectors("docs", hnsw).await.is_err());
+    assert_eq!(count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'"), before);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM vector_index WHERE kind = 'brute_force'"), 1);
+    let other = SqliteStore::open(&t.path).await.unwrap();
+    let mut second = vec![0.0; DIMS];
+    second[0] = 1.0;
+    docs(&other).await.upsert(vec![rec("second", second.clone(), "t", &[])]).await.unwrap();
+    assert_eq!(count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'"), before + 1);
+    assert_eq!(brute.len().await.unwrap(), 2);
+    assert_eq!(ids(&brute.search(&second, 1, &filter(&[])).await.unwrap()), ["second"]);
+}
+
+#[tokio::test]
 async fn replace_source_drops_orphans() {
     let t = temp();
     let store = SqliteStore::open(&t.path).await.unwrap();
@@ -313,6 +340,54 @@ async fn replace_source_drops_orphans() {
     assert_eq!(vectors.source_hash("docs", "b.md").await.unwrap().as_deref(), Some("hb"));
     assert_eq!(vectors.source_hash("docs", "c.md").await.unwrap(), None);
     assert_eq!(count(&t.path, "SELECT chunks FROM ingest_source WHERE source = 'a.md'"), 1);
+}
+
+#[tokio::test]
+async fn replace_source_refuses_an_id_owned_by_another_source() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let vectors = docs(&store).await;
+    let mut rng = Rng(21);
+    vectors.replace_source("docs", "a.md", vec![sourced("intro", &mut rng, "docs", "a.md")], "ha").await.unwrap();
+    let before = count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'");
+    let stolen = vec![sourced("b0", &mut rng, "docs", "b.md"), sourced("intro", &mut rng, "docs", "b.md")];
+    store_error(vectors.replace_source("docs", "b.md", stolen, "hb").await, "intro");
+    assert_eq!(count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'"), before);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk"), 1);
+    assert_eq!(vectors.source_hash("docs", "b.md").await.unwrap(), None);
+    let hits = vectors.search(&rng.vector(DIMS), 10, &filter(&[("source", "a.md")])).await.unwrap();
+    assert_eq!(ids(&hits), ["intro"]);
+    assert_eq!(vectors.len().await.unwrap(), 1);
+    let own = vec![sourced("intro", &mut rng, "docs", "a.md")];
+    assert_eq!(vectors.replace_source("docs", "a.md", own, "ha2").await.unwrap(), 1);
+    assert_eq!(vectors.source_hash("docs", "a.md").await.unwrap().as_deref(), Some("ha2"));
+}
+
+#[tokio::test]
+async fn remove_source_drops_rows_keywords_index_and_status() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let vectors = docs(&store).await;
+    let mut rng = Rng(23);
+    let a: Vec<VectorRecord> = (0..3).map(|i| sourced(&format!("a{i}"), &mut rng, "docs", "a.md")).collect();
+    vectors.replace_source("docs", "a.md", a, "ha").await.unwrap();
+    vectors.replace_source("docs", "b.md", vec![sourced("b0", &mut rng, "docs", "b.md")], "hb").await.unwrap();
+    vectors.record_failed_source("docs", "c.md", "bad bytes").await.unwrap();
+    assert_eq!(vectors.sources("docs").await.unwrap(), ["a.md", "b.md", "c.md"]);
+    assert!(vectors.sources("other").await.unwrap().is_empty());
+    assert_eq!(vectors.remove_source("docs", "a.md").await.unwrap(), 3);
+    assert_eq!(vectors.remove_source("docs", "c.md").await.unwrap(), 0);
+    assert_eq!(vectors.sources("docs").await.unwrap(), ["b.md"]);
+    assert_eq!(vectors.source_hash("docs", "a.md").await.unwrap(), None);
+    assert_eq!(vectors.len().await.unwrap(), 1);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk"), 1);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk_fts_docsize"), 1);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk_meta"), 2);
+    assert_eq!(ids(&vectors.search(&rng.vector(DIMS), 10, &filter(&[])).await.unwrap()), ["b0"]);
+    let other = SqliteStore::open(&t.path).await.unwrap();
+    assert_eq!(docs(&other).await.len().await.unwrap(), 1);
+    assert_eq!(vectors.remove_source("docs", "missing.md").await.unwrap(), 0);
+    store_error(vectors.remove_source(" ", "a.md").await, "scope");
 }
 
 #[tokio::test]
@@ -397,6 +472,34 @@ async fn filter_values_are_bound_not_spliced() {
     assert!(hits.is_empty());
     let hits = vectors.search(&[1.0; DIMS], 10, &filter(&[("tenant", "a")])).await.unwrap();
     assert_eq!(ids(&hits), ["tenant_a"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_never_mixes_two_versions_of_a_chunk() {
+    let t = temp();
+    let reader = SqliteStore::open(&t.path).await.unwrap();
+    let writer = SqliteStore::open(&t.path).await.unwrap();
+    let read = docs(&reader).await;
+    let write = docs(&writer).await;
+    let mut one = vec![0.0; DIMS];
+    one[0] = 1.0;
+    let mut two = vec![0.0; DIMS];
+    two[1] = 1.0;
+    write.upsert(vec![rec("x", one.clone(), "one", &[])]).await.unwrap();
+    let flips = async {
+        for i in 0..300 {
+            let (vector, text) = if i % 2 == 0 { (two.clone(), "two") } else { (one.clone(), "one") };
+            write.upsert(vec![rec("x", vector, text, &[])]).await.unwrap();
+        }
+    };
+    let searches = async {
+        for _ in 0..300 {
+            for hit in read.search(&one, 1, &filter(&[])).await.unwrap() {
+                assert_eq!(hit.text == "one", hit.score > 0.5, "text {} came with score {}", hit.text, hit.score);
+            }
+        }
+    };
+    tokio::join!(flips, searches);
 }
 
 #[tokio::test]

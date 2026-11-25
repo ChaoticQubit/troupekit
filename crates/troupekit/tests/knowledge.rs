@@ -5,7 +5,7 @@ use troupekit::context::embed::{Embedder, HashingEmbedder};
 use troupekit::context::ingest::{Origin, META_ORIGIN, META_SCOPE, META_SOURCE};
 use troupekit::context::load::LoadSettings;
 use troupekit::context::ContextError;
-use troupekit::core::store::{Filter, VectorStore};
+use troupekit::core::store::{Filter, KeywordStore, VectorStore};
 use troupekit::knowledge::{ingest_dir, IngestSettings};
 use troupekit::{SqliteStore, SqliteVectors, VectorSettings};
 
@@ -175,6 +175,48 @@ async fn replace_source_keys_match_ingest_meta() {
     let report = ingest_dir(&k.vectors, &embedder, &k.folder(), &settings).await.unwrap();
     assert_eq!(report.replaced, 1);
     assert_eq!(k.vectors.len().await.unwrap(), 1, "replace_source found every chunk ingest wrote");
+}
+
+#[tokio::test]
+async fn changed_origin_or_chunk_settings_reingest_unchanged_files() {
+    let k = kit().await;
+    k.write("a.md", &long_text(60));
+    let embedder = Counting::new();
+    let internal = small_chunks().with_origin(Origin::Internal);
+    assert_eq!(ingest_dir(&k.vectors, &embedder, &k.folder(), &internal).await.unwrap().added, 1);
+    assert_eq!(ingest_dir(&k.vectors, &embedder, &k.folder(), &internal).await.unwrap().skipped, 1);
+    let external = small_chunks();
+    let report = ingest_dir(&k.vectors, &embedder, &k.folder(), &external).await.unwrap();
+    assert_eq!((report.replaced, report.skipped), (1, 0), "an origin change re-ingests");
+    let hits = k.vectors.search(&[1.0; DIMS], 1_000, &Filter::default()).await.unwrap();
+    assert!(hits.iter().all(|h| h.meta.get(META_ORIGIN).map(String::as_str) == Some("external")));
+    let small = hits.len();
+    let bigger = external.clone().with_chunk(ChunkConfig { max_tokens: 40, overlap_tokens: 4 });
+    let report = ingest_dir(&k.vectors, &embedder, &k.folder(), &bigger).await.unwrap();
+    assert_eq!((report.replaced, report.skipped), (1, 0), "a chunk change re-ingests");
+    assert!(k.vectors.len().await.unwrap() < small);
+    assert_eq!(ingest_dir(&k.vectors, &embedder, &k.folder(), &bigger).await.unwrap().skipped, 1);
+}
+
+#[tokio::test]
+async fn deleted_file_leaves_the_index() {
+    let k = kit().await;
+    k.write("keep.md", "Shipping takes two days.");
+    k.write("internal-pricing.md", "Secret margin is forty percent.");
+    let embedder = Counting::new();
+    ingest_dir(&k.vectors, &embedder, &k.folder(), &IngestSettings::default()).await.unwrap();
+    std::fs::remove_file(k.folder().join("internal-pricing.md")).unwrap();
+    let report = ingest_dir(&k.vectors, &embedder, &k.folder(), &IngestSettings::default()).await.unwrap();
+    assert_eq!((report.removed, report.skipped), (1, 1));
+    assert!(k.source_chunks("internal-pricing.md").await.is_empty());
+    let keyword = k.vectors.search_text("margin", 10, &Filter::default()).await.unwrap();
+    assert!(keyword.is_empty(), "{keyword:?}");
+    assert_eq!(k.vectors.source_hash("docs", "internal-pricing.md").await.unwrap(), None);
+    assert_eq!(k.vectors.sources("docs").await.unwrap(), ["keep.md"]);
+    k.write("a.txt", "one");
+    let capped = IngestSettings::default().with_load(LoadSettings::default().with_max_files(1));
+    assert!(ingest_dir(&k.vectors, &embedder, &k.folder(), &capped).await.is_err());
+    assert_eq!(k.vectors.sources("docs").await.unwrap(), ["keep.md"], "a walk cap error removes nothing");
 }
 
 #[tokio::test]

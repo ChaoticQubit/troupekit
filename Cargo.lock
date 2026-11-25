@@ -2783,6 +2783,7 @@ name = "troupekit-cli"
 version = "0.1.0"
 dependencies = [
  "tempfile",
+ "tokio",
  "troupekit",
  "troupekit-providers",
 ]

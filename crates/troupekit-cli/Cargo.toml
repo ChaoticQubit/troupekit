@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 troupekit = { path = "../troupekit", version = "0.1.0", features = ["knowledge"] }
 troupekit-providers = { path = "../troupekit-providers", version = "0.1.0", features = ["embeddings", "reqwest"] }
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3"

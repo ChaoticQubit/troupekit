@@ -29,24 +29,61 @@ impl Rng {
     }
 }
 
+pub fn gaussian(rng: &mut Rng) -> f32 {
+    let u1 = ((rng.next_u64() >> 11) + 1) as f64 / (1u64 << 53) as f64;
+    let u2 = (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+    ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
+}
+
+pub fn normalize(v: Vec<f32>) -> Vec<f32> {
+    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if n == 0.0 {
+        return v;
+    }
+    v.into_iter().map(|x| x / n).collect()
+}
+
+pub fn clustered(seed: u64, n: usize, dims: usize, clusters: usize, spread: f32) -> Vec<Vec<f32>> {
+    let mut rng = Rng::new(seed);
+    let centres: Vec<Vec<f32>> = (0..clusters).map(|_| normalize((0..dims).map(|_| gaussian(&mut rng)).collect())).collect();
+    (0..n)
+        .map(|_| {
+            let c = &centres[(rng.next_u64() % clusters as u64) as usize];
+            normalize(c.iter().map(|x| x + spread * gaussian(&mut rng)).collect())
+        })
+        .collect()
+}
+
+pub fn recall_at_10(index: &dyn VectorIndex, oracle: &dyn VectorIndex, queries: &[Vec<f32>]) -> f64 {
+    let mut found = 0usize;
+    let mut total = 0usize;
+    for q in queries {
+        let want: Vec<u64> = ids(&oracle.search(q, 10, None).unwrap());
+        let got: Vec<u64> = ids(&index.search(q, 10, None).unwrap());
+        total += want.len();
+        found += got.iter().filter(|id| want.contains(id)).count();
+    }
+    found as f64 / total.max(1) as f64
+}
+
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let dot: f64 = a.iter().zip(b).map(|(&x, &y)| f64::from(x) * f64::from(y)).sum();
+    let na = a.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>().sqrt();
+    let nb = b.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>().sqrt();
     if na == 0.0 || nb == 0.0 {
         return 0.0;
     }
-    dot / (na * nb)
+    (dot / (na * nb)) as f32
 }
 
 pub fn exact(items: &[(u64, Vec<f32>)], query: &[f32], k: usize, allow: &dyn Fn(u64) -> bool) -> Vec<Neighbor> {
-    let mut all: Vec<Neighbor> = items.iter().filter(|(id, _)| allow(*id)).map(|(id, v)| Neighbor { id: *id, score: cosine(query, v) }).collect();
+    let mut all: Vec<Neighbor> = items.iter().filter(|(id, _)| allow(*id)).map(|(id, v)| Neighbor::new(*id, cosine(query, v))).collect();
     all.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
     all.truncate(k);
     all
 }
 
-fn ids(hits: &[Neighbor]) -> Vec<u64> {
+pub fn ids(hits: &[Neighbor]) -> Vec<u64> {
     hits.iter().map(|n| n.id).collect()
 }
 
@@ -142,9 +179,35 @@ pub fn case_zero_vector_scores_zero(new: Factory) {
     index.insert(1, &[0.0, 0.0, 0.0]).unwrap();
     index.insert(2, &[1.0, 1.0, 0.0]).unwrap();
     let got = index.search(&[0.0, 0.0, 0.0], 2, None).unwrap();
-    assert_eq!(got, vec![Neighbor { id: 1, score: 0.0 }, Neighbor { id: 2, score: 0.0 }]);
+    assert_eq!(got, vec![Neighbor::new(1, 0.0), Neighbor::new(2, 0.0)]);
     let got = index.search(&[1.0, 0.0, 0.0], 2, None).unwrap();
-    assert_eq!(got[1], Neighbor { id: 1, score: 0.0 });
+    assert_eq!(got[1], Neighbor::new(1, 0.0));
+}
+
+pub fn case_large_components_do_not_overflow(new: Factory) {
+    let mut index = new(2);
+    index.insert(1, &[1e20, 0.0]).unwrap();
+    index.insert(2, &[1.0, 1.0]).unwrap();
+    let got = index.search(&[1.0, 0.0], 1, None).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].id, 1);
+    assert!((got[0].score - 1.0).abs() < 1e-6, "{:?}", got[0]);
+    let got = index.search(&[3e38, 3e38], 2, None).unwrap();
+    assert!(got.iter().all(|n| n.score.is_finite()), "{got:?}");
+    assert_eq!(got[0].id, 2);
+}
+
+pub fn case_stateful_allow_is_called_safely(new: Factory) {
+    let mut rng = Rng::new(17);
+    let mut index = new(8);
+    for id in 0..200 {
+        index.insert(id, &rng.vector(8)).unwrap();
+    }
+    let seen = std::cell::RefCell::new(std::collections::HashSet::new());
+    let first_call_only = |id: u64| seen.borrow_mut().insert(id);
+    let got = index.search(&rng.vector(8), 10, Some(&first_call_only)).unwrap();
+    assert!(got.len() <= 10);
+    assert!(!got.is_empty());
 }
 
 pub fn contract(new: Factory) {
@@ -155,6 +218,8 @@ pub fn contract(new: Factory) {
     case_dimension_mismatch(new);
     case_rejects_nan_and_big_k(new);
     case_zero_vector_scores_zero(new);
+    case_large_components_do_not_overflow(new);
+    case_stateful_allow_is_called_safely(new);
 }
 
 #[test]
@@ -237,4 +302,40 @@ fn brute_force_restore_takes_vectors_and_refuses_pages() {
 #[test]
 fn brute_force_contract() {
     contract(brute);
+}
+
+#[test]
+fn large_finite_components_do_not_overflow() {
+    case_large_components_do_not_overflow(brute);
+}
+
+#[test]
+fn constructors_never_panic_on_caller_input() {
+    let kinds = [IndexKind::BruteForce, IndexKind::Hnsw(HnswParams::default()), IndexKind::Hnsw(HnswParams::default().with_m(0).with_ef_search(0))];
+    for kind in &kinds {
+        for quant in [Quantization::F32, Quantization::F16, Quantization::I8] {
+            for dims in [0, 1, MAX_DIMS, MAX_DIMS + 1, usize::MAX] {
+                let valid_params = !matches!(kind, IndexKind::Hnsw(p) if p.m() == 0);
+                match new_index(kind, dims, quant) {
+                    Ok(index) => {
+                        assert!(valid_params && (1..=MAX_DIMS).contains(&dims));
+                        assert_eq!(index.dims(), dims);
+                    }
+                    Err(e) => assert!(matches!(e, IndexError::Invalid(_)), "{e:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn neighbor_new_sets_fields() {
+    let n = Neighbor::new(7, 0.5);
+    assert_eq!((n.id, n.score), (7, 0.5));
+    assert_eq!(n, Neighbor::new(7, 0.5));
+}
+
+#[test]
+fn stateful_allow_filter_never_panics() {
+    case_stateful_allow_is_called_safely(brute);
 }
