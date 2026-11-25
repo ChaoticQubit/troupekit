@@ -98,3 +98,14 @@ fn brute_force_contract_holds_for_f16_and_i8() {
         assert!(recall >= 0.99, "{quant:?} recall@10 {recall}");
     }
 }
+
+#[test]
+fn i8_max_magnitude_stays_finite() {
+    let mut q8 = index(3, Quantization::I8);
+    q8.insert(1, &[f32::MAX, 0.0, -f32::MAX]).unwrap();
+    q8.insert(2, &[0.0, 1.0, 0.0]).unwrap();
+    let got = q8.search(&[1.0, 0.0, -1.0], 2, None).unwrap();
+    assert!(got.iter().all(|n| n.score.is_finite()), "{got:?}");
+    assert_eq!(got[0].id, 1);
+    assert!((got[0].score - 1.0).abs() < 1e-3, "{:?}", got[0]);
+}

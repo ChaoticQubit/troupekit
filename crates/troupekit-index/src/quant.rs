@@ -70,9 +70,9 @@ fn encode_i8(v: &[f32], codes: &mut Vec<i8>) -> f32 {
         codes.extend(std::iter::repeat_n(0i8, v.len()));
         return 0.0;
     }
-    let scale = max_abs / 127.0;
-    codes.extend(v.iter().map(|x| (x / scale).round().clamp(-127.0, 127.0) as i8));
-    scale
+    let scale = f64::from(max_abs) / 127.0;
+    codes.extend(v.iter().map(|&x| (f64::from(x) / scale).round().clamp(-127.0, 127.0) as i8));
+    scale as f32
 }
 
 /// Vector slots in one in-memory format, `dims` values per slot.
@@ -173,9 +173,10 @@ impl Slots {
                 buf
             }
             Slots::I8 { codes, scales } => {
-                let s = scales[i];
+                let s = f64::from(scales[i]);
                 buf.clear();
-                buf.extend(codes[range].iter().map(|&c| f32::from(c) * s));
+                let max = f64::from(f32::MAX);
+                buf.extend(codes[range].iter().map(|&c| (f64::from(c) * s).clamp(-max, max) as f32));
                 buf
             }
         }
