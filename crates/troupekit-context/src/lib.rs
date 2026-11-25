@@ -8,6 +8,7 @@ pub mod embed;
 pub mod error;
 pub mod facts;
 pub mod ingest;
+pub mod load;
 pub mod memory;
 #[cfg(feature = "onnx")]
 pub mod onnx;
