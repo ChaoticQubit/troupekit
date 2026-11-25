@@ -173,14 +173,17 @@ impl Hnsw {
         out
     }
 
-    /// Picks at most `cap` links for a node from candidates sorted best
-    /// first, by the paper's heuristic: keep a candidate only when it is
-    /// closer to the base than to every link already kept.
-    fn select(&self, sorted: &[Cand], cap: usize) -> Vec<u32> {
+    /// Picks at most `cap` links for a node by the paper's heuristic: a
+    /// candidate is kept when it is closer to the base than to every kept
+    /// link, then pruned ones fill the free slots, so equal vectors stay linked.
+    fn select(&self, candidates: &[Cand], cap: usize) -> Vec<u32> {
+        let mut sorted: Vec<Cand> = candidates.to_vec();
+        sorted.sort_by(|x, y| y.rank.0.score.total_cmp(&x.rank.0.score).then_with(|| y.slot.cmp(&x.slot)));
         let mut kept: Vec<u32> = Vec::with_capacity(cap);
+        let mut pruned: Vec<u32> = Vec::new();
         let mut a = Vec::with_capacity(self.dims);
         let mut b = Vec::with_capacity(self.dims);
-        for c in sorted {
+        for c in &sorted {
             if kept.len() >= cap {
                 break;
             }
@@ -192,7 +195,15 @@ impl Hnsw {
             });
             if diverse {
                 kept.push(c.slot);
+            } else {
+                pruned.push(c.slot);
             }
+        }
+        for p in pruned {
+            if kept.len() >= cap {
+                break;
+            }
+            kept.push(p);
         }
         assert!(kept.len() <= cap, "selected more links than the cap");
         kept

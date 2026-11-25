@@ -172,3 +172,19 @@ fn hnsw_params_out_of_range_are_invalid() {
         assert!(matches!(new_index(&IndexKind::Hnsw(p), 4, Quantization::F32), Err(troupekit_index::IndexError::Invalid(_))));
     }
 }
+
+#[test]
+fn equal_vectors_stay_reachable_after_pruning() {
+    for n in [6u64, 40] {
+        let mut index = hnsw_with(2, HnswParams::default().with_m(2));
+        for id in 0..n {
+            index.insert(id, &[1.0, 0.0]).unwrap();
+        }
+        for id in 0..n {
+            let only = move |x: u64| x == id;
+            let got = index.search(&[1.0, 0.0], 1, Some(&only)).unwrap();
+            assert_eq!(got.len(), 1, "n {n}: id {id} unreachable");
+            assert_eq!(got[0].id, id);
+        }
+    }
+}
