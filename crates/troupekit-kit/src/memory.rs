@@ -1,20 +1,17 @@
 use crate::agent::Agent;
 use crate::error::KitError;
-use crate::knowledge::{ingest_dir, IngestSettings, Knowledge};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use troupekit_context::embed::{Embedder, HashingEmbedder};
 use troupekit_context::tools::{
-    KnowledgeKit, FORGET_FACT, READ_SESSION_SUMMARY, RECALL_FACTS, REMEMBER_FACT, SEARCH_KNOWLEDGE,
+    KnowledgeKit, FORGET_FACT, READ_SESSION_SUMMARY, RECALL_FACTS, REMEMBER_FACT,
     UPDATE_SESSION_SUMMARY,
 };
 use troupekit_core::message::{ContentPart, Message, Role};
-use troupekit_store_sqlite::{SqliteStore, SqliteVectors, VectorSettings};
+use troupekit_store_sqlite::{SqliteStore, VectorSettings};
 
-const DEFAULT_STORE: &str = "troupekit.db";
 const PLACEHOLDER_INDEX: &str = "troupekit_memory";
 const PLACEHOLDER_DIMS: usize = 8;
-const KNOWLEDGE_ONLY_IDENTITY: &str = "knowledge";
 const MEMORY_TOOLS: [&str; 5] = [
     REMEMBER_FACT,
     FORGET_FACT,
@@ -54,8 +51,8 @@ impl AgentMemory {
         }
     }
 
-    /// Sets the SQLite file facts and summaries live in. Required in 0.2
-    /// unless the agent also has `.knowledge(..)`, whose store is used.
+    /// Sets the SQLite file facts and summaries live in.
+    /// Required in 0.2; `build` fails without it.
     /// Returns the memory settings.
     pub fn sqlite(mut self, path: impl AsRef<Path>) -> Self {
         self.sqlite = Some(path.as_ref().to_path_buf());
@@ -96,116 +93,43 @@ impl AgentMemory {
 }
 
 pub(crate) async fn attach(mut agent: Agent) -> Result<(Agent, Option<KnowledgeKit>), KitError> {
-    let memory = agent.memory.take();
-    let knowledge = agent.knowledge.take();
-    if memory.is_none() && knowledge.is_none() {
+    let Some(memory) = agent.memory.take() else {
         return Ok((agent, None));
-    }
-    let name = agent.name().to_string();
-    let mut tools: Vec<&str> = Vec::with_capacity(MEMORY_TOOLS.len() + 1);
-    let found = match &knowledge {
-        Some(k) => {
-            let store_path = k
-                .store
-                .clone()
-                .or_else(|| agent.storage.sqlite_path().map(Path::to_path_buf))
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_STORE));
-            tools.push(SEARCH_KNOWLEDGE);
-            Some((open_knowledge(&name, k, &store_path).await?, store_path))
-        }
-        None => None,
     };
-    let memory_store = match (&memory, &found) {
-        (Some(m), _) if m.sqlite.is_some() => {
-            let path = m.sqlite.as_ref().expect("checked by the guard");
-            match &found {
-                Some((opened, store_path)) if store_path == path => opened.store.clone(),
-                _ => SqliteStore::open(path).await?,
-            }
-        }
-        (Some(_), Some((opened, _))) | (None, Some((opened, _))) => opened.store.clone(),
-        (Some(_), None) => {
-            return Err(KitError::config(
-                &name,
-                "memory needs a SQLite file: call AgentMemory::sqlite(..)",
-            ));
-        }
-        (None, None) => unreachable!("returned early without memory or knowledge"),
+    let Some(path) = memory.sqlite.as_ref() else {
+        return Err(KitError::config(
+            agent.name(),
+            "memory needs a SQLite file: call AgentMemory::sqlite(..)",
+        ));
     };
-    let (vectors, embedder, scope) = match found {
-        Some((opened, _)) => (opened.vectors, opened.embedder, opened.scope),
-        None => {
-            let vectors = memory_store
-                .vectors(PLACEHOLDER_INDEX, VectorSettings::new(PLACEHOLDER_DIMS))
-                .await?;
-            let embedder: Arc<dyn Embedder> = Arc::new(HashingEmbedder::new(PLACEHOLDER_DIMS));
-            (Arc::new(vectors), embedder, PLACEHOLDER_INDEX.to_string())
-        }
-    };
-    let (subject, session) = match &memory {
-        Some(m) => {
-            tools.extend(MEMORY_TOOLS);
-            (m.user.clone(), m.session.clone())
-        }
-        None => (
-            KNOWLEDGE_ONLY_IDENTITY.to_string(),
-            KNOWLEDGE_ONLY_IDENTITY.to_string(),
-        ),
-    };
-    let store = Arc::new(memory_store);
-    let mut builder = KnowledgeKit::builder(subject, session)
+    let store = SqliteStore::open(path).await?;
+    let vectors = Arc::new(
+        store
+            .vectors(PLACEHOLDER_INDEX, VectorSettings::new(PLACEHOLDER_DIMS))
+            .await?,
+    );
+    let embedder: Arc<dyn Embedder> = Arc::new(HashingEmbedder::new(PLACEHOLDER_DIMS));
+    let store = Arc::new(store);
+    let mut builder = KnowledgeKit::builder(memory.user.clone(), memory.session.clone())
         .vectors(vectors.clone())
         .keywords(vectors)
         .embedder(embedder)
         .log(store.clone())
         .blobs(store)
-        .scopes([scope])
-        .tools(tools);
-    if let Some(m) = &memory {
-        if let Some((bytes, facts, log)) = m.fact_caps {
-            builder = builder.fact_caps(bytes, facts, log);
-        }
-        if let Some(bytes) = m.max_summary_bytes {
-            builder = builder.max_summary_bytes(bytes);
-        }
-        if let Some(tokens) = m.preamble_budget_tokens {
-            builder = builder.preamble_budget_tokens(tokens);
-        }
+        .scopes([PLACEHOLDER_INDEX])
+        .tools(MEMORY_TOOLS);
+    if let Some((bytes, facts, log)) = memory.fact_caps {
+        builder = builder.fact_caps(bytes, facts, log);
+    }
+    if let Some(bytes) = memory.max_summary_bytes {
+        builder = builder.max_summary_bytes(bytes);
+    }
+    if let Some(tokens) = memory.preamble_budget_tokens {
+        builder = builder.preamble_budget_tokens(tokens);
     }
     let kit = builder.build()?;
-    let preamble = memory.filter(|m| m.preamble).map(|_| kit.clone());
+    let preamble = memory.preamble.then(|| kit.clone());
     Ok((agent.toolkit(kit.toolkit()), preamble))
-}
-
-struct Opened {
-    store: SqliteStore,
-    vectors: Arc<SqliteVectors>,
-    embedder: Arc<dyn Embedder>,
-    scope: String,
-}
-
-async fn open_knowledge(name: &str, k: &Knowledge, path: &Path) -> Result<Opened, KitError> {
-    let Some(embedder) = k.embedder.clone() else {
-        return Err(KitError::config(
-            name,
-            "knowledge needs an embedder: call Knowledge::embedder(..)",
-        ));
-    };
-    let store = SqliteStore::open(path).await?;
-    let vectors = store
-        .vectors(&k.index, VectorSettings::new(embedder.dims()))
-        .await?;
-    let settings = IngestSettings::default()
-        .with_scope(k.index.clone())
-        .with_chunk(k.chunk)
-        .with_load(k.load.clone());
-    ingest_dir(&vectors, embedder.as_ref(), &k.dir, &settings).await?;
-    Ok(Opened {
-        store,
-        vectors: Arc::new(vectors),
-        embedder,
-        scope: k.index.clone(),
-    })
 }
 
 pub(crate) async fn prepend(

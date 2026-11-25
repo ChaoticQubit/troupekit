@@ -4,8 +4,6 @@ mod agent;
 mod common;
 mod graph;
 #[cfg(feature = "knowledge")]
-mod knowledge;
-#[cfg(feature = "knowledge")]
 mod memory;
 mod laws;
 mod lines;
