@@ -31,10 +31,8 @@ pub struct FnItem {
     pub ident_span: SpanId,
     pub generics: Option<SpanId>,
     pub params: Vec<Tok>,
-    pub params_span: SpanId,
     pub ret: Vec<Tok>,
     pub where_span: Option<SpanId>,
-    pub body: Vec<Tok>,
     pub body_span: SpanId,
 }
 
@@ -108,11 +106,11 @@ pub fn parse_fn(item: &[Tok], what: &str) -> Result<FnItem, Error> {
             }
         }
     }
-    let Some(Tok::Group(Delim::Paren, params, params_span)) = item.get(pos) else {
+    let Some(Tok::Group(Delim::Paren, params, _)) = item.get(pos) else {
         return Err(not_fn(item.get(pos)));
     };
     pos += 1;
-    let Some(Tok::Group(Delim::Brace, body, body_span)) = item.last() else {
+    let Some(Tok::Group(Delim::Brace, _, body_span)) = item.last() else {
         return Err(not_fn(item.last()));
     };
     let rest = &item[pos..item.len() - 1];
@@ -133,10 +131,8 @@ pub fn parse_fn(item: &[Tok], what: &str) -> Result<FnItem, Error> {
         ident_span: *ident_span,
         generics,
         params: params.clone(),
-        params_span: *params_span,
         ret,
         where_span: where_at.map(|i| rest[i].span()),
-        body: body.clone(),
         body_span: *body_span,
     })
 }

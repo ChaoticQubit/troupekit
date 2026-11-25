@@ -17,6 +17,7 @@ pub use laws::Laws;
 pub use output::{IntoToolOutput, Json};
 pub use storage::Storage;
 pub use tool::{tool, AsTool};
+pub use troupekit_macros::tool;
 
 /// The names most programs need, for `use troupekit::prelude::*;`.
 /// Builder, built agent, outcome, storage, laws, errors and tools.
@@ -26,4 +27,3 @@ pub mod prelude {
 }
 
 use troupekit_graph as _;
-use troupekit_macros as _;

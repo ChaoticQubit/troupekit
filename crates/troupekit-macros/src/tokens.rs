@@ -1,4 +1,4 @@
-use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Span, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, Ident, Literal, Punct, TokenStream, TokenTree};
 
 /// Index of one original token tree in a `Source`.
 /// Parsed tokens carry it so errors and re-emitted user code keep the
@@ -100,13 +100,20 @@ pub struct Source {
     trees: Vec<TokenTree>,
 }
 
-/// Converts the compiler tokens `stream` into `Tok`s and their `Source`.
-/// Every tree, nested ones included, gets its own `SpanId`.
-/// Returns the top-level tokens in order.
-pub fn from_proc(stream: TokenStream) -> (Vec<Tok>, Source) {
-    let mut source = Source { trees: Vec::new() };
-    let toks = convert(stream, &mut source);
-    (toks, source)
+impl Source {
+    /// Starts an empty source for one macro call.
+    /// Add the attribute and the item to the same source so their
+    /// `SpanId`s never collide.
+    pub fn new() -> Self {
+        Source { trees: Vec::new() }
+    }
+
+    /// Converts the compiler tokens `stream` into `Tok`s, recording every
+    /// tree, nested ones included, under its own `SpanId`.
+    /// Returns the top-level tokens in order.
+    pub fn add(&mut self, stream: TokenStream) -> Vec<Tok> {
+        convert(stream, self)
+    }
 }
 
 fn convert(stream: TokenStream, source: &mut Source) -> Vec<Tok> {
@@ -204,12 +211,5 @@ impl Source {
         let index = usize::try_from(id.0).expect("u32 fits in usize");
         assert!(index < self.trees.len(), "span ids come from this source");
         &self.trees[index]
-    }
-
-    /// Returns the span of the original token `id`.
-    /// Used for idents the expansion creates at the user's position.
-    /// Panics on an id from another call, which is a macro bug.
-    pub fn span(&self, id: SpanId) -> Span {
-        self.tree(id).span()
     }
 }

@@ -1,7 +1,8 @@
 use crate::args::{parse_args, Arg};
 use crate::doc::doc_text;
 use crate::item::{parse_fn, Attr};
-use crate::tokens::{Error, SpanId, Tok};
+use crate::lit::quote_str;
+use crate::tokens::{Delim, Error, Piece, SpanId, Tok};
 
 const WHAT: &str = "#[tool]";
 const MAX_ARGS: usize = 32;
@@ -19,13 +20,12 @@ pub enum ParamKind {
 }
 
 /// One parameter of a `#[tool]` fn.
-/// `json_key` is the ident without `r#`; `ty` keeps the user's tokens
+/// `ident` may be raw (`r#type`); serde reads it as `type`. `ty` keeps the user's tokens
 /// so rustc errors point at them. `optional` marks an `Option<..>` type.
 #[derive(Clone, Debug)]
 pub struct Param {
     pub ident: String,
     pub ident_span: SpanId,
-    pub json_key: String,
     pub is_mut: bool,
     pub ty: Vec<Tok>,
     pub kind: ParamKind,
@@ -169,6 +169,127 @@ pub fn crate_path(arg: &Arg, what: &str) -> Result<String, Error> {
     Ok(text)
 }
 
+/// Generates the code for a parsed `#[tool]` fn: a unit struct named
+/// like the fn, an `invoke` fn holding the body, a private argument
+/// struct deriving the schema, and the `Tool` impl calling `invoke`.
+/// Returns the pieces in output order.
+pub fn expand_tool(t: &ToolFn) -> Vec<Piece> {
+    let p = format!("{}::__private", t.krate);
+    let plain = t.ident.strip_prefix("r#").unwrap_or(&t.ident);
+    let args_ty = format!("__troupekit_args_{plain}");
+    let ident = Piece::Orig(t.ident_span);
+    let vis: Vec<Piece> = t.vis.iter().map(|s| Piece::Orig(*s)).collect();
+    let cfg = || attrs(&t.cfg_attrs);
+    let code = |s: &str| Piece::Code(s.to_string());
+    let mut out = Vec::new();
+
+    out.extend(cfg());
+    out.push(Piece::Code(format!(
+        "#[doc = {}] #[allow(non_camel_case_types)] #[derive(Clone, Copy, Debug, Default)]",
+        quote_str(&t.description)
+    )));
+    out.extend(vis.clone());
+    out.push(code("struct"));
+    out.push(ident.clone());
+    out.push(code(";"));
+
+    out.extend(cfg());
+    out.push(code("impl"));
+    out.push(ident.clone());
+    let mut invoke = attrs(&t.other_attrs);
+    invoke.extend(vis.clone());
+    invoke.push(code(if t.is_async {
+        "async fn invoke"
+    } else {
+        "fn invoke"
+    }));
+    let mut params = Vec::new();
+    for param in &t.params {
+        if param.is_mut {
+            params.push(code("mut"));
+        }
+        params.push(Piece::Orig(param.ident_span));
+        params.push(code(":"));
+        params.extend(param.ty.iter().map(|tok| Piece::Orig(tok.span())));
+        params.push(code(","));
+    }
+    invoke.push(Piece::Group(Delim::Paren, params));
+    if !t.ret.is_empty() {
+        invoke.push(code("->"));
+        invoke.extend(t.ret.iter().map(|tok| Piece::Orig(tok.span())));
+    }
+    invoke.push(Piece::Orig(t.body_span));
+    out.push(Piece::Group(Delim::Brace, invoke));
+
+    out.extend(cfg());
+    out.push(Piece::Code(format!(
+        "#[doc(hidden)] #[allow(non_camel_case_types)] \
+         #[derive({p}::serde::Deserialize, {p}::schemars::JsonSchema)] \
+         #[serde(crate = \"{p}::serde\", deny_unknown_fields)] \
+         #[schemars(crate = \"{p}::schemars\")] struct {args_ty}"
+    )));
+    let mut fields = Vec::new();
+    for param in t.params.iter().filter(|p| p.kind == ParamKind::Arg) {
+        if param.optional {
+            fields.push(code("#[serde(default)]"));
+        }
+        fields.push(Piece::Orig(param.ident_span));
+        fields.push(code(":"));
+        fields.extend(param.ty.iter().map(|tok| Piece::Orig(tok.span())));
+        fields.push(code(","));
+    }
+    out.push(Piece::Group(Delim::Brace, fields));
+
+    let bindings: Vec<&str> = t
+        .params
+        .iter()
+        .filter(|p| p.kind == ParamKind::Arg)
+        .map(|p| p.ident.as_str())
+        .collect();
+    let call_args: Vec<String> = t
+        .params
+        .iter()
+        .map(|p| match p.kind {
+            ParamKind::Arg => p.ident.clone(),
+            ParamKind::Context { by_ref: true } => "__troupekit_ctx".to_string(),
+            ParamKind::Context { by_ref: false } => {
+                "::core::clone::Clone::clone(__troupekit_ctx)".to_string()
+            }
+        })
+        .collect();
+    let await_suffix = if t.is_async { ".await" } else { "" };
+    out.extend(cfg());
+    out.push(Piece::Code(format!(
+        "#[{p}::async_trait] impl {p}::Tool for"
+    )));
+    out.push(ident);
+    out.push(Piece::Code(format!(
+        "{{ \
+         fn spec(&self) -> &{p}::ToolSpec {{ \
+             static SPEC: ::std::sync::OnceLock<{p}::ToolSpec> = ::std::sync::OnceLock::new(); \
+             SPEC.get_or_init(|| {p}::spec::<{args_ty}>({name}, {description})) \
+         }} \
+         async fn call(&self, __troupekit_value: {p}::serde_json::Value, __troupekit_ctx: &{p}::ToolContext) \
+             -> ::core::result::Result<{p}::ToolOutput, {p}::ToolError> {{ \
+             let {args_ty} {{ {bindings} }} = {p}::serde_json::from_value(__troupekit_value) \
+                 .map_err(|e| {p}::ToolError::InvalidArgs(::std::string::ToString::to_string(&e)))?; \
+             ::core::result::Result::Ok({p}::IntoToolOutput::into_output(Self::invoke({call}){await_suffix})) \
+         }} \
+         }}",
+        name = quote_str(&t.name),
+        description = quote_str(&t.description),
+        bindings = bindings.join(", "),
+        call = call_args.join(", "),
+    )));
+    out
+}
+
+fn attrs(list: &[Attr]) -> Vec<Piece> {
+    list.iter()
+        .flat_map(|a| [Piece::Orig(a.hash), Piece::Orig(a.group)])
+        .collect()
+}
+
 fn valid_tool_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME_BYTES
@@ -266,7 +387,6 @@ fn parse_param(entry: &[Tok]) -> Result<Param, Error> {
     };
     let optional = !is_context && type_head(&ty) == Some("Option");
     Ok(Param {
-        json_key: ident.strip_prefix("r#").unwrap_or(ident).to_string(),
         ident: ident.clone(),
         ident_span: *ident_span,
         is_mut,
@@ -433,7 +553,6 @@ mod tests {
     fn raw_ident_param_maps_to_plain_key() {
         let t = parse("", &format!("{DOC}fn r#match(r#type: String) {{}}")).unwrap();
         assert_eq!(t.params[0].ident, "r#type");
-        assert_eq!(t.params[0].json_key, "type");
         assert_eq!(t.name, "match");
     }
 
@@ -614,5 +733,71 @@ mod tests {
         let e = parse_tool(&[], &item).unwrap_err();
         assert_eq!(e.message, "the #[tool] description is over 16 KiB");
         assert_eq!(e.span, find(&item, &|t| t.is_ident("doc")).unwrap());
+    }
+
+    fn text(tok: &Tok) -> String {
+        match tok {
+            Tok::Ident(s, _) | Tok::Lit(s, _) => s.clone(),
+            Tok::Punct(c, _, _) => c.to_string(),
+            Tok::Group(d, inner, _) => {
+                let body: Vec<String> = inner.iter().map(text).collect();
+                let (o, c) = match d {
+                    Delim::Paren => ("(", ")"),
+                    Delim::Bracket => ("[", "]"),
+                    Delim::Brace => ("{", "}"),
+                    Delim::None => ("", ""),
+                };
+                format!("{o}{}{c}", body.join(" "))
+            }
+        }
+    }
+
+    fn render(pieces: &[Piece], toks: &[Tok]) -> String {
+        let all = |id: SpanId| {
+            let pred = |t: &Tok| t.span() == id;
+            let mut stack: Vec<&Tok> = toks.iter().collect();
+            while let Some(t) = stack.pop() {
+                if pred(t) {
+                    return text(t);
+                }
+                if let Tok::Group(_, inner, _) = t {
+                    stack.extend(inner.iter());
+                }
+            }
+            panic!("span {id:?} not in source");
+        };
+        pieces
+            .iter()
+            .map(|p| match p {
+                Piece::Code(s) => s.clone(),
+                Piece::Orig(id) => all(*id),
+                Piece::Group(Delim::Paren, inner) => format!("({})", render(inner, toks)),
+                Piece::Group(_, inner) => format!("{{{}}}", render(inner, toks)),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn expansion_shape_for_add() {
+        let item = lex("/// Adds two numbers.\npub async fn add(a: i64, o: Option<u8>, ctx: ToolContext) -> i64 { a }");
+        let t = parse_tool(&[], &item).unwrap();
+        let out = render(&expand_tool(&t), &item);
+        for part in [
+            "#[doc = \"Adds two numbers.\"]",
+            "pub struct add ;",
+            "impl add {pub async fn invoke (a : i64 , o : Option < u8 > , ctx : ToolContext ,) -> i64 {a}}",
+            "struct __troupekit_args_add {a : i64 , #[serde(default)] o : Option < u8 > ,}",
+            "#[serde(crate = \"::troupekit::__private::serde\", deny_unknown_fields)]",
+            "let __troupekit_args_add { a, o } =",
+            "Self::invoke(a, o, ::core::clone::Clone::clone(__troupekit_ctx)).await",
+            "spec::<__troupekit_args_add>(\"add\", \"Adds two numbers.\")",
+        ] {
+            assert!(out.contains(part), "missing {part:?} in {out}");
+        }
+        let sync = lex("/// S.\nfn s(ctx: &ToolContext) {}");
+        let out = render(&expand_tool(&parse_tool(&[], &sync).unwrap()), &sync);
+        assert!(out.contains("Self::invoke(__troupekit_ctx))"), "{out}");
+        assert!(!out.contains(".await"), "{out}");
     }
 }
