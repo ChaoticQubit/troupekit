@@ -1,13 +1,16 @@
 //! SQLite storage for Troupekit. One `SqliteStore` over one file implements
 //! `CheckpointStore`, `MemoryLog`, `BlobStore`, `JobQueue` and `UsageLedger`,
 //! so a run survives a process kill and resumes from its last saved step.
+//! `SqliteStore::vectors` opens named vector indexes in the same file.
 
 mod queue;
 mod schema;
 mod stores;
+mod vectors;
 
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,6 +18,8 @@ use troupekit_core::clock::{Clock, SystemClock};
 use troupekit_core::error::CoreError;
 #[cfg(any(feature = "sqlcipher", feature = "sqlcipher-system"))]
 use troupekit_core::secret::Secret;
+pub use troupekit_index::{HnswParams, IndexKind, Quantization};
+pub use vectors::{OpenReport, SqliteVectors, VectorSettings};
 
 /// The schema version this troupekit writes and reads up to.
 /// It equals the number of migration steps. A file at a higher version is
@@ -142,6 +147,7 @@ impl SqliteStoreBuilder {
                 clock: self.clock,
                 limits: self.limits,
                 path: self.path,
+                vectors: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -256,6 +262,7 @@ struct Inner {
     clock: Arc<dyn Clock>,
     limits: Limits,
     path: PathBuf,
+    vectors: Mutex<HashMap<String, Arc<vectors::IndexState>>>,
 }
 
 /// Durable Troupekit store over one SQLite file in WAL mode. Cheap to
