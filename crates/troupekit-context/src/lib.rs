@@ -7,6 +7,7 @@ pub mod chunk;
 pub mod embed;
 pub mod error;
 pub mod facts;
+pub mod hybrid;
 pub mod ingest;
 pub mod load;
 pub mod memory;
