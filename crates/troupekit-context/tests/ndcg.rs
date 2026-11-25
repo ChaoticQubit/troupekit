@@ -94,6 +94,8 @@ fn ndcg_of_a_perfect_ranking_is_one() {
 #[test]
 fn fixture_matches_corpus_and_chunk_config() {
     let fixture = fixture();
+    assert_eq!(fixture["model"], "intfloat/multilingual-e5-small");
+    assert!(fixture["fastembed"].as_str().is_some_and(|v| !v.is_empty()), "fixture names its fastembed version");
     assert_eq!(fixture["chunk"]["max_tokens"].as_u64(), Some(CHUNK.max_tokens as u64));
     assert_eq!(fixture["chunk"]["overlap_tokens"].as_u64(), Some(CHUNK.overlap_tokens as u64));
     let walked = walk(&corpus(), &LoadSettings::default()).unwrap();

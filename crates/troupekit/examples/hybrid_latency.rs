@@ -1,9 +1,12 @@
-//! Hybrid query latency over one SQLite file: seeded chunks with seeded
-//! 384-dimension vectors, then timed `hybrid_search` calls with `top_k` 8,
+//! Hybrid query latency over one SQLite file: seeded chunks with the
+//! clustered 384-dimension vectors of the index benchmarks (100 clusters,
+//! spread 0.05), then timed `hybrid_search` calls with `top_k` 8,
 //! for brute force and HNSW in f32 and i8. Run with `cargo run --release
 //! -p troupekit --features knowledge --example hybrid_latency -- [chunks] [queries]`.
 
-use std::collections::BTreeMap;
+mod common;
+
+use std::collections::{BTreeMap, HashMap};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use troupekit::context::embed::Embedder;
@@ -19,6 +22,9 @@ const QUERIES_DEFAULT: usize = 2_000;
 const TOP_K: usize = 8;
 const BATCH: usize = 5_000;
 const SCOPE: &str = "docs";
+const SEED: u64 = 42;
+const CLUSTERS: usize = 100;
+const SPREAD: f32 = 0.05;
 const WORDS: [&str; 32] = [
     "refund", "parcel", "invoice", "account", "password", "delivery", "return", "label", "card", "order", "size", "colour", "warranty", "gift", "voucher", "shipping",
     "tracking", "address", "email", "login", "basket", "checkout", "payment", "bank", "express", "furniture", "carrier", "damaged", "exchange", "credit", "app", "status",
@@ -35,14 +41,6 @@ fn next(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Seeded vector of `DIMS` values in [-1, 1) for `text`, seeded by the
-/// FNV-1a hash of the text. Input: the text. Output: the vector, the same
-/// for the same text on every run.
-fn seeded_vector(text: &str) -> Vec<f32> {
-    let mut state = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
-    (0..DIMS).map(|_| (next(&mut state) >> 40) as f32 / (1u64 << 23) as f32 - 1.0).collect()
-}
-
 /// Seeded text of 24 words for chunk or query `index` under `salt`.
 /// Input: index and salt. Output: the text.
 /// Words come from a fixed support vocabulary so BM25 has matches.
@@ -51,18 +49,19 @@ fn seeded_text(index: usize, salt: u64) -> String {
     (0..24).map(|_| WORDS[(next(&mut state) % WORDS.len() as u64) as usize]).collect::<Vec<_>>().join(" ")
 }
 
-/// Embedder returning `seeded_vector` of each text, so queries and
-/// chunks share one generator. Input: texts. Output: their vectors.
-struct Seeded;
+/// Embedder that returns the clustered vector drawn for each query text,
+/// so queries come from the same clusters as the chunks. Input: texts.
+/// Output: their vectors, or an error for a text it was not given.
+struct Lookup(HashMap<String, Vec<f32>>);
 
 #[async_trait::async_trait]
-impl Embedder for Seeded {
+impl Embedder for Lookup {
     fn dims(&self) -> usize {
         DIMS
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, ContextError> {
-        Ok(texts.iter().map(|t| seeded_vector(t)).collect())
+        texts.iter().map(|t| self.0.get(t).cloned().ok_or_else(|| ContextError::Embed(format!("no vector for {t:?}")))).collect()
     }
 }
 
@@ -81,13 +80,15 @@ async fn measure(chunks: usize, queries: usize, settings: VectorSettings) -> Res
     let dir = tempfile::tempdir()?;
     let store = SqliteStore::open(dir.path().join("latency.db")).await?;
     let vectors = store.vectors("docs", settings.with_max_batch(BATCH)).await?;
+    let mut drawn = common::clustered(SEED, chunks + queries, DIMS, CLUSTERS, SPREAD);
+    let query_vectors = drawn.split_off(chunks);
     for start in (0..chunks).step_by(BATCH) {
         let records = (start..chunks.min(start + BATCH))
             .map(|i| {
                 let text = seeded_text(i, 1);
                 VectorRecord {
                     id: format!("c{i}"),
-                    vector: seeded_vector(&text),
+                    vector: std::mem::take(&mut drawn[i]),
                     text,
                     meta: BTreeMap::from([
                         (META_SCOPE.to_string(), SCOPE.to_string()),
@@ -99,12 +100,13 @@ async fn measure(chunks: usize, queries: usize, settings: VectorSettings) -> Res
             .collect();
         vectors.upsert(records).await?;
     }
+    let texts: Vec<String> = (0..queries).map(|q| format!("query{q} {}", seeded_text(q, 2).split(' ').take(4).collect::<Vec<_>>().join(" "))).collect();
+    let embedder = Lookup(texts.iter().cloned().zip(query_vectors).collect());
     let cfg = HybridConfig::default().with_top_k(TOP_K);
     let mut samples = Vec::with_capacity(queries);
-    for q in 0..queries {
-        let query: String = seeded_text(q, 2).split(' ').take(4).collect::<Vec<_>>().join(" ");
+    for query in &texts {
         let started = Instant::now();
-        let hits = hybrid_search(&vectors, &vectors, &Seeded, &query, &[SCOPE], &Filter::default(), &cfg).await?;
+        let hits = hybrid_search(&vectors, &vectors, &embedder, query, &[SCOPE], &Filter::default(), &cfg).await?;
         samples.push(started.elapsed());
         assert!(hits.len() <= TOP_K, "more hits than top_k");
     }
