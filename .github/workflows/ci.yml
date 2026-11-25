@@ -18,14 +18,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
-            runner: macos-latest
-            cross: false
-            phone: false
-          - target: aarch64-apple-ios
-            runner: macos-latest
-            cross: true
-            phone: true
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             cross: false
@@ -84,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, macos-latest]
+        runner: [ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -146,8 +138,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-ios
-            runner: macos-latest
           - target: aarch64-linux-android
             runner: ubuntu-latest
     steps:
@@ -173,6 +163,62 @@ jobs:
           echo "$bin" >> "$GITHUB_PATH"
       - name: build
         run: cargo build -p troupekit-store-sqlite --features sqlcipher --locked --target ${{ matrix.target }}
+
+  macos:
+    name: macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macOS-all-${{ hashFiles('Cargo.lock') }}
+      - name: add ios target
+        run: rustup target add aarch64-apple-ios
+      - name: build workspace
+        if: ${{ !cancelled() }}
+        run: cargo build --workspace --locked
+      - name: build workspace for ios
+        if: ${{ !cancelled() }}
+        run: cargo build --workspace --locked --target aarch64-apple-ios
+      - name: build ios without the TLS stack
+        if: ${{ !cancelled() }}
+        run: cargo build -p troupekit --no-default-features --features sqlite --locked --target aarch64-apple-ios
+      - name: cipher build for ios
+        if: ${{ !cancelled() }}
+        run: cargo build -p troupekit-store-sqlite --features sqlcipher --locked --target aarch64-apple-ios
+      - name: boundary
+        if: ${{ !cancelled() && !startsWith(github.head_ref, 'release/') }}
+        run: sh scripts/check-boundary.sh
+      - name: test changed crates
+        if: ${{ !cancelled() && !startsWith(github.head_ref, 'release/') }}
+        shell: bash
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          set +e
+          pkgs="$(sh scripts/changed-crates.sh "origin/$BASE")"
+          code=$?
+          set -e
+          if [ "$code" -eq 3 ]; then
+            echo "no crate changed"
+            exit 0
+          fi
+          if [ "$code" -ne 0 ]; then
+            echo "changed-crates.sh failed with exit $code"
+            exit "$code"
+          fi
+          cargo test --locked $pkgs
+      - name: full suite
+        if: ${{ !cancelled() && startsWith(github.head_ref, 'release/') }}
+        env:
+          TROUPEKIT_E2E_RUNS: "100"
+        run: cargo test --workspace --locked
 
   deny:
     runs-on: ubuntu-latest
@@ -220,7 +266,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, macos-latest]
+        runner: [ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
