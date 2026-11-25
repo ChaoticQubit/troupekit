@@ -392,3 +392,123 @@ async fn blob_above_the_setting_is_rejected() {
     assert_eq!(b.get("old").await.unwrap(), vec![1]);
     b.put("fits", vec![0; 8]).await.unwrap();
 }
+
+use troupekit_core::event::Usage;
+
+fn usage_row(path: &std::path::Path, key: &str) -> Option<(i64, i64, i64)> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.query_row(
+        "SELECT input_tokens, output_tokens, cost_usd_micros FROM usage_total WHERE ledger_key = ?1",
+        [key],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .ok()
+}
+
+#[tokio::test]
+async fn ledger_sums_per_key() {
+    let t = temp();
+    let ledger = t.open().await;
+    let u = Usage {
+        input_tokens: 3,
+        output_tokens: 4,
+        cost_usd_micros: 7,
+    };
+    for _ in 0..2 {
+        ledger.record("goal:1", u).await.unwrap();
+        ledger.record("user:1", u).await.unwrap();
+    }
+    assert_eq!(usage_row(&t.path, "goal:1"), Some((6, 8, 14)));
+    assert_eq!(ledger.period_total("user:1").await.unwrap(), 14);
+    assert_eq!(usage_row(&t.path, "other"), None);
+}
+
+#[tokio::test]
+async fn ledger_survives_reopen() {
+    let t = temp();
+    let u = Usage {
+        input_tokens: 1,
+        output_tokens: 1,
+        cost_usd_micros: 250,
+    };
+    t.open().await.record("k", u).await.unwrap();
+    let ledger = t.open().await;
+    ledger.record("k", u).await.unwrap();
+    assert_eq!(ledger.period_total("k").await.unwrap(), 500);
+}
+
+#[tokio::test]
+async fn unknown_key_totals_zero() {
+    let t = temp();
+    assert_eq!(t.open().await.period_total("nobody").await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn usage_overflow_is_an_error() {
+    let t = temp();
+    let ledger = t.open().await;
+    let big = Usage {
+        input_tokens: 1,
+        output_tokens: 1,
+        cost_usd_micros: i64::MAX as u64,
+    };
+    ledger.record("k", big).await.unwrap();
+    let one = Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd_micros: 1,
+    };
+    let err = ledger.record("k", one).await.unwrap_err();
+    assert!(matches!(err, CoreError::Store(_)), "{err:?}");
+    assert_eq!(ledger.period_total("k").await.unwrap(), i64::MAX as u64);
+    let huge = Usage {
+        input_tokens: u64::MAX,
+        output_tokens: 0,
+        cost_usd_micros: 0,
+    };
+    assert!(matches!(
+        ledger.record("other", huge).await,
+        Err(CoreError::Store(_))
+    ));
+    assert_eq!(usage_row(&t.path, "other"), None);
+}
+
+#[tokio::test]
+async fn hostile_names_are_stored_as_plain_data() {
+    let t = temp();
+    let s = t.open().await;
+    let names = [
+        "x'); DROP TABLE checkpoint; --",
+        "\"; DELETE FROM blob_entry; SELECT \"",
+        "a;b;c' OR '1'='1",
+    ];
+    let u = Usage {
+        input_tokens: 1,
+        output_tokens: 2,
+        cost_usd_micros: 3,
+    };
+    for name in names {
+        s.append(name, 0, vec![Message::text(Role::User, name)])
+            .await
+            .unwrap();
+        s.put(name, name.as_bytes().to_vec()).await.unwrap();
+        s.record(name, u).await.unwrap();
+    }
+    for name in names {
+        assert_eq!(
+            s.read(name).await.unwrap(),
+            vec![Message::text(Role::User, name)]
+        );
+        assert_eq!(s.get(name).await.unwrap(), name.as_bytes().to_vec());
+        assert_eq!(s.period_total(name).await.unwrap(), 3);
+    }
+    let conn = rusqlite::Connection::open(&t.path).unwrap();
+    let tables: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 6);
+}

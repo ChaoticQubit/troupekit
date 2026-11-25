@@ -3,9 +3,10 @@ use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
 use troupekit_core::error::CoreError;
+use troupekit_core::event::Usage;
 use troupekit_core::ids::RunId;
 use troupekit_core::message::Message;
-use troupekit_core::store::{BlobStore, Checkpoint, CheckpointStore, MemoryLog};
+use troupekit_core::store::{BlobStore, Checkpoint, CheckpointStore, MemoryLog, UsageLedger};
 
 /// Starts the write transaction every check-then-write uses. `IMMEDIATE`
 /// takes the write lock at once, so two handles never both pass a check.
@@ -306,6 +307,72 @@ impl BlobStore for SqliteStore {
                 .optional()
                 .map_err(db)?;
             bytes.ok_or(CoreError::NotFound(path))
+        })
+        .await
+    }
+}
+
+fn read_usage(conn: &Connection, key: &str) -> Result<Usage, CoreError> {
+    let row: Option<(i64, i64, i64)> = conn
+        .query_row(
+            "SELECT input_tokens, output_tokens, cost_usd_micros FROM usage_total \
+             WHERE ledger_key = ?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(db)?;
+    let Some((input, output, cost)) = row else {
+        return Ok(Usage::default());
+    };
+    Ok(Usage {
+        input_tokens: from_sql_int("input_tokens", input)?,
+        output_tokens: from_sql_int("output_tokens", output)?,
+        cost_usd_micros: from_sql_int("cost_usd_micros", cost)?,
+    })
+}
+
+fn add_counter(name: &str, total: u64, more: u64) -> Result<i64, CoreError> {
+    let sum = total
+        .checked_add(more)
+        .ok_or_else(|| CoreError::Store(format!("{name} total would overflow")))?;
+    to_sql_int(name, sum)
+}
+
+#[async_trait]
+impl UsageLedger for SqliteStore {
+    async fn period_total(&self, key: &str) -> Result<u64, CoreError> {
+        let key = key.to_string();
+        self.call(move |conn| Ok(read_usage(conn, &key)?.cost_usd_micros))
+            .await
+    }
+
+    async fn record(&self, key: &str, usage: Usage) -> Result<(), CoreError> {
+        let key = key.to_string();
+        self.call(move |conn| {
+            let tx = immediate(conn)?;
+            let total = read_usage(&tx, &key)?;
+            let input = add_counter("input_tokens", total.input_tokens, usage.input_tokens)?;
+            let output = add_counter("output_tokens", total.output_tokens, usage.output_tokens)?;
+            let cost = add_counter(
+                "cost_usd_micros",
+                total.cost_usd_micros,
+                usage.cost_usd_micros,
+            )?;
+            let written = tx
+                .execute(
+                    "INSERT INTO usage_total \
+                     (ledger_key, input_tokens, output_tokens, cost_usd_micros) \
+                     VALUES (?1, ?2, ?3, ?4) ON CONFLICT (ledger_key) DO UPDATE SET \
+                     input_tokens = excluded.input_tokens, \
+                     output_tokens = excluded.output_tokens, \
+                     cost_usd_micros = excluded.cost_usd_micros",
+                    params![key, input, output, cost],
+                )
+                .map_err(db)?;
+            assert_eq!(written, 1);
+            assert_eq!(read_usage(&tx, &key)?, total + usage);
+            tx.commit().map_err(db)
         })
         .await
     }
