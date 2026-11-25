@@ -35,6 +35,10 @@ required-features = ["sqlite"]
 name = "support_agent"
 required-features = ["knowledge"]
 
+[[example]]
+name = "hybrid_latency"
+required-features = ["knowledge"]
+
 [[test]]
 name = "main"
 path = "tests/main.rs"
