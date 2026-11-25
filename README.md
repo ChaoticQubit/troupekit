@@ -12,6 +12,8 @@ Troupekit is a Rust framework for building LLM agents from persona TOML files: p
 | `troupekit-graph` | available | TOML workflows of agent, tool, human, router, join and end nodes over typed shared state; checkpointable graph run with parallel branches, human pauses, graph budgets and retries |
 | `troupekit-plugins` | planned | Plugin loading |
 | `troupekit-host` | available | Leased job queue, event log deduped on run and seq, runner with worker mode and serverless step mode, crash-safe resume |
+| `troupekit-store-sqlite` | available | One SQLite file for checkpoints with history, memory logs, blobs, the job queue and the usage ledger; WAL, own migrations, optional SQLCipher |
+| `troupekit` | available | Entry crate: `Troupe::builder()` wires in-memory or SQLite stores and builds runners; re-exports the engines |
 
 ## License
 

@@ -52,14 +52,7 @@ impl Limits {
     }
 }
 
-/// Spend totals per key for the current period, kept by the host (for
-/// example one row per goal and month). `period_total` returns millionths
-/// of a US dollar spent so far; `record` adds one call's usage.
-#[async_trait]
-pub trait UsageLedger: Send + Sync {
-    async fn period_total(&self, key: &str) -> Result<u64, CoreError>;
-    async fn record(&self, key: &str, usage: Usage) -> Result<(), CoreError>;
-}
+pub use troupekit_core::store::UsageLedger;
 
 /// In-memory `UsageLedger` for tests and examples.
 /// It has one period that never ends; `usage` reads a key's totals.

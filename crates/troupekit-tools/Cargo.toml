@@ -17,12 +17,16 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["net", "time"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+reqwest = { workspace = true, optional = true }
 url = "2"
 percent-encoding = "2"
 toml = "1"
 schemars = "1"
 jsonschema = { version = "0.60", default-features = false }
+
+[features]
+default = ["reqwest"]
+reqwest = ["dep:reqwest"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

@@ -1,5 +1,8 @@
-use crate::http::{is_public_ip, receive, GuardedHttp, HttpLimits, HttpRequest, Transport};
+use crate::http::{receive, HttpRequest, Transport};
+#[cfg(feature = "reqwest")]
+use crate::http::{is_public_ip, GuardedHttp, HttpLimits};
 use crate::registry::Toolkit;
+#[cfg(feature = "reqwest")]
 use crate::secrets::SecretSource;
 use crate::text::{fence_capped, html_to_text, MAX_TEXT_CHARS};
 use crate::tool::{ToolContext, ToolError, ToolOutput};
@@ -8,6 +11,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "reqwest")]
 use std::net::IpAddr;
 use std::sync::Arc;
 use troupekit_core::secret::Secret;
@@ -224,6 +228,7 @@ async fn get_json<T: DeserializeOwned>(
     serde_json::from_slice(&res.body).map_err(|e| ToolError::Decode(format!("{provider}: {e}")))
 }
 
+#[cfg(feature = "reqwest")]
 fn allow_private_lan(ip: IpAddr) -> bool {
     if is_public_ip(ip) || ip.is_loopback() {
         return true;
@@ -234,6 +239,7 @@ fn allow_private_lan(ip: IpAddr) -> bool {
     }
 }
 
+#[cfg(feature = "reqwest")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchConfig {
@@ -241,6 +247,7 @@ struct SearchConfig {
     instance: Vec<InstanceConfig>,
 }
 
+#[cfg(feature = "reqwest")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InstanceConfig {
@@ -252,6 +259,7 @@ struct InstanceConfig {
     allow_private: bool,
 }
 
+#[cfg(feature = "reqwest")]
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Adapter {
@@ -289,6 +297,7 @@ impl SearchToolkit {
         })
     }
 
+    #[cfg(feature = "reqwest")]
     /// Builds a toolkit from search TOML (`[[instance]]` tables with `name`,
     /// `adapter`, `base_url`, optional `key_env` and `allow_private`). Keys
     /// come from `secrets`; an instance whose key is missing is skipped, and
@@ -309,6 +318,7 @@ impl SearchToolkit {
         })
     }
 
+    #[cfg(feature = "reqwest")]
     fn from_toml_with(
         text: &str,
         secrets: &dyn SecretSource,
@@ -458,12 +468,15 @@ mod tests {
     use crate::registry::ToolRegistry;
     use crate::tool::{ToolContext, ToolError};
     use serde_json::json;
+    #[cfg(feature = "reqwest")]
     use std::collections::HashMap;
+    #[cfg(feature = "reqwest")]
     use std::net::IpAddr;
 
     const BRAVE: &str = include_str!("../tests/fixtures/brave_web.json");
     const BRAVE_EMPTY: &str = include_str!("../tests/fixtures/brave_no_web.json");
     const SEARXNG: &str = include_str!("../tests/fixtures/searxng.json");
+    #[cfg(feature = "reqwest")]
     const CATALOG: &str = include_str!("../../../catalog/search.toml");
 
     fn key(v: &str) -> Secret {
@@ -655,6 +668,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "reqwest")]
     #[test]
     fn config_parses_catalog() {
         let mut secrets = HashMap::new();
@@ -672,6 +686,7 @@ mod tests {
         assert!(SearchToolkit::from_toml(CATALOG, &secrets, HttpLimits::default()).is_ok());
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn catalog_without_brave_key_loads_searxng_only() {
         let secrets: HashMap<String, Secret> = HashMap::new();
@@ -690,6 +705,7 @@ mod tests {
         assert!(SearchToolkit::from_toml(CATALOG, &secrets, HttpLimits::default()).is_ok());
     }
 
+    #[cfg(feature = "reqwest")]
     #[test]
     fn config_errors() {
         let secrets: HashMap<String, Secret> = HashMap::new();
@@ -711,6 +727,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "reqwest")]
     #[test]
     fn private_policy_allows_lan_but_not_metadata() {
         for ok in [
