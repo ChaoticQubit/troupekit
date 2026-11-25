@@ -9,6 +9,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autotests = false
 
 [dependencies]
 serde.workspace = true
@@ -20,3 +21,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

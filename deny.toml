@@ -25,6 +25,7 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
+exceptions = [{ allow = ["blessing", "WTFPL"], crate = "sqlcipher-src" }]
 
 [licenses.private]
 ignore = true

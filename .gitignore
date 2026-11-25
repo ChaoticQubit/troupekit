@@ -1,0 +1,5 @@
+target/
+/docs
+/graphify-out
+.env
+.env.*
