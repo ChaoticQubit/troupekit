@@ -254,3 +254,19 @@ fn rebuild_deletes_dropped_tombstone_pages() {
     r.unwrap();
     assert_same_results(index.as_ref(), restored.as_ref(), &data);
 }
+
+#[test]
+fn reinsert_after_rebuild_clears_the_pending_delete() {
+    let mut index = fresh(params().with_max_deleted_fraction(0.25));
+    let mut rng = Rng::new(86);
+    for id in 5..8u64 {
+        index.insert(id, &rng.vector(DIMS)).unwrap();
+    }
+    index.take_changes();
+    assert!(index.remove(7));
+    index.insert(7, &rng.vector(DIMS)).unwrap();
+    let changes = index.take_changes();
+    assert!(changes.iter().any(|c| matches!(c, PageChange::Put(PageKey::Node(7), _))), "{changes:?}");
+    assert!(!changes.iter().any(|c| matches!(c, PageChange::Delete(PageKey::Node(7)))), "{changes:?}");
+    assert_eq!(index.len(), 3);
+}

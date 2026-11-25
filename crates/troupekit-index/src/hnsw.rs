@@ -279,6 +279,7 @@ impl Hnsw {
         let slot = self.push_node(id, vector, level);
         self.live += 1;
         self.dirty.insert(id);
+        self.dropped.remove(&id);
         self.link(slot, vector);
         if self.entry.is_none() || level > self.top {
             self.entry = Some(slot);
