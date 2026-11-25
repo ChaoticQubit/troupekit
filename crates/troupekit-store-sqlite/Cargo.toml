@@ -13,6 +13,7 @@ autotests = false
 
 [dependencies]
 troupekit-core.workspace = true
+troupekit-index.workspace = true
 rusqlite = { version = "0.43", features = ["bundled"] }
 tokio = { workspace = true, features = ["rt"] }
 async-trait.workspace = true

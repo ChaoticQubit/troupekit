@@ -123,3 +123,23 @@ async fn prune_rejects_keep_last_zero() {
     let err = s.prune(RunId::new(), 0).await.unwrap_err();
     assert!(matches!(err, CoreError::Store(_)), "{err:?}");
 }
+
+struct OneHit;
+
+#[async_trait::async_trait]
+impl KeywordStore for OneHit {
+    async fn search_text(&self, query: &str, k: usize, filter: &Filter) -> Result<Vec<Scored>, CoreError> {
+        let hit = Scored { id: query.into(), score: 1.0, text: query.into(), meta: filter.0.clone() };
+        Ok(std::iter::once(hit).take(k).collect())
+    }
+}
+
+#[tokio::test]
+async fn keyword_store_is_object_safe() {
+    let s: Arc<dyn KeywordStore> = Arc::new(OneHit);
+    let f = Filter(BTreeMap::from([("scope".to_string(), "docs".to_string())]));
+    let hits = s.search_text("refund", 1, &f).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].meta, f.0);
+    assert!(s.search_text("refund", 0, &f).await.unwrap().is_empty());
+}

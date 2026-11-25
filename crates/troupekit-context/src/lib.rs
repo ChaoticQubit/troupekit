@@ -7,11 +7,15 @@ pub mod chunk;
 pub mod embed;
 pub mod error;
 pub mod facts;
+pub mod hybrid;
 pub mod ingest;
+pub mod load;
 pub mod memory;
 #[cfg(feature = "onnx")]
 pub mod onnx;
 pub mod retrieve;
+pub mod summary;
 pub mod text;
+pub mod tools;
 
 pub use error::ContextError;
