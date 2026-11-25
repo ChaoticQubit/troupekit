@@ -6,7 +6,7 @@ mod common;
 
 use std::time::Instant;
 
-use troupekit_index::{new_index, HnswParams, IndexKind, Quantization, VectorIndex};
+use troupekit_index::{new_index, HnswParams, IndexKind, Quantization};
 
 const DIMS: usize = 384;
 const QUERIES: usize = 1_000;
