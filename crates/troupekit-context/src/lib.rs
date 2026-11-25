@@ -14,6 +14,8 @@ pub mod memory;
 #[cfg(feature = "onnx")]
 pub mod onnx;
 pub mod retrieve;
+pub mod summary;
 pub mod text;
+pub mod tools;
 
 pub use error::ContextError;
