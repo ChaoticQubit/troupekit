@@ -104,15 +104,18 @@ fn unit_is_ok() {
     assert_eq!(ToolOutput::error("e").into_output(), ToolOutput::error("e"));
 }
 
+/// Whispers the text.
+#[troupekit::tool]
+fn whisper(text: String) -> String {
+    text.to_lowercase()
+}
+
 #[test]
 fn stateless_tools_share_one_arc_and_stateful_ones_do_not() {
     use troupekit::AsTool;
-    let first = crate::tools_mod::shout.into_arc();
-    let again = crate::tools_mod::shout.into_arc();
-    assert!(std::sync::Arc::ptr_eq(&first, &again));
-    let make = || troupekit::tool("t", "T.", |a: crate::common::AddArgs| async move { a.a });
-    assert!(!std::sync::Arc::ptr_eq(
-        &make().into_arc(),
-        &make().into_arc()
-    ));
+    let first = whisper.into_arc();
+    let again = whisper.into_arc();
+    assert!(Arc::ptr_eq(&first, &again));
+    let make = || tool("t", "T.", |a: AddArgs| async move { a.a + a.b });
+    assert!(!Arc::ptr_eq(&make().into_arc(), &make().into_arc()));
 }
