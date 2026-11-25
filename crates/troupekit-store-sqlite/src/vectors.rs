@@ -422,24 +422,7 @@ impl SqliteVectors {
                 let mut cached = write_cached(&state);
                 reload_if_needed(&tx, &state, &mut cached)?;
                 cached.stale = true;
-                let old: Vec<(i64, String)> = {
-                    let mut stmt = tx
-                        .prepare(
-                            "SELECT c.key, c.text FROM chunk c \
-                             JOIN chunk_meta s ON s.chunk_key = c.key AND s.key = ?2 AND s.value = ?3 \
-                             JOIN chunk_meta o ON o.chunk_key = c.key AND o.key = ?4 AND o.value = ?5 \
-                             WHERE c.index_name = ?1 ORDER BY c.key",
-                        )
-                        .map_err(db)?;
-                    let rows = stmt
-                        .query_map(params![state.name, SCOPE_KEY, scope, SOURCE_KEY, source], |row| Ok((row.get(0)?, row.get(1)?)))
-                        .map_err(db)?;
-                    rows.collect::<Result<_, _>>().map_err(db)?
-                };
-                for (key, text) in &old {
-                    delete_row(&tx, *key, text)?;
-                    cached.index.remove(to_id(*key)?);
-                }
+                delete_source_rows(&tx, &state, &mut cached, &scope, &source)?;
                 {
                     let mut owned = tx.prepare_cached("SELECT 1 FROM chunk WHERE index_name = ?1 AND id = ?2").map_err(db)?;
                     for record in &records {
@@ -467,6 +450,56 @@ impl SqliteVectors {
                 cached.generation = generation;
                 cached.stale = false;
                 Ok(records.len())
+            })
+            .await
+    }
+
+    /// Lists every source of `scope` that has an ingest status row, done
+    /// or failed, sorted. Input: the scope. Output: the sources, so a
+    /// folder ingest can find the ones whose file is gone.
+    pub async fn sources(&self, scope: &str) -> Result<Vec<String>, CoreError> {
+        let state = Arc::clone(&self.state);
+        let scope = scope.to_string();
+        self.store
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT source FROM ingest_source WHERE index_name = ?1 AND scope = ?2 ORDER BY source")
+                    .map_err(db)?;
+                let rows = stmt.query_map(params![state.name, scope], |row| row.get(0)).map_err(db)?;
+                rows.collect::<Result<Vec<String>, _>>().map_err(db)
+            })
+            .await
+    }
+
+    /// Removes one source in one transaction: its chunk, meta and keyword
+    /// rows, its index entries and pages, and its ingest status row.
+    /// Input: the scope and source. Output: the chunks removed, 0 when
+    /// the source had none, or an error that removes nothing.
+    pub async fn remove_source(&self, scope: &str, source: &str) -> Result<usize, CoreError> {
+        let settings = read_cached(&self.state).settings.clone();
+        check_source(scope, source, &settings)?;
+        let state = Arc::clone(&self.state);
+        let scope = scope.to_string();
+        let source = source.to_string();
+        self.store
+            .call(move |conn| {
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db)?;
+                let mut cached = write_cached(&state);
+                reload_if_needed(&tx, &state, &mut cached)?;
+                cached.stale = true;
+                let removed = delete_source_rows(&tx, &state, &mut cached, &scope, &source)?;
+                let changes = cached.index.take_changes();
+                write_pages(&tx, &state.name, changes)?;
+                tx.execute(
+                    "DELETE FROM ingest_source WHERE index_name = ?1 AND scope = ?2 AND source = ?3",
+                    params![state.name, scope, source],
+                )
+                .map_err(db)?;
+                let generation = bump_generation(&tx, &state.name)?;
+                tx.commit().map_err(db)?;
+                cached.generation = generation;
+                cached.stale = false;
+                Ok(removed)
             })
             .await
     }
@@ -600,6 +633,33 @@ impl VectorStore for SqliteVectors {
             })
             .await
     }
+}
+
+/// Deletes every chunk of one source, with its meta and keyword rows,
+/// and removes the chunks from the cached index, inside the caller's
+/// write transaction. Input: the transaction, state, cache, scope and
+/// source. Output: the number of chunks deleted.
+fn delete_source_rows(tx: &Connection, state: &IndexState, cached: &mut Cached, scope: &str, source: &str) -> Result<usize, CoreError> {
+    assert!(cached.stale, "source rows change only under a stale cache");
+    let old: Vec<(i64, String)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT c.key, c.text FROM chunk c \
+                 JOIN chunk_meta s ON s.chunk_key = c.key AND s.key = ?2 AND s.value = ?3 \
+                 JOIN chunk_meta o ON o.chunk_key = c.key AND o.key = ?4 AND o.value = ?5 \
+                 WHERE c.index_name = ?1 ORDER BY c.key",
+            )
+            .map_err(db)?;
+        let rows = stmt
+            .query_map(params![state.name, SCOPE_KEY, scope, SOURCE_KEY, source], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(db)?;
+        rows.collect::<Result<_, _>>().map_err(db)?
+    };
+    for (key, text) in &old {
+        delete_row(tx, *key, text)?;
+        cached.index.remove(to_id(*key)?);
+    }
+    Ok(old.len())
 }
 
 /// Searches the cached index and reads the hits inside one read

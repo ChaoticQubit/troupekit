@@ -364,6 +364,33 @@ async fn replace_source_refuses_an_id_owned_by_another_source() {
 }
 
 #[tokio::test]
+async fn remove_source_drops_rows_keywords_index_and_status() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let vectors = docs(&store).await;
+    let mut rng = Rng(23);
+    let a: Vec<VectorRecord> = (0..3).map(|i| sourced(&format!("a{i}"), &mut rng, "docs", "a.md")).collect();
+    vectors.replace_source("docs", "a.md", a, "ha").await.unwrap();
+    vectors.replace_source("docs", "b.md", vec![sourced("b0", &mut rng, "docs", "b.md")], "hb").await.unwrap();
+    vectors.record_failed_source("docs", "c.md", "bad bytes").await.unwrap();
+    assert_eq!(vectors.sources("docs").await.unwrap(), ["a.md", "b.md", "c.md"]);
+    assert!(vectors.sources("other").await.unwrap().is_empty());
+    assert_eq!(vectors.remove_source("docs", "a.md").await.unwrap(), 3);
+    assert_eq!(vectors.remove_source("docs", "c.md").await.unwrap(), 0);
+    assert_eq!(vectors.sources("docs").await.unwrap(), ["b.md"]);
+    assert_eq!(vectors.source_hash("docs", "a.md").await.unwrap(), None);
+    assert_eq!(vectors.len().await.unwrap(), 1);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk"), 1);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk_fts_docsize"), 1);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk_meta"), 2);
+    assert_eq!(ids(&vectors.search(&rng.vector(DIMS), 10, &filter(&[])).await.unwrap()), ["b0"]);
+    let other = SqliteStore::open(&t.path).await.unwrap();
+    assert_eq!(docs(&other).await.len().await.unwrap(), 1);
+    assert_eq!(vectors.remove_source("docs", "missing.md").await.unwrap(), 0);
+    store_error(vectors.remove_source(" ", "a.md").await, "scope");
+}
+
+#[tokio::test]
 async fn reopen_after_replace_source_does_not_rebuild() {
     let t = temp();
     let mut rng = Rng(13);
