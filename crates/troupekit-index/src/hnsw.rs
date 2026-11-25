@@ -48,6 +48,7 @@ pub struct Hnsw {
     pub(crate) ids: Vec<u64>,
     pub(crate) levels: Vec<u8>,
     pub(crate) links: Vec<Vec<Vec<u32>>>,
+    pub(crate) inbound: Vec<Vec<Vec<u32>>>,
     pub(crate) data: Slots,
     pub(crate) slot_of: HashMap<u64, u32>,
     pub(crate) entry: Option<u32>,
@@ -74,6 +75,7 @@ impl Hnsw {
             ids: Vec::new(),
             levels: Vec::new(),
             links: Vec::new(),
+            inbound: Vec::new(),
             data: Slots::new(quant),
             slot_of: HashMap::new(),
             entry: None,
@@ -204,10 +206,26 @@ impl Hnsw {
         kept
     }
 
+    /// Replaces the links of `slot` on one layer and keeps the inbound
+    /// lists in step: dropped targets forget `slot`, new targets learn it.
+    /// Every link write goes through here or `add_back_link`.
     fn set_links(&mut self, slot: u32, layer: usize, links: Vec<u32>) {
         assert!(links.len() <= self.cap(layer), "links exceed m or 2m");
         assert!(!links.contains(&slot), "node links to itself");
-        self.links[slot as usize][layer] = links;
+        let old = std::mem::replace(&mut self.links[slot as usize][layer], links);
+        for &o in &old {
+            if !self.links[slot as usize][layer].contains(&o) {
+                let back = &mut self.inbound[o as usize][layer];
+                let at = back.iter().position(|&x| x == slot).expect("inbound mirrors links");
+                back.swap_remove(at);
+            }
+        }
+        for i in 0..self.links[slot as usize][layer].len() {
+            let n = self.links[slot as usize][layer][i];
+            if !old.contains(&n) {
+                self.inbound[n as usize][layer].push(slot);
+            }
+        }
         self.dirty.insert(self.ids[slot as usize]);
     }
 
@@ -218,6 +236,7 @@ impl Hnsw {
         let cap = self.cap(layer);
         if self.links[from as usize][layer].len() < cap {
             self.links[from as usize][layer].push(to);
+            self.inbound[to as usize][layer].push(from);
             assert!(self.links[from as usize][layer].len() <= cap, "links exceed m or 2m");
             self.dirty.insert(self.ids[from as usize]);
             return;
@@ -269,6 +288,7 @@ impl Hnsw {
         self.ids.push(id);
         self.levels.push(level);
         self.links.push(vec![Vec::new(); level as usize + 1]);
+        self.inbound.push(vec![Vec::new(); level as usize + 1]);
         self.data.push(vector);
         self.slot_of.insert(id, slot);
         slot
@@ -301,19 +321,19 @@ impl Hnsw {
         *self = fresh;
     }
 
-    /// Removes every link to `slot` and repairs each node that pointed
-    /// at it: its remaining links plus the removed node's links are
-    /// ranked from that node and re-selected under the cap.
+    /// Removes every link to and from `slot` and repairs each node that
+    /// pointed at it, found through the inbound lists: its remaining links
+    /// plus the removed node's links are re-selected under the cap.
     fn unlink(&mut self, slot: u32) {
         let level = self.levels[slot as usize] as usize;
         let mut buf = Vec::with_capacity(self.dims);
         let mut scratch = Vec::with_capacity(self.dims);
         for layer in 0..=level {
             let gone: Vec<u32> = self.links[slot as usize][layer].clone();
-            for p in 0..self.node_count() as u32 {
-                if p == slot || (self.levels[p as usize] as usize) < layer || !self.links[p as usize][layer].contains(&slot) {
-                    continue;
-                }
+            self.set_links(slot, layer, Vec::new());
+            let mut sources: Vec<u32> = self.inbound[slot as usize][layer].clone();
+            sources.sort_by_key(|&p| self.ids[p as usize]);
+            for p in sources {
                 let mut pool: Vec<u32> = Vec::new();
                 for &c in self.links[p as usize][layer].iter().chain(gone.iter()) {
                     if c != slot && c != p && !pool.contains(&c) {
@@ -327,38 +347,52 @@ impl Hnsw {
                 let kept = self.select(&cands, self.cap(layer));
                 self.set_links(p, layer, kept);
             }
+            assert!(self.inbound[slot as usize][layer].is_empty(), "a link to the removed node survived");
+            assert!(self.links[slot as usize][layer].is_empty(), "the removed node kept a link");
         }
-        assert!(self.links.iter().enumerate().all(|(p, layers)| p as u32 == slot || layers.iter().all(|l| !l.contains(&slot))), "a link to the removed node survived");
     }
 
     /// Drops an unlinked `slot` by moving the last slot into its place.
-    /// Every link to the moved slot is renumbered; the entry point moves
-    /// to the highest remaining node when the removed node held it.
+    /// Only the moved node's neighbours are renumbered, through its links
+    /// and inbound lists. A removed entry point passes to the highest
+    /// remaining node, lowest id first.
     fn drop_slot(&mut self, slot: u32) {
         let last = (self.node_count() - 1) as u32;
+        assert!(self.inbound[slot as usize].iter().all(Vec::is_empty) && self.links[slot as usize].iter().all(Vec::is_empty), "drop_slot needs an unlinked node");
         let was_entry = self.entry == Some(slot);
         let entry_was_last = self.entry == Some(last);
         let id = self.ids[slot as usize];
         self.slot_of.remove(&id);
         if slot != last {
-            self.ids.swap(slot as usize, last as usize);
-            self.levels.swap(slot as usize, last as usize);
-            self.links.swap(slot as usize, last as usize);
-            self.data.move_slot(last as usize, slot as usize, self.dims);
-            self.slot_of.insert(self.ids[slot as usize], slot);
-            for layers in self.links.iter_mut() {
-                for l in layers.iter_mut() {
-                    for c in l.iter_mut() {
+            for layer in 0..=self.levels[last as usize] as usize {
+                for i in 0..self.inbound[last as usize][layer].len() {
+                    let p = self.inbound[last as usize][layer][i];
+                    for c in self.links[p as usize][layer].iter_mut() {
+                        if *c == last {
+                            *c = slot;
+                        }
+                    }
+                }
+                for i in 0..self.links[last as usize][layer].len() {
+                    let t = self.links[last as usize][layer][i];
+                    for c in self.inbound[t as usize][layer].iter_mut() {
                         if *c == last {
                             *c = slot;
                         }
                     }
                 }
             }
+            self.ids.swap(slot as usize, last as usize);
+            self.levels.swap(slot as usize, last as usize);
+            self.links.swap(slot as usize, last as usize);
+            self.inbound.swap(slot as usize, last as usize);
+            self.data.move_slot(last as usize, slot as usize, self.dims);
+            self.slot_of.insert(self.ids[slot as usize], slot);
         }
         self.ids.pop();
         self.levels.pop();
         self.links.pop();
+        self.inbound.pop();
         self.data.truncate(last as usize, self.dims);
         if self.ids.is_empty() {
             self.entry = None;
@@ -366,7 +400,7 @@ impl Hnsw {
         } else if was_entry {
             let mut best = 0usize;
             for s in 1..self.node_count() {
-                if self.levels[s] > self.levels[best] {
+                if (self.levels[s], std::cmp::Reverse(self.ids[s])) > (self.levels[best], std::cmp::Reverse(self.ids[best])) {
                     best = s;
                 }
             }
@@ -379,7 +413,7 @@ impl Hnsw {
 
     fn assert_shape(&self) {
         let n = self.node_count();
-        assert!(self.levels.len() == n && self.links.len() == n, "node arrays out of step");
+        assert!(self.levels.len() == n && self.links.len() == n && self.inbound.len() == n, "node arrays out of step");
         assert_eq!(self.slot_of.len(), n, "slot map out of step with nodes");
         assert_eq!(self.data.count(self.dims), n, "vector data out of step with nodes");
         assert_eq!(self.entry.is_none(), n == 0, "entry point out of step with nodes");
@@ -418,7 +452,7 @@ impl VectorIndex for Hnsw {
 
     fn heap_bytes(&self) -> usize {
         let vectors = self.node_count() * self.data.bytes_per_vector(self.dims);
-        let links: usize = self.links.iter().flatten().map(|l| l.len() * std::mem::size_of::<u32>()).sum();
+        let links: usize = self.links.iter().chain(self.inbound.iter()).flatten().map(|l| l.len() * std::mem::size_of::<u32>()).sum();
         vectors + links
     }
 
@@ -498,5 +532,57 @@ impl VectorIndex for Hnsw {
 
     fn restore(&mut self, vectors: &mut dyn Iterator<Item = (u64, Vec<f32>)>, pages: &mut dyn Iterator<Item = (PageKey, Vec<u8>)>) -> Result<(), IndexError> {
         crate::page::restore(self, vectors, pages)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_inbound_mirrors_links(h: &Hnsw) {
+        let n = h.node_count();
+        let mut want: Vec<Vec<Vec<u32>>> = h.levels.iter().map(|&l| vec![Vec::new(); l as usize + 1]).collect();
+        for p in 0..n {
+            for (layer, l) in h.links[p].iter().enumerate() {
+                for &t in l {
+                    assert!(h.levels[t as usize] as usize >= layer, "link to a node below the layer");
+                    want[t as usize][layer].push(p as u32);
+                }
+            }
+        }
+        for (s, layers) in want.iter_mut().enumerate() {
+            for (layer, w) in layers.iter_mut().enumerate() {
+                let mut got = h.inbound[s][layer].clone();
+                got.sort_unstable();
+                w.sort_unstable();
+                assert_eq!(&got, w, "inbound of slot {s} layer {layer}");
+            }
+        }
+    }
+
+    #[test]
+    fn inbound_mirrors_links_through_inserts_replaces_and_removals() {
+        let params = HnswParams::default().with_m(4).with_ef_construction(32).with_max_deleted_fraction(0.3);
+        let mut h = Hnsw::new(8, Quantization::F32, params);
+        let mut rng = Rng::new(7);
+        let vector = |rng: &mut Rng| -> Vec<f32> { (0..8).map(|_| rng.unit_open() as f32 - 0.5).collect() };
+        for id in 0..400u64 {
+            h.insert(id, &vector(&mut rng)).unwrap();
+        }
+        assert_inbound_mirrors_links(&h);
+        for id in (0..400u64).step_by(3) {
+            assert!(h.remove(id));
+            assert_inbound_mirrors_links(&h);
+            assert!(!h.slot_of.contains_key(&id));
+        }
+        for id in (0..400u64).step_by(5) {
+            h.insert(id, &vector(&mut rng)).unwrap();
+            assert_inbound_mirrors_links(&h);
+        }
+        for id in 0..400u64 {
+            h.remove(id);
+        }
+        assert_inbound_mirrors_links(&h);
+        assert!(h.is_empty() && h.entry.is_none());
     }
 }

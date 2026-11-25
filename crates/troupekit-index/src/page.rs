@@ -66,7 +66,7 @@ struct Header {
     entry: Option<u64>,
     top: u8,
     nodes: u64,
-    live: u64,
+    removed_since_build: u64,
     rng: Rng,
 }
 
@@ -86,7 +86,7 @@ fn encode_header(index: &Hnsw) -> Vec<u8> {
     }
     out.push(index.top);
     out.extend_from_slice(&(index.ids.len() as u64).to_le_bytes());
-    out.extend_from_slice(&(index.ids.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(index.removed_since_build as u64).to_le_bytes());
     out.extend_from_slice(&(p.m() as u64).to_le_bytes());
     out.extend_from_slice(&(p.ef_construction() as u64).to_le_bytes());
     out.extend_from_slice(&(p.ef_search() as u64).to_le_bytes());
@@ -116,7 +116,7 @@ fn decode_header(index: &Hnsw, bytes: &[u8]) -> Result<Header, IndexError> {
     };
     let top = r.u8()?;
     let nodes = r.u64()?;
-    let live = r.u64()?;
+    let removed_since_build = r.u64()?;
     let p = &index.params;
     let params_match = r.u64()? == p.m() as u64 && r.u64()? == p.ef_construction() as u64 && r.u64()? == p.ef_search() as u64 && r.u64()? == p.seed() && r.u32()? == p.max_deleted_fraction().to_bits();
     if !params_match {
@@ -127,10 +127,13 @@ fn decode_header(index: &Hnsw, bytes: &[u8]) -> Result<Header, IndexError> {
     }
     let rng = Rng::from_state(r.u64()?).ok_or_else(|| corrupt(&what, "zero generator state"))?;
     assert_eq!(r.left(), 0, "header length was checked up front");
-    if top > MAX_LEVEL || live != nodes || entry.is_none() != (nodes == 0) {
+    if top > MAX_LEVEL || entry.is_none() != (nodes == 0) {
         return Err(corrupt(&what, "inconsistent counts"));
     }
-    Ok(Header { entry, top, nodes, live, rng })
+    if removed_since_build as f64 > f64::from(p.max_deleted_fraction()) * nodes as f64 {
+        return Err(corrupt(&what, "removal count past the rebuild limit"));
+    }
+    Ok(Header { entry, top, nodes, removed_since_build, rng })
 }
 
 fn encode_node(index: &Hnsw, slot: usize) -> Vec<u8> {
@@ -262,7 +265,7 @@ fn restore_into(index: &mut Hnsw, vectors: &mut dyn Iterator<Item = (u64, Vec<f3
         return Ok(());
     };
     let header = decode_header(index, &header_bytes)?;
-    if node_bytes.len() as u64 != header.nodes || live.len() as u64 != header.live {
+    if node_bytes.len() as u64 != header.nodes || live.len() as u64 != header.nodes {
         return Err(corrupt("header", "node or live count differs from the pages"));
     }
     if header.nodes > u64::from(u32::MAX) {
@@ -302,16 +305,26 @@ fn restore_into(index: &mut Hnsw, vectors: &mut dyn Iterator<Item = (u64, Vec<f3
         index.ids.push(id);
         index.levels.push(page.level);
         index.links.push(page.layers.iter().map(|l| l.iter().map(|n| slot_of[n]).collect()).collect());
+        index.inbound.push(vec![Vec::new(); page.level as usize + 1]);
         index.data.push(&v);
+    }
+    for p in 0..index.links.len() {
+        for layer in 0..index.links[p].len() {
+            for i in 0..index.links[p][layer].len() {
+                let t = index.links[p][layer][i] as usize;
+                index.inbound[t][layer].push(p as u32);
+            }
+        }
     }
     assert!(live.is_empty(), "every live vector was checked to have a node page");
     index.slot_of = slot_of;
     index.entry = entry_slot.map(|s| s as u32);
     index.top = header.top;
     index.rng = header.rng;
+    index.removed_since_build = usize::try_from(header.removed_since_build).expect("bounded by the node count");
     index.dirty.clear();
     index.dropped.clear();
     index.header_dirty = false;
-    assert_eq!(index.ids.len() as u64, header.live, "node count restored");
+    assert_eq!(index.ids.len() as u64, header.nodes, "node count restored");
     Ok(())
 }

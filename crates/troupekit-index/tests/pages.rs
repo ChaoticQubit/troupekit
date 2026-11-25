@@ -285,3 +285,37 @@ fn reinsert_after_rebuild_clears_the_pending_delete() {
     assert!(!changes.iter().any(|c| matches!(c, PageChange::Delete(PageKey::Node(7)))), "{changes:?}");
     assert_eq!(index.len(), 3);
 }
+
+#[test]
+fn removal_count_survives_restore_and_triggers_the_same_rebuild() {
+    let (mut live, mut disk, _) = built(100, 89);
+    for id in 1..=10u64 {
+        disk.remove(live.as_mut(), id);
+    }
+    let (mut restored, r) = disk.restore(params());
+    r.unwrap();
+    let mut changes_live = Vec::new();
+    let mut changes_restored = Vec::new();
+    for id in 11..=21u64 {
+        assert!(live.remove(id));
+        assert!(restored.remove(id));
+        changes_live = live.take_changes();
+        changes_restored = restored.take_changes();
+        assert_eq!(changes_live, changes_restored, "removal of {id}");
+    }
+    let node_puts = changes_live.iter().filter(|c| matches!(c, PageChange::Put(PageKey::Node(_), _))).count();
+    assert_eq!(node_puts, 79, "removal 21 must rebuild and rewrite every node page");
+    assert_eq!(changes_restored.len(), changes_live.len());
+}
+
+#[test]
+fn removal_count_above_the_rebuild_limit_is_corrupt() {
+    let (_, mut disk, _) = built(100, 90);
+    let header = disk.pages.get_mut(&PageKey::Header).unwrap();
+    header[19..27].copy_from_slice(&26u64.to_le_bytes());
+    assert_corrupt(&disk);
+    let (_, mut disk, _) = built(100, 90);
+    let header = disk.pages.get_mut(&PageKey::Header).unwrap();
+    header[19..27].copy_from_slice(&25u64.to_le_bytes());
+    disk.restore(params()).1.unwrap();
+}
