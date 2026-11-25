@@ -26,10 +26,20 @@ pub const MAX_K: usize = 1_000;
 /// One search result: an id and its cosine similarity to the query.
 /// Higher scores are closer. Results come sorted by score descending,
 /// ties broken by the lower id.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Neighbor {
     pub id: u64,
     pub score: f32,
+}
+
+impl Neighbor {
+    /// Builds a result entry from an id and its cosine score.
+    /// Input: any id and score. Output: the neighbour.
+    /// Callers outside the crate use this, since the struct may grow.
+    pub fn new(id: u64, score: f32) -> Self {
+        Self { id, score }
+    }
 }
 
 /// Key of one persisted page.

@@ -77,7 +77,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn exact(items: &[(u64, Vec<f32>)], query: &[f32], k: usize, allow: &dyn Fn(u64) -> bool) -> Vec<Neighbor> {
-    let mut all: Vec<Neighbor> = items.iter().filter(|(id, _)| allow(*id)).map(|(id, v)| Neighbor { id: *id, score: cosine(query, v) }).collect();
+    let mut all: Vec<Neighbor> = items.iter().filter(|(id, _)| allow(*id)).map(|(id, v)| Neighbor::new(*id, cosine(query, v))).collect();
     all.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
     all.truncate(k);
     all
@@ -179,9 +179,9 @@ pub fn case_zero_vector_scores_zero(new: Factory) {
     index.insert(1, &[0.0, 0.0, 0.0]).unwrap();
     index.insert(2, &[1.0, 1.0, 0.0]).unwrap();
     let got = index.search(&[0.0, 0.0, 0.0], 2, None).unwrap();
-    assert_eq!(got, vec![Neighbor { id: 1, score: 0.0 }, Neighbor { id: 2, score: 0.0 }]);
+    assert_eq!(got, vec![Neighbor::new(1, 0.0), Neighbor::new(2, 0.0)]);
     let got = index.search(&[1.0, 0.0, 0.0], 2, None).unwrap();
-    assert_eq!(got[1], Neighbor { id: 1, score: 0.0 });
+    assert_eq!(got[1], Neighbor::new(1, 0.0));
 }
 
 pub fn case_large_components_do_not_overflow(new: Factory) {
@@ -312,4 +312,11 @@ fn constructors_never_panic_on_caller_input() {
             }
         }
     }
+}
+
+#[test]
+fn neighbor_new_sets_fields() {
+    let n = Neighbor::new(7, 0.5);
+    assert_eq!((n.id, n.score), (7, 0.5));
+    assert_eq!(n, Neighbor::new(7, 0.5));
 }
