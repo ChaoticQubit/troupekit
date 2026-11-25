@@ -316,6 +316,27 @@ async fn replace_source_drops_orphans() {
 }
 
 #[tokio::test]
+async fn replace_source_refuses_an_id_owned_by_another_source() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let vectors = docs(&store).await;
+    let mut rng = Rng(21);
+    vectors.replace_source("docs", "a.md", vec![sourced("intro", &mut rng, "docs", "a.md")], "ha").await.unwrap();
+    let before = count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'");
+    let stolen = vec![sourced("b0", &mut rng, "docs", "b.md"), sourced("intro", &mut rng, "docs", "b.md")];
+    store_error(vectors.replace_source("docs", "b.md", stolen, "hb").await, "intro");
+    assert_eq!(count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'"), before);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk"), 1);
+    assert_eq!(vectors.source_hash("docs", "b.md").await.unwrap(), None);
+    let hits = vectors.search(&rng.vector(DIMS), 10, &filter(&[("source", "a.md")])).await.unwrap();
+    assert_eq!(ids(&hits), ["intro"]);
+    assert_eq!(vectors.len().await.unwrap(), 1);
+    let own = vec![sourced("intro", &mut rng, "docs", "a.md")];
+    assert_eq!(vectors.replace_source("docs", "a.md", own, "ha2").await.unwrap(), 1);
+    assert_eq!(vectors.source_hash("docs", "a.md").await.unwrap().as_deref(), Some("ha2"));
+}
+
+#[tokio::test]
 async fn reopen_after_replace_source_does_not_rebuild() {
     let t = temp();
     let mut rng = Rng(13);

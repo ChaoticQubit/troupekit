@@ -432,6 +432,14 @@ impl SqliteVectors {
                     delete_row(&tx, *key, text)?;
                     cached.index.remove(to_id(*key)?);
                 }
+                {
+                    let mut owned = tx.prepare_cached("SELECT 1 FROM chunk WHERE index_name = ?1 AND id = ?2").map_err(db)?;
+                    for record in &records {
+                        if owned.exists(params![state.name, record.id]).map_err(db)? {
+                            return Err(CoreError::Store(format!("record id {} belongs to another source", cut_utf8(&record.id, 64))));
+                        }
+                    }
+                }
                 let keys = write_rows(&tx, &state.name, &records)?;
                 for (key, record) in keys.iter().zip(&records) {
                     cached.index.insert(*key, &record.vector).map_err(index_err)?;
