@@ -12,6 +12,7 @@ use crate::transport::{read_body, HttpRequest, Transport};
 use crate::wire::{AuthStyle, Protocol};
 
 const ERROR_SNIPPET_CHARS: usize = 200;
+const REDACTED: &str = "[redacted]";
 const JSON_BYTES_PER_FLOAT: usize = 32;
 const JSON_BYTES_PER_ITEM: usize = 256;
 const JSON_BYTES_FIXED: usize = 4_096;
@@ -49,6 +50,13 @@ impl HttpEmbedder {
     fn reply_limit(&self, items: usize) -> usize {
         let per_item = self.dims.saturating_mul(JSON_BYTES_PER_FLOAT).saturating_add(JSON_BYTES_PER_ITEM);
         per_item.saturating_mul(items).saturating_add(JSON_BYTES_FIXED).min(MAX_REPLY_BYTES)
+    }
+
+    fn redact(&self, text: &str) -> String {
+        match self.key.as_ref() {
+            Some(k) => text.replace(k.expose(), REDACTED),
+            None => text.to_owned(),
+        }
     }
 
     fn fail(&self, why: impl fmt::Display) -> ContextError {
@@ -128,7 +136,7 @@ impl HttpEmbedder {
         let mut reply = self.transport.send(self.request(batch)).await.map_err(|e| self.fail(format!("transport: {:?}", e.kind)))?;
         let body = read_body(reply.body.as_mut(), self.reply_limit(batch.len())).await.map_err(|e| self.fail(e.message))?;
         if !(200..300).contains(&reply.status) {
-            let text: String = String::from_utf8_lossy(&body).chars().take(ERROR_SNIPPET_CHARS).collect();
+            let text: String = self.redact(&String::from_utf8_lossy(&body)).chars().take(ERROR_SNIPPET_CHARS).collect();
             return Err(self.fail(format!("HTTP {}: {text}", reply.status)));
         }
         let value: Value = serde_json::from_slice(&body).map_err(|_| self.fail("reply is not JSON"))?;

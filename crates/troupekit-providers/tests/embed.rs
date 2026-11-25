@@ -142,3 +142,19 @@ async fn oversized_body_is_refused() {
     let r = e.embed(&texts(1)).await;
     assert!(matches!(r, Err(ContextError::Embed(ref m)) if m.contains("over")), "{r:?}");
 }
+
+#[tokio::test]
+async fn echoed_key_is_redacted_from_error_text() {
+    let secret = "sk-echoed-secret-456";
+    let echo = format!("{{\"error\":\"Incorrect API key provided: {secret}. Check it.\"}}");
+    let long = format!("{}{secret}", "x".repeat(190));
+    let transport = Arc::new(ScriptedTransport::new(vec![Scripted::body(401, echo), Scripted::body(403, long)]));
+    let e = Catalog::load(SMALL).unwrap().embedder_with("v/e", key(secret), transport).unwrap();
+    for _ in 0..2 {
+        let err = e.embed(&texts(1)).await.unwrap_err();
+        let text = format!("{err} {err:?}");
+        assert!(!text.contains(secret), "{text}");
+        assert!(!text.contains("sk-echoed"), "{text}");
+        assert!(text.contains("HTTP 40"), "{text}");
+    }
+}
