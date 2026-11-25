@@ -14,7 +14,7 @@ pub mod status;
 pub mod transport;
 pub mod wire;
 
-pub use catalog::{Catalog, CatalogError, Price};
+pub use catalog::{Catalog, CatalogError, EmbeddingSpec, Price};
 pub use middleware::{FallbackModel, MeteredModel, RetryModel, RetryPolicy};
 pub use model::{Endpoint, HttpModel, Model};
 pub use request::{CompletionRequest, CompletionResponse, Delta, StopReason};

@@ -196,3 +196,24 @@ base_url = "http://localhost:1234/v1"
 auth = "none"
 open_models = true
 quirks = { stream_usage = false }
+
+[[embedding]]
+vendor = "openai"
+id = "text-embedding-3-small"
+dims = 1536
+input_usd_micros_per_mtok = 20000
+price_verified = true
+
+[[embedding]]
+vendor = "openai"
+id = "text-embedding-3-large"
+dims = 3072
+input_usd_micros_per_mtok = 130000
+price_verified = true
+
+[[embedding]]
+vendor = "google"
+id = "gemini-embedding-001"
+dims = 3072
+input_usd_micros_per_mtok = 0
+price_verified = false

@@ -236,3 +236,58 @@ fn rejects_bad_catalogs() {
         .replace("auth = \"bearer\"", "auth = \"none\"");
     assert!(Catalog::load(&keyless_http).is_ok());
 }
+
+fn embedding(vendor_id: &str, extra: &str) -> String {
+    format!("[[embedding]]\nvendor = \"{vendor_id}\"\nid = \"e\"\ndims = 8\ninput_usd_micros_per_mtok = 0\nprice_verified = false\n{extra}\n")
+}
+
+#[test]
+fn catalog_without_embeddings_still_loads() {
+    let c = Catalog::load(&vendor("")).unwrap();
+    assert!(c.embedding_specs().is_empty());
+    assert_eq!(Catalog::load(&toml::to_string(&c).unwrap()).unwrap(), c);
+}
+
+#[test]
+fn embedding_rows_parse_and_list() {
+    let text = format!("{}{}{}", vendor(""), embedding("v", "max_batch = 16"), embedding("v", "").replace("id = \"e\"", "id = \"f\""));
+    let c = Catalog::load(&text).unwrap();
+    let specs = c.embedding_specs();
+    assert_eq!(specs.len(), 2);
+    assert_eq!((specs[0].vendor.as_str(), specs[0].id.as_str(), specs[0].dims, specs[0].max_batch), ("v", "e", 8, 16));
+    assert_eq!(specs[1].max_batch, 64);
+    assert!(!specs[1].price_verified);
+    let invalid = [
+        format!("{}{}", vendor(""), embedding("v", "").replace("dims = 8", "dims = 0")),
+        format!("{}{}", vendor(""), embedding("v", "").replace("dims = 8", "dims = 65537")),
+        format!("{}{}", vendor(""), embedding("v", "max_batch = 0")),
+        format!("{}{}", vendor(""), embedding("v", "max_batch = 2049")),
+        format!("{}{}", vendor(""), embedding("v", "").replace("id = \"e\"", "id = \"a b\"")),
+        format!("{}{}{}", vendor(""), embedding("v", ""), embedding("v", "")),
+        format!("{}{}", vendor(""), embedding("v", "").replace("input_usd_micros_per_mtok = 0\nprice_verified = false", "input_usd_micros_per_mtok = 5\nprice_verified = true")),
+        format!("{}{}", vendor("").replace("protocol = \"openai_compatible\"", "protocol = \"anthropic\""), embedding("v", "")),
+    ];
+    for text in invalid {
+        assert!(matches!(Catalog::load(&text), Err(CatalogError::Invalid(_))), "{text}");
+    }
+    assert!(matches!(Catalog::load(&format!("{}{}", vendor(""), embedding("v", "colour = 1"))), Err(CatalogError::Parse(_))));
+}
+
+#[test]
+fn embedding_for_unknown_vendor_is_refused() {
+    let text = format!("{}{}", vendor(""), embedding("nobody", ""));
+    assert_eq!(Catalog::load(&text), Err(CatalogError::UnknownVendor("nobody".into())));
+}
+
+#[test]
+fn shipped_catalog_embeddings_name_known_vendors() {
+    let c = Catalog::load(CATALOG).unwrap();
+    assert!(!c.embedding_specs().is_empty());
+    for e in c.embedding_specs() {
+        let v = c.vendor(&e.vendor).expect("embedding vendor is in the catalog");
+        assert!(matches!(v.protocol, Protocol::OpenAi | Protocol::OpenAiCompatible | Protocol::Gemini), "{}", e.id);
+        assert!(e.dims > 0 && e.max_batch > 0);
+    }
+    let small = c.embedding_specs().iter().find(|e| e.id == "text-embedding-3-small").unwrap();
+    assert_eq!((small.dims, small.input_usd_micros_per_mtok, small.price_verified), (1536, 20_000, true));
+}

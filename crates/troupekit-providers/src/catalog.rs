@@ -164,21 +164,55 @@ impl VendorSpec {
     }
 }
 
+/// Default inputs per embeddings request when a row names none.
+/// Below every supported vendor's own limit.
+/// Setting S29.
+const DEFAULT_EMBEDDING_MAX_BATCH: usize = 64;
+
+/// Largest embedding dimension or batch a catalog row may name.
+/// Matches the index bound on vector dimensions.
+/// Rows above it are `Invalid`.
+const MAX_EMBEDDING_DIMS: usize = 65_536;
+
+const MAX_EMBEDDING_BATCH: usize = 2_048;
+
+fn default_embedding_max_batch() -> usize {
+    DEFAULT_EMBEDDING_MAX_BATCH
+}
+
+/// One embedding model a vendor serves: a top-level `[[embedding]]` row.
+/// `dims` is the vector length the endpoint returns, `max_batch` the
+/// inputs per request, the price is per million input tokens.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingSpec {
+    pub vendor: String,
+    pub id: String,
+    pub dims: usize,
+    #[serde(default = "default_embedding_max_batch")]
+    pub max_batch: usize,
+    pub input_usd_micros_per_mtok: u64,
+    pub price_verified: bool,
+}
+
 /// The provider catalog: vendors as data, loaded from TOML `[[vendor]]`
-/// tables with `[[vendor.model]]` rows. Settings screens list it, and
+/// tables with `[[vendor.model]]` rows and top-level `[[embedding]]` rows.
 /// `connect` turns a `vendor/model` choice into a ready `Model`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Catalog {
     #[serde(default, rename = "vendor")]
     vendors: Vec<VendorSpec>,
+    #[serde(default, rename = "embedding", skip_serializing_if = "Vec::is_empty")]
+    embeddings: Vec<EmbeddingSpec>,
 }
 
 impl Catalog {
     /// Parses and checks a catalog from TOML `text`.
-    /// Returns `Parse` for bad TOML or unknown fields, `Invalid` for a
-    /// bad id, base URL, repeated entry, zero long-context threshold, or a
-    /// verified paid price without an `https://` price source.
+    /// Returns `Parse` for bad TOML or unknown fields, `UnknownVendor` for
+    /// an embedding row naming no vendor, and `Invalid` for a bad id, URL,
+    /// bound, repeated entry, or verified price without a price source.
     pub fn load(text: &str) -> Result<Self, CatalogError> {
         let catalog: Catalog =
             toml::from_str(text).map_err(|e| CatalogError::Parse(e.to_string()))?;
@@ -191,6 +225,13 @@ impl Catalog {
     /// Each carries its models and prices.
     pub fn vendors(&self) -> &[VendorSpec] {
         &self.vendors
+    }
+
+    /// Lists every embedding model in catalog order.
+    /// Returns the rows as a slice; empty for a catalog without any.
+    /// Each names its vendor, dimension, batch size and price.
+    pub fn embedding_specs(&self) -> &[EmbeddingSpec] {
+        &self.embeddings
     }
 
     /// Looks up the vendor with `id`.
@@ -329,6 +370,46 @@ impl Catalog {
                         v.id, m.id
                     ));
                 }
+            }
+        }
+        self.validate_embeddings()
+    }
+
+    fn validate_embeddings(&self) -> Result<(), CatalogError> {
+        let mut seen = HashSet::new();
+        for e in &self.embeddings {
+            let vendor = self
+                .vendor(&e.vendor)
+                .ok_or_else(|| CatalogError::UnknownVendor(e.vendor.clone()))?;
+            if vendor.protocol == Protocol::Anthropic {
+                return invalid(format!(
+                    "embedding {}/{}: vendor has no embeddings endpoint",
+                    e.vendor, e.id
+                ));
+            }
+            if !valid_model_id(&e.id) {
+                return invalid(format!("embedding id {:?} is not allowed", e.id));
+            }
+            if !seen.insert((e.vendor.as_str(), e.id.as_str())) {
+                return invalid(format!("embedding {}/{} is listed twice", e.vendor, e.id));
+            }
+            if e.dims == 0 || e.dims > MAX_EMBEDDING_DIMS {
+                return invalid(format!(
+                    "embedding {}/{} dims must be in 1..={MAX_EMBEDDING_DIMS}",
+                    e.vendor, e.id
+                ));
+            }
+            if e.max_batch == 0 || e.max_batch > MAX_EMBEDDING_BATCH {
+                return invalid(format!(
+                    "embedding {}/{} max_batch must be in 1..={MAX_EMBEDDING_BATCH}",
+                    e.vendor, e.id
+                ));
+            }
+            if e.price_verified && e.input_usd_micros_per_mtok > 0 && vendor.price_source.is_none() {
+                return invalid(format!(
+                    "embedding {}/{} has a verified price but its vendor has no price_source",
+                    e.vendor, e.id
+                ));
             }
         }
         Ok(())
