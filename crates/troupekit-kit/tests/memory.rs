@@ -254,8 +254,15 @@ fn macro_memory() -> AgentMemory {
     AgentMemory::new("u1", "s1").sqlite(path)
 }
 
+fn macro_knowledge() -> Knowledge {
+    let dir = std::env::temp_dir().join(format!("kit-macro-kb-{}", std::process::id()));
+    Knowledge::dir(docs(&dir))
+        .store(dir.join("kb.db"))
+        .embedder(Arc::new(HashingEmbedder::new(32)))
+}
+
 /// Remembers things.
-#[agent(model = "fake/m", memory = macro_memory())]
+#[agent(model = "fake/m", memory = macro_memory(), knowledge = macro_knowledge())]
 fn noted() {}
 
 #[tokio::test]
@@ -265,5 +272,7 @@ async fn macro_memory_and_knowledge_keys() {
         .build()
         .await
         .unwrap();
-    assert_eq!(built.persona().tools, MEMORY_TOOLS.map(String::from));
+    let mut expected = vec!["search_knowledge".to_string()];
+    expected.extend(MEMORY_TOOLS.map(String::from));
+    assert_eq!(built.persona().tools, expected);
 }
