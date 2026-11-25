@@ -67,13 +67,13 @@ pub fn recall_at_10(index: &dyn VectorIndex, oracle: &dyn VectorIndex, queries: 
 }
 
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let dot: f64 = a.iter().zip(b).map(|(&x, &y)| f64::from(x) * f64::from(y)).sum();
+    let na = a.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>().sqrt();
+    let nb = b.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>().sqrt();
     if na == 0.0 || nb == 0.0 {
         return 0.0;
     }
-    dot / (na * nb)
+    (dot / (na * nb)) as f32
 }
 
 pub fn exact(items: &[(u64, Vec<f32>)], query: &[f32], k: usize, allow: &dyn Fn(u64) -> bool) -> Vec<Neighbor> {
@@ -184,6 +184,19 @@ pub fn case_zero_vector_scores_zero(new: Factory) {
     assert_eq!(got[1], Neighbor { id: 1, score: 0.0 });
 }
 
+pub fn case_large_components_do_not_overflow(new: Factory) {
+    let mut index = new(2);
+    index.insert(1, &[1e20, 0.0]).unwrap();
+    index.insert(2, &[1.0, 1.0]).unwrap();
+    let got = index.search(&[1.0, 0.0], 1, None).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].id, 1);
+    assert!((got[0].score - 1.0).abs() < 1e-6, "{:?}", got[0]);
+    let got = index.search(&[3e38, 3e38], 2, None).unwrap();
+    assert!(got.iter().all(|n| n.score.is_finite()), "{got:?}");
+    assert_eq!(got[0].id, 2);
+}
+
 pub fn contract(new: Factory) {
     case_min_k_and_n_sorted(new);
     case_allow_excludes(new);
@@ -192,6 +205,7 @@ pub fn contract(new: Factory) {
     case_dimension_mismatch(new);
     case_rejects_nan_and_big_k(new);
     case_zero_vector_scores_zero(new);
+    case_large_components_do_not_overflow(new);
 }
 
 #[test]
@@ -274,4 +288,9 @@ fn brute_force_restore_takes_vectors_and_refuses_pages() {
 #[test]
 fn brute_force_contract() {
     contract(brute);
+}
+
+#[test]
+fn large_finite_components_do_not_overflow() {
+    case_large_components_do_not_overflow(brute);
 }

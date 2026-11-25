@@ -73,28 +73,30 @@ pub(crate) fn assert_result_law(hits: &[Neighbor], want: usize) {
 }
 
 /// Cosine of `query` with norm `query_norm` against `v`, in one pass.
-/// Input: equal lengths, checked by the caller. Output: a value in
-/// -1.0..=1.0, or 0.0 when either vector is all zeros.
-pub(crate) fn cosine_with_norm(query: &[f32], query_norm: f32, v: &[f32]) -> f32 {
+/// Sums run in f64 so large finite components cannot overflow; only the
+/// final score is cast to f32. Output: -1.0..=1.0, 0.0 for a zero vector.
+pub(crate) fn cosine_with_norm(query: &[f32], query_norm: f64, v: &[f32]) -> f32 {
     assert_eq!(query.len(), v.len(), "cosine of unequal lengths");
-    let mut dot = 0.0f32;
-    let mut nv = 0.0f32;
-    for (x, y) in query.iter().zip(v) {
-        dot += x * y;
-        nv += y * y;
+    let mut dot = 0.0f64;
+    let mut nv = 0.0f64;
+    for (&x, &y) in query.iter().zip(v) {
+        dot += f64::from(x) * f64::from(y);
+        nv += f64::from(y) * f64::from(y);
     }
     let nv = nv.sqrt();
     if query_norm == 0.0 || nv == 0.0 {
         return 0.0;
     }
-    dot / (query_norm * nv)
+    let score = (dot / (query_norm * nv)) as f32;
+    assert!(score.is_finite(), "cosine of finite vectors is finite in f64");
+    score
 }
 
-/// Euclidean norm of `v`, summed in index order.
-/// Input: any finite slice. Output: a non-negative value.
-/// Matches the order used by `cosine_with_norm`.
-pub(crate) fn norm(v: &[f32]) -> f32 {
-    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+/// Euclidean norm of `v`, summed in f64 in index order.
+/// Input: any finite slice. Output: a non-negative finite value.
+/// Matches the arithmetic of `cosine_with_norm`.
+pub(crate) fn norm(v: &[f32]) -> f64 {
+    v.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>().sqrt()
 }
 
 /// Exact index: scores every allowed vector on each search.

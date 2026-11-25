@@ -103,12 +103,12 @@ impl Hnsw {
         self.node_count() - self.live
     }
 
-    fn sim_to(&self, query: &[f32], qn: f32, slot: u32, buf: &mut Vec<f32>) -> f32 {
+    fn sim_to(&self, query: &[f32], qn: f64, slot: u32, buf: &mut Vec<f32>) -> f32 {
         let v = self.data.decode(slot as usize, self.dims, buf);
         cosine_with_norm(query, qn, v)
     }
 
-    fn rank_of(&self, query: &[f32], qn: f32, slot: u32, buf: &mut Vec<f32>) -> Cand {
+    fn rank_of(&self, query: &[f32], qn: f64, slot: u32, buf: &mut Vec<f32>) -> Cand {
         let score = self.sim_to(query, qn, slot, buf);
         Cand { rank: Ranked(Neighbor { id: self.ids[slot as usize], score }), slot }
     }
@@ -116,7 +116,7 @@ impl Hnsw {
     /// Beam search of width `ef` on one layer from the entry slots.
     /// Every reachable node may be traversed; only `returnable` ones
     /// enter the result. Output: best first, at most `ef` long.
-    fn search_layer(&self, query: &[f32], qn: f32, entries: &[u32], ef: usize, layer: usize, returnable: &dyn Fn(u32) -> bool) -> Vec<Cand> {
+    fn search_layer(&self, query: &[f32], qn: f64, entries: &[u32], ef: usize, layer: usize, returnable: &dyn Fn(u32) -> bool) -> Vec<Cand> {
         assert!(ef > 0, "beam width zero");
         let mut buf = Vec::with_capacity(self.dims);
         let mut visited: HashSet<u32> = HashSet::with_capacity(ef * 4);
