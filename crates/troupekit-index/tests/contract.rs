@@ -29,6 +29,43 @@ impl Rng {
     }
 }
 
+pub fn gaussian(rng: &mut Rng) -> f32 {
+    let u1 = ((rng.next_u64() >> 11) + 1) as f64 / (1u64 << 53) as f64;
+    let u2 = (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+    ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
+}
+
+pub fn normalize(v: Vec<f32>) -> Vec<f32> {
+    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if n == 0.0 {
+        return v;
+    }
+    v.into_iter().map(|x| x / n).collect()
+}
+
+pub fn clustered(seed: u64, n: usize, dims: usize, clusters: usize, spread: f32) -> Vec<Vec<f32>> {
+    let mut rng = Rng::new(seed);
+    let centres: Vec<Vec<f32>> = (0..clusters).map(|_| normalize((0..dims).map(|_| gaussian(&mut rng)).collect())).collect();
+    (0..n)
+        .map(|_| {
+            let c = &centres[(rng.next_u64() % clusters as u64) as usize];
+            normalize(c.iter().map(|x| x + spread * gaussian(&mut rng)).collect())
+        })
+        .collect()
+}
+
+pub fn recall_at_10(index: &dyn VectorIndex, oracle: &dyn VectorIndex, queries: &[Vec<f32>]) -> f64 {
+    let mut found = 0usize;
+    let mut total = 0usize;
+    for q in queries {
+        let want: Vec<u64> = ids(&oracle.search(q, 10, None).unwrap());
+        let got: Vec<u64> = ids(&index.search(q, 10, None).unwrap());
+        total += want.len();
+        found += got.iter().filter(|id| want.contains(id)).count();
+    }
+    found as f64 / total.max(1) as f64
+}
+
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -46,7 +83,7 @@ pub fn exact(items: &[(u64, Vec<f32>)], query: &[f32], k: usize, allow: &dyn Fn(
     all
 }
 
-fn ids(hits: &[Neighbor]) -> Vec<u64> {
+pub fn ids(hits: &[Neighbor]) -> Vec<u64> {
     hits.iter().map(|n| n.id).collect()
 }
 

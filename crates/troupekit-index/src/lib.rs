@@ -3,11 +3,15 @@
 //! opaque pages an index emits, and hands both back on open.
 
 mod brute;
+mod hnsw;
+mod page;
 mod quant;
+mod rng;
 
 use std::fmt;
 
 pub use brute::BruteForce;
+pub use hnsw::Hnsw;
 
 /// Largest vector dimension an index accepts.
 /// Larger values are refused by `new_index` and by inserts.
@@ -242,15 +246,18 @@ impl fmt::Debug for dyn VectorIndex {
 }
 
 /// Builds an empty index of the given kind, dimension and format.
-/// Input: `dims` in `1..=MAX_DIMS`. Output: the boxed index, or
-/// `Invalid` for bad settings and `Unsupported` for a kind not built yet.
+/// Input: `dims` in `1..=MAX_DIMS` and, for HNSW, params in range.
+/// Output: the boxed index, or `Invalid` naming the bad setting.
 pub fn new_index(kind: &IndexKind, dims: usize, quant: Quantization) -> Result<Box<dyn VectorIndex>, IndexError> {
     if dims == 0 || dims > MAX_DIMS {
         return Err(IndexError::Invalid(format!("dims must be in 1..={MAX_DIMS}, got {dims}")));
     }
     match kind {
         IndexKind::BruteForce => Ok(Box::new(BruteForce::new(dims, quant))),
-        IndexKind::Hnsw(_) => Err(IndexError::Unsupported("hnsw index")),
+        IndexKind::Hnsw(params) => {
+            hnsw::validate_params(params)?;
+            Ok(Box::new(Hnsw::new(dims, quant, params.clone())))
+        }
     }
 }
 
