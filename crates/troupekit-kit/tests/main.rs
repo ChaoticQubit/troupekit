@@ -3,6 +3,8 @@ extern crate troupekit_kit as troupekit;
 mod agent;
 mod common;
 mod graph;
+#[cfg(feature = "knowledge")]
+mod knowledge;
 mod laws;
 mod lines;
 mod macros_agent;

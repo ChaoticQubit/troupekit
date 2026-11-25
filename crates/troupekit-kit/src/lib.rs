@@ -2,6 +2,8 @@ mod agent;
 mod built;
 mod error;
 mod graph;
+#[cfg(feature = "knowledge")]
+pub mod knowledge;
 mod laws;
 mod model;
 mod output;
