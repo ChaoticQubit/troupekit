@@ -422,7 +422,7 @@ impl VectorIndex for Hnsw {
         let hits = top.into_sorted();
         assert!(hits.len() <= k, "hnsw returned more than k");
         assert!(hits.windows(2).all(|w| Ranked(w[0]) > Ranked(w[1])), "hnsw result is not sorted by score then id");
-        assert!(hits.iter().all(|n| self.slot_of.get(&n.id).is_some_and(|&s| !self.deleted[s as usize]) && allow.is_none_or(|f| f(n.id))), "hnsw returned a tombstone or a filtered id");
+        assert!(hits.iter().all(|n| self.slot_of.get(&n.id).is_some_and(|&s| !self.deleted[s as usize])), "hnsw returned a tombstone");
         Ok(hits)
     }
 

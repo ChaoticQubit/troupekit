@@ -197,6 +197,19 @@ pub fn case_large_components_do_not_overflow(new: Factory) {
     assert_eq!(got[0].id, 2);
 }
 
+pub fn case_stateful_allow_is_called_safely(new: Factory) {
+    let mut rng = Rng::new(17);
+    let mut index = new(8);
+    for id in 0..200 {
+        index.insert(id, &rng.vector(8)).unwrap();
+    }
+    let seen = std::cell::RefCell::new(std::collections::HashSet::new());
+    let first_call_only = |id: u64| seen.borrow_mut().insert(id);
+    let got = index.search(&rng.vector(8), 10, Some(&first_call_only)).unwrap();
+    assert!(got.len() <= 10);
+    assert!(!got.is_empty());
+}
+
 pub fn contract(new: Factory) {
     case_min_k_and_n_sorted(new);
     case_allow_excludes(new);
@@ -206,6 +219,7 @@ pub fn contract(new: Factory) {
     case_rejects_nan_and_big_k(new);
     case_zero_vector_scores_zero(new);
     case_large_components_do_not_overflow(new);
+    case_stateful_allow_is_called_safely(new);
 }
 
 #[test]
@@ -319,4 +333,9 @@ fn neighbor_new_sets_fields() {
     let n = Neighbor::new(7, 0.5);
     assert_eq!((n.id, n.score), (7, 0.5));
     assert_eq!(n, Neighbor::new(7, 0.5));
+}
+
+#[test]
+fn stateful_allow_filter_never_panics() {
+    case_stateful_allow_is_called_safely(brute);
 }
