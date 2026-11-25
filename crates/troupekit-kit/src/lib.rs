@@ -4,6 +4,8 @@ mod error;
 mod graph;
 mod laws;
 #[cfg(feature = "knowledge")]
+pub mod knowledge;
+#[cfg(feature = "knowledge")]
 mod memory;
 mod model;
 mod output;
