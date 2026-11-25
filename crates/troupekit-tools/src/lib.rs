@@ -16,9 +16,11 @@ pub mod typed;
 pub use declarative::http_toolkit_from_toml;
 pub use fetch::web_fetch;
 pub use http::{
-    is_public_ip, receive, GuardedHttp, HttpError, HttpErrorKind, HttpLimits, HttpRequest,
-    HttpResponse, Method, Received, Transport,
+    is_public_ip, receive, HttpError, HttpErrorKind, HttpLimits, HttpRequest, HttpResponse, Method,
+    Received, Transport,
 };
+#[cfg(feature = "reqwest")]
+pub use http::GuardedHttp;
 pub use registry::{compile_schema, schema_errors, valid_tool_name, ToolRegistry, Toolkit};
 pub use search::{BraveSearch, SearchHit, SearchProvider, SearchToolkit, SearxngSearch};
 pub use secrets::{EnvSecrets, SecretSource};

@@ -1,15 +1,22 @@
 use crate::tool::ToolError;
+#[cfg(any(feature = "reqwest", test))]
 use async_trait::async_trait;
+#[cfg(feature = "reqwest")]
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION, USER_AGENT};
+#[cfg(feature = "reqwest")]
 use reqwest::redirect::Policy;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+#[cfg(feature = "reqwest")]
+use std::net::SocketAddr;
 use std::time::Duration;
 pub use troupekit_core::http::{
     media_type, read_limited, Body, ChunkBody, HttpError, HttpErrorKind, HttpRequest, HttpResponse,
     Method, Transport,
 };
+#[cfg(feature = "reqwest")]
 use url::{Host, Url};
 
+#[cfg(feature = "reqwest")]
 const AGENT: &str = concat!("troupekit/", env!("CARGO_PKG_VERSION"));
 
 /// A tool's view of an answer read into memory: status, final URL, lower-case
@@ -65,12 +72,14 @@ impl Default for HttpLimits {
 /// connection pinned to a checked address; GET redirects are re-checked and
 /// a cross-origin hop drops all request headers. The body is read eagerly
 /// inside the time and size limits. No proxy is used.
+#[cfg(feature = "reqwest")]
 #[derive(Debug, Clone)]
 pub struct GuardedHttp {
     limits: HttpLimits,
     allow: fn(IpAddr) -> bool,
 }
 
+#[cfg(feature = "reqwest")]
 impl GuardedHttp {
     /// Builds a client that reaches public unicast addresses only.
     /// Returns the client with `limits` applied to every request.
@@ -202,6 +211,7 @@ impl GuardedHttp {
     }
 }
 
+#[cfg(feature = "reqwest")]
 #[async_trait]
 impl Transport for GuardedHttp {
     async fn send(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
@@ -217,14 +227,17 @@ impl Transport for GuardedHttp {
     }
 }
 
+#[cfg(any(feature = "reqwest", test))]
 fn network(message: String) -> HttpError {
     HttpError::new(HttpErrorKind::Network, message)
 }
 
+#[cfg(feature = "reqwest")]
 fn blocked(message: String) -> HttpError {
     HttpError::new(HttpErrorKind::Blocked, message)
 }
 
+#[cfg(feature = "reqwest")]
 async fn pinned_addr(url: &Url, allow: fn(IpAddr) -> bool) -> Result<SocketAddr, HttpError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(blocked(format!(
@@ -363,9 +376,13 @@ impl Transport for FakeHttp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "reqwest")]
     use std::net::{Ipv4Addr, SocketAddr};
+    #[cfg(feature = "reqwest")]
     use std::sync::{Arc, Mutex};
+    #[cfg(feature = "reqwest")]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[cfg(feature = "reqwest")]
     use tokio::net::TcpListener;
 
     fn ip(s: &str) -> IpAddr {
@@ -411,6 +428,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn rejects_bad_schemes_and_private_hosts() {
         let http = GuardedHttp::new(HttpLimits::default());
@@ -432,14 +450,17 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "reqwest")]
     fn test_policy(ip: IpAddr) -> bool {
         ip == IpAddr::V4(Ipv4Addr::LOCALHOST) || is_public_ip(ip)
     }
 
+    #[cfg(feature = "reqwest")]
     fn local() -> GuardedHttp {
         GuardedHttp::with_policy(HttpLimits::default(), test_policy)
     }
 
+    #[cfg(feature = "reqwest")]
     async fn serve(responses: Vec<String>) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -460,14 +481,17 @@ mod tests {
         (addr, seen)
     }
 
+    #[cfg(feature = "reqwest")]
     fn redirect(to: &str) -> String {
         format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
     }
 
+    #[cfg(feature = "reqwest")]
     fn ok(mime: &str, body: &str) -> String {
         format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn redirect_to_private_address_rejected_per_hop() {
         for target in [
@@ -487,6 +511,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn follows_public_redirect() {
         let (addr, seen) = serve(vec![
@@ -505,6 +530,7 @@ mod tests {
         assert!(got.url.ends_with("/page") && !got.truncated);
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn too_many_redirects_rejected() {
         let (addr, _) = serve((0..7).map(|_| redirect("/again")).collect()).await;
@@ -517,6 +543,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn cross_origin_redirect_drops_headers() {
         let (second, seen_second) = serve(vec![ok("text/plain", "done")]).await;
@@ -540,6 +567,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn body_is_capped_and_flagged() {
         let (addr, _) = serve(vec![ok("text/plain", &"a".repeat(3000))]).await;
@@ -557,6 +585,7 @@ mod tests {
         assert!(got.truncated);
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn rejects_unaccepted_content_type() {
         let (addr, _) = serve(vec![ok("image/png", "png")]).await;
@@ -569,6 +598,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn non_get_redirect_is_returned_not_followed() {
         let (addr, seen) = serve(vec![redirect("/elsewhere")]).await;
@@ -582,6 +612,7 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
+    #[cfg(feature = "reqwest")]
     #[tokio::test]
     async fn times_out() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
