@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use toml::Value as Toml;
-use troupekit_agent::{AgentIo, InMemoryLedger, Limits, MemorySource, PersonaLoader, SimpleIo};
+use troupekit_agent::{
+    AgentIo, EvalFn, InMemoryLedger, Limits, MemorySource, PersonaLoader, SimpleIo,
+};
 use troupekit_core::clock::Clock;
 use troupekit_core::event::Usage;
 use troupekit_core::ids::RunId;
@@ -172,6 +174,7 @@ impl Graph {
         let mut agent_io = SimpleIo::new(ToolRegistry::new());
         let mut files: HashMap<String, String> = HashMap::new();
         let mut keys: HashMap<String, (String, &Agent)> = HashMap::new();
+        let mut evals: HashMap<String, EvalFn> = HashMap::new();
         for (i, id) in order.iter().enumerate() {
             let feeder = feeder(&order, i);
             match self.node(id) {
@@ -201,7 +204,18 @@ impl Graph {
                     }
                     agent_io.models.entry(key).or_insert(prepared.handle);
                     for (eval, f) in prepared.eval_fns {
-                        agent_io.evals.register(&eval, f)?;
+                        match evals.get(&eval) {
+                            Some(first) if Arc::ptr_eq(first, &f) => {}
+                            Some(_) => {
+                                return Err(fail(format!(
+                                    "eval `{eval}` has two different callbacks; pass one shared EvalFn"
+                                )));
+                            }
+                            None => {
+                                agent_io.evals.register(&eval, f.clone())?;
+                                evals.insert(eval, f);
+                            }
+                        }
                     }
                     let file = format!("{}.toml", prepared.persona.name);
                     match files.get(&file) {

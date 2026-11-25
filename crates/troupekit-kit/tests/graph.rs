@@ -350,6 +350,33 @@ async fn resume_with_a_changed_graph_is_refused() {
 }
 
 #[tokio::test]
+async fn embedded_agents_take_graph_retries_and_share_one_eval_callback() {
+    let built = Graph::new("g")
+        .agent("draft", drafter().retries(33))
+        .build()
+        .await;
+    assert!(built.is_ok());
+    let check: troupekit_agent::EvalFn = Arc::new(|_, _| Ok(()));
+    let checked = drafter().eval("always_ok()").eval_fn("always_ok", check);
+    let built = Graph::new("g")
+        .agent("draft", checked.clone())
+        .agent("again", checked.clone())
+        .build()
+        .await;
+    assert!(built.is_ok());
+    let other: troupekit_agent::EvalFn = Arc::new(|_, _| Ok(()));
+    let text = config_error(Graph::new("g").agent("draft", checked).agent(
+        "again",
+        drafter().eval("always_ok()").eval_fn("always_ok", other),
+    ))
+    .await;
+    assert_eq!(
+        text,
+        "agent `graph:g`: eval `always_ok` has two different callbacks; pass one shared EvalFn"
+    );
+}
+
+#[tokio::test]
 async fn cycle_is_refused() {
     let text = config_error(
         Graph::new("g")

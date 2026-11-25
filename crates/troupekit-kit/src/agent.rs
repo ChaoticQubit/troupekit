@@ -327,6 +327,15 @@ impl Agent {
     /// Fails with the first problem: settings, tools, persona, laws,
     /// evals, model, key or storage. Makes no model call.
     pub async fn build(self) -> Result<BuiltAgent, KitError> {
+        if self.retries > MAX_RETRIES {
+            return Err(KitError::config(
+                &self.name,
+                format!(
+                    "retries must be at most {MAX_RETRIES}, got {}",
+                    self.retries
+                ),
+            ));
+        }
         let prepared = self.prepare(None)?;
         let mut io = SimpleIo::new(prepared.registry);
         io.models
@@ -385,15 +394,6 @@ impl Agent {
 
     pub(crate) fn prepare(&self, model_key: Option<&str>) -> Result<Prepared, KitError> {
         let name = self.name.as_str();
-        if self.retries > MAX_RETRIES {
-            return Err(KitError::config(
-                name,
-                format!(
-                    "retries must be at most {MAX_RETRIES}, got {}",
-                    self.retries
-                ),
-            ));
-        }
         let Some(instructions) = self.instructions.as_deref() else {
             return Err(KitError::config(
                 name,
