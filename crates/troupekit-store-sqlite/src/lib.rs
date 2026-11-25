@@ -30,9 +30,9 @@ const HISTORY_STEPS_MAX_DEFAULT: u64 = 100_000;
 const BUSY_TIMEOUT_MS_DEFAULT: u32 = 5_000;
 
 /// How hard a commit is pushed to disk, per connection. `Full` survives
-/// power loss and also sets `fullfsync`, which Apple platforms need to reach
-/// stable storage. `Normal` is faster and can lose the last commits on power
-/// loss, never on a process kill, and never corrupts the file.
+/// power loss: every commit uses `fullfsync`, which Apple platforms need.
+/// `Normal` is faster and can lose the last commits on power loss, never on
+/// a process kill; WAL checkpoints still use `fullfsync`, so no corruption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Durability {
@@ -221,11 +221,12 @@ fn open_connection(settings: &SqliteStoreBuilder) -> Result<Connection, CoreErro
         Durability::Full => ("FULL", true),
         Durability::Normal => ("NORMAL", false),
     };
+    let checkpoint_fullfsync = true;
     conn.pragma_update(None, "synchronous", synchronous)
         .map_err(db)?;
     conn.pragma_update(None, "fullfsync", fullfsync)
         .map_err(db)?;
-    conn.pragma_update(None, "checkpoint_fullfsync", fullfsync)
+    conn.pragma_update(None, "checkpoint_fullfsync", checkpoint_fullfsync)
         .map_err(db)?;
     conn.pragma_update(None, "trusted_schema", "OFF")
         .map_err(db)?;
@@ -399,7 +400,7 @@ mod tests {
         let (_dir, store) = temp_store(|b| b.durability(Durability::Normal)).await;
         assert_eq!(pragma(&store, "synchronous").await, 1);
         assert_eq!(pragma(&store, "fullfsync").await, 0);
-        assert_eq!(pragma(&store, "checkpoint_fullfsync").await, 0);
+        assert_eq!(pragma(&store, "checkpoint_fullfsync").await, 1);
     }
 
     #[tokio::test]
