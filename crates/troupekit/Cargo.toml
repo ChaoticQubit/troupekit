@@ -1,0 +1,32 @@
+[package]
+name = "troupekit"
+description = "Troupekit entry crate: one builder that wires the stores, the runner and the engines of the Troupekit agent framework."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version = "1.89"
+
+[dependencies]
+troupekit-core.workspace = true
+troupekit-agent = { path = "../troupekit-agent", version = "0.1.0", default-features = false }
+troupekit-graph = { path = "../troupekit-graph", version = "0.1.0", default-features = false }
+troupekit-host = { path = "../troupekit-host", version = "0.1.0", default-features = false }
+troupekit-store-sqlite = { path = "../troupekit-store-sqlite", version = "0.1.0", optional = true }
+
+[features]
+default = ["sqlite", "reqwest"]
+sqlite = ["dep:troupekit-store-sqlite"]
+reqwest = ["troupekit-agent/reqwest", "troupekit-graph/reqwest", "troupekit-host/reqwest"]
+sqlcipher = ["sqlite", "troupekit-store-sqlite/sqlcipher"]
+sqlcipher-system = ["sqlite", "troupekit-store-sqlite/sqlcipher-system"]
+
+[dev-dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }
+troupekit-tools = { path = "../troupekit-tools", version = "0.1.0", default-features = false }
