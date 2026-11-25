@@ -77,6 +77,20 @@ pub fn chunk_id(doc: &Document, index: usize) -> String {
 /// Returns the chunk count, or `ContextError::Invalid` for a blank scope or
 /// source or a reserved key in `doc.meta`; blank text writes nothing.
 pub async fn ingest(vectors: &dyn VectorStore, embedder: &dyn Embedder, doc: &Document, cfg: &ChunkConfig) -> Result<usize, ContextError> {
+    let records = document_records(embedder, doc, cfg).await?;
+    if records.is_empty() {
+        return Ok(0);
+    }
+    let count = records.len();
+    vectors.upsert(records).await?;
+    Ok(count)
+}
+
+/// Chunks and embeds `doc` into the records `ingest` would write, with the
+/// same ids and meta keys, without writing them. Returns the records, none
+/// for blank text, or `ContextError::Invalid` for a blank scope or source
+/// or a reserved key in `doc.meta`.
+pub async fn document_records(embedder: &dyn Embedder, doc: &Document, cfg: &ChunkConfig) -> Result<Vec<VectorRecord>, ContextError> {
     if doc.scope.trim().is_empty() {
         return Err(ContextError::Invalid("scope must not be empty".into()));
     }
@@ -88,11 +102,11 @@ pub async fn ingest(vectors: &dyn VectorStore, embedder: &dyn Embedder, doc: &Do
     }
     let chunks = chunk(&doc.text, cfg)?;
     if chunks.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let embeddings = embed_checked(embedder, &chunks).await?;
     let count = chunks.len();
-    let records = chunks
+    let records: Vec<VectorRecord> = chunks
         .into_iter()
         .zip(embeddings)
         .enumerate()
@@ -106,8 +120,8 @@ pub async fn ingest(vectors: &dyn VectorStore, embedder: &dyn Embedder, doc: &Do
             VectorRecord { id: chunk_id(doc, index), vector, text, meta }
         })
         .collect();
-    vectors.upsert(records).await?;
-    Ok(count)
+    assert_eq!(records.len(), count, "one record per chunk");
+    Ok(records)
 }
 
 #[cfg(test)]
