@@ -1,0 +1,19 @@
+[package]
+name = "troupekit-index"
+description = "Vector indexes for Troupekit: exact brute force and HNSW, with f16 and i8 quantization and persistable pages."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[dependencies]
+thiserror.workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
