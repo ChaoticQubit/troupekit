@@ -24,6 +24,25 @@ pub struct Checkpoint {
 pub trait CheckpointStore: Send + Sync {
     async fn save(&self, cp: Checkpoint) -> Result<(), CoreError>;
     async fn latest(&self, run_id: RunId) -> Result<Option<Checkpoint>, CoreError>;
+
+    /// Returns the kept checkpoints of `run_id`, lowest step first.
+    /// The default lists `latest` as zero or one checkpoint, which is
+    /// exact for a store that keeps only the latest step.
+    async fn history(&self, run_id: RunId) -> Result<Vec<Checkpoint>, CoreError> {
+        Ok(self.latest(run_id).await?.into_iter().collect())
+    }
+
+    /// Deletes all but the `keep_last` highest steps of `run_id` and returns
+    /// how many it deleted. The latest step is never deleted, so `save` keeps
+    /// its next-step rule. `keep_last == 0` returns `CoreError::Store`.
+    /// The default deletes nothing.
+    async fn prune(&self, run_id: RunId, keep_last: u64) -> Result<u64, CoreError> {
+        let _ = run_id;
+        if keep_last == 0 {
+            return Err(CoreError::Store("prune keep_last must be at least 1".into()));
+        }
+        Ok(0)
+    }
 }
 
 /// Append-only message logs keyed by name.

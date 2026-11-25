@@ -70,3 +70,56 @@ fn queue_types_live_in_core() {
     assert_eq!(lease.run_id, run);
     assert_eq!(pending, JobState::Pending { due_ms: 5 });
 }
+
+struct OnlySaveAndLatest(InMemCheckpoints);
+
+#[async_trait::async_trait]
+impl CheckpointStore for OnlySaveAndLatest {
+    async fn save(&self, cp: Checkpoint) -> Result<(), CoreError> {
+        self.0.save(cp).await
+    }
+    async fn latest(&self, run_id: RunId) -> Result<Option<Checkpoint>, CoreError> {
+        self.0.latest(run_id).await
+    }
+}
+
+#[tokio::test]
+async fn impl_with_only_save_and_latest_still_compiles() {
+    let s: Arc<dyn CheckpointStore> = Arc::new(OnlySaveAndLatest(InMemCheckpoints::default()));
+    let run = RunId::new();
+    s.save(Checkpoint { run_id: run, step: 0, state: json!(1) }).await.unwrap();
+    assert_eq!(s.history(run).await.unwrap().len(), 1);
+    assert_eq!(s.prune(run, 1).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn default_history_is_the_latest_checkpoint() {
+    let s = InMemCheckpoints::default();
+    let run = RunId::new();
+    s.save(Checkpoint { run_id: run, step: 0, state: json!({"a":1}) }).await.unwrap();
+    s.save(Checkpoint { run_id: run, step: 1, state: json!({"a":2}) }).await.unwrap();
+    let history = s.history(run).await.unwrap();
+    assert_eq!(history, vec![s.latest(run).await.unwrap().unwrap()]);
+}
+
+#[tokio::test]
+async fn default_history_of_unknown_run_is_empty() {
+    let s = InMemCheckpoints::default();
+    assert!(s.history(RunId::new()).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn default_prune_deletes_nothing() {
+    let s = InMemCheckpoints::default();
+    let run = RunId::new();
+    s.save(Checkpoint { run_id: run, step: 0, state: json!(0) }).await.unwrap();
+    assert_eq!(s.prune(run, 1).await.unwrap(), 0);
+    assert_eq!(s.latest(run).await.unwrap().unwrap().step, 0);
+}
+
+#[tokio::test]
+async fn prune_rejects_keep_last_zero() {
+    let s = InMemCheckpoints::default();
+    let err = s.prune(RunId::new(), 0).await.unwrap_err();
+    assert!(matches!(err, CoreError::Store(_)), "{err:?}");
+}
