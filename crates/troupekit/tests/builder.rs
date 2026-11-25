@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 #[cfg(feature = "sqlite")]
 use common::{finish, graph_io, start, tools};
