@@ -25,7 +25,7 @@ sqlcipher-system = ["rusqlite/bundled-sqlcipher"]
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 [[test]]
 name = "main"
