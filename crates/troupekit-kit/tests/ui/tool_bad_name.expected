@@ -1,0 +1,2 @@
+tool_bad_name.rs:5:
+error: tool name must be 1 to 64 of [A-Za-z0-9_-]

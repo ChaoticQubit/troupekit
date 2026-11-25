@@ -1,0 +1,2 @@
+tool_non_string.rs:5:
+error: #[tool] key `name` takes a string literal

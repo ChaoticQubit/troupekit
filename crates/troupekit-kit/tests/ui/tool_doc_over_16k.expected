@@ -1,0 +1,2 @@
+tool_doc_over_16k.rs:4:
+error: the #[tool] description is over 16 KiB

@@ -8,5 +8,6 @@ mod macros_tool;
 mod model;
 mod output;
 mod storage;
+mod ui;
 #[path = "fixtures/tools_mod.rs"]
 mod tools_mod;

@@ -1,0 +1,2 @@
+agent_duplicate_key.rs:5:
+error: #[agent] key `model` is set twice

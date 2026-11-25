@@ -1,0 +1,2 @@
+tool_bad_arg_type.rs:8:
+the trait bound `Foo: 

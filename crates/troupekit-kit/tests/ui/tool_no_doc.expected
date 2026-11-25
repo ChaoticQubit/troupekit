@@ -1,0 +1,2 @@
+tool_no_doc.rs:5:
+error: #[tool] needs a /// doc comment or description = "..."; it becomes the tool description

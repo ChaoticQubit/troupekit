@@ -1,0 +1,2 @@
+tool_self.rs:9:
+error: #[tool] goes on a free fn, not a method

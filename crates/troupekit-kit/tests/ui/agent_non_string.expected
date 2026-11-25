@@ -1,0 +1,2 @@
+agent_non_string.rs:5:
+error: #[agent] key `model` takes a string literal

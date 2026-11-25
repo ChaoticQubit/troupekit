@@ -1,0 +1,2 @@
+agent_auto_laws_not_bool.rs:5:
+error: auto_laws = takes true or false

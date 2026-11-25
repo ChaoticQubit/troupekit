@@ -1,0 +1,2 @@
+tool_impl_arg.rs:6:
+error: #[tool] arguments cannot be impl Trait
