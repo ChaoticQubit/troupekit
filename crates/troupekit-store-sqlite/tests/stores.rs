@@ -552,3 +552,36 @@ async fn state_too_deep_to_read_back_is_rejected() {
     s.save(deepest.clone()).await.unwrap();
     assert_eq!(s.latest(run).await.unwrap(), Some(deepest));
 }
+
+fn call_with_arguments(depth: usize) -> Message {
+    Message {
+        role: Role::Assistant,
+        parts: vec![ContentPart::ToolCall {
+            id: "c1".into(),
+            name: "deep".into(),
+            arguments: nested(depth),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn message_too_deep_to_read_back_is_rejected() {
+    let t = temp();
+    let m = t.open().await;
+    let first = Message::text(Role::User, "one");
+    m.append("log", 0, vec![first.clone()]).await.unwrap();
+    for depth in [125, 126] {
+        let err = m
+            .append("log", 1, vec![call_with_arguments(depth)])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Store(m) if m.contains("nests deeper")),
+            "{err:?}"
+        );
+        assert_eq!(m.read("log").await.unwrap(), vec![first.clone()]);
+    }
+    let deepest = call_with_arguments(124);
+    assert_eq!(m.append("log", 1, vec![deepest.clone()]).await.unwrap(), 2);
+    assert_eq!(m.read("log").await.unwrap(), vec![first, deepest]);
+}
