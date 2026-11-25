@@ -372,6 +372,7 @@ impl Agent {
         }
         self.model == other.model
             && same(&self.model_client, &other.model_client)
+            && self.price == other.price
             && same(&self.transport, &other.transport)
             && self.api_key == other.api_key
             && self.api_key_env == other.api_key_env

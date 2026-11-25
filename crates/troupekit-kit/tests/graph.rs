@@ -221,6 +221,38 @@ async fn one_agent_name_with_two_model_clients_is_refused() {
 }
 
 #[tokio::test]
+async fn one_agent_name_with_two_prices_is_refused() {
+    let model = echo_model();
+    let priced = |price| {
+        Agent::new("drafter")
+            .instructions("Draft.")
+            .model("fake/m")
+            .model_client(model.clone())
+            .price(price)
+    };
+    let paid = troupekit_providers::Price {
+        input_usd_micros_per_mtok: 1_000_000,
+        ..troupekit_providers::Price::FREE
+    };
+    let text = config_error(
+        Graph::new("g")
+            .agent("draft", priced(troupekit_providers::Price::FREE))
+            .agent("again", priced(paid)),
+    )
+    .await;
+    assert_eq!(
+        text,
+        "agent `graph:g`: two different agents are named `drafter`"
+    );
+    let built = Graph::new("g")
+        .agent("draft", priced(paid))
+        .agent("again", priced(paid))
+        .build()
+        .await;
+    assert!(built.is_ok());
+}
+
+#[tokio::test]
 async fn agent_limits_and_laws_belong_to_the_graph() {
     let limited = drafter().limits(troupekit_agent::Limits {
         run: Some(10),
