@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use toml::Value as Toml;
 use troupekit_agent::{
-    AgentIo, EvalFn, InMemoryLedger, Limits, MemorySource, PersonaLoader, SimpleIo,
+    AgentIo, EvalFn, InMemoryLedger, Limits, MemorySource, PersonaLoader, SimpleIo, UsageLedger,
 };
 use troupekit_core::clock::Clock;
 use troupekit_core::event::Usage;
@@ -47,6 +47,7 @@ pub struct Graph {
     edges: Vec<(String, String)>,
     storage: Storage,
     limits: Limits,
+    ledger: Option<Arc<dyn UsageLedger>>,
     max_steps: Option<u32>,
     retries: u32,
     law_paths: Vec<PathBuf>,
@@ -65,6 +66,7 @@ impl Graph {
             edges: Vec::new(),
             storage: Storage::memory(),
             limits: Limits::default(),
+            ledger: None,
             max_steps: None,
             retries: DEFAULT_GRAPH_RETRIES,
             law_paths: Vec::new(),
@@ -75,9 +77,9 @@ impl Graph {
 
     /// Adds agent node `id` running `agent` on the previous node's output.
     /// The agent keeps its own model binding; its tools and evals join the
-    /// graph, and its storage, retries, events and ledger are the graph's.
-    /// An agent with its own limits or laws fails `build`: set them on the
-    /// graph, so no spend cap is dropped.
+    /// graph, and its storage, retries and events are the graph's. An agent
+    /// with its own limits, laws or ledger fails `build`: set them on the
+    /// graph, so no spend cap or counter is dropped.
     pub fn agent(mut self, id: impl Into<String>, agent: Agent) -> Self {
         self.nodes.push((id.into(), Node::Agent(Box::new(agent))));
         self
@@ -112,6 +114,14 @@ impl Graph {
     /// Returns the builder.
     pub fn limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Sets the usage ledger that period limits (`scope`, `user`) count in.
+    /// Defaults to a fresh in-memory ledger per build; pass a durable one
+    /// so period caps survive rebuilds and restarts.
+    pub fn ledger(mut self, ledger: Arc<dyn UsageLedger>) -> Self {
+        self.ledger = Some(ledger);
         self
     }
 
@@ -181,7 +191,7 @@ impl Graph {
                 Node::Agent(agent) => {
                     if let Some(what) = agent.graph_conflict() {
                         return Err(fail(format!(
-                            "agent node `{id}` sets its own {what}; set them on the graph"
+                            "agent node `{id}` sets its own {what} on the graph"
                         )));
                     }
                     let key = match keys.get(agent.name()) {
@@ -250,7 +260,10 @@ impl Graph {
         }
         agent_io.tools = registry;
         agent_io.events = Arc::new(Discard);
-        agent_io.ledger = Arc::new(InMemoryLedger::default());
+        agent_io.ledger = self
+            .ledger
+            .clone()
+            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
         let agent_io: Arc<dyn AgentIo> = Arc::new(agent_io);
         let loader = PersonaLoader::new(vec![Arc::new(MemorySource::new("graph", files))]);
         let io = SimpleGraphIo::new(agent_io, loader);
@@ -423,6 +436,7 @@ impl fmt::Debug for Graph {
             .field("edges", &self.edges)
             .field("storage", &self.storage)
             .field("retries", &self.retries)
+            .field("ledger", &self.ledger.is_some())
             .finish_non_exhaustive()
     }
 }

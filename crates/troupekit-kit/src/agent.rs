@@ -363,9 +363,11 @@ impl Agent {
 
     pub(crate) fn graph_conflict(&self) -> Option<&'static str> {
         if self.limits != Limits::default() {
-            Some("limits")
+            Some("limits; set them")
         } else if !self.law_paths.is_empty() || !self.inline_laws.is_empty() {
-            Some("laws")
+            Some("laws; set them")
+        } else if self.ledger.is_some() {
+            Some("ledger; set it")
         } else {
             None
         }

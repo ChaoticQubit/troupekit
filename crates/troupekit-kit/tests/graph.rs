@@ -308,6 +308,48 @@ async fn agent_limits_and_laws_belong_to_the_graph() {
 }
 
 #[tokio::test]
+async fn graph_ledger_carries_period_spend_and_agent_ledgers_are_refused() {
+    use troupekit_core::store::UsageLedger;
+    let ledger = Arc::new(troupekit_agent::InMemoryLedger::default());
+    ledger
+        .record(
+            "user-1",
+            Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd_micros: 1_000,
+            },
+        )
+        .await
+        .unwrap();
+    let capped = troupekit_agent::Limits {
+        user: Some(troupekit_agent::PeriodLimit {
+            key: "user-1".into(),
+            max_usd_micros: 10,
+        }),
+        ..Default::default()
+    };
+    let result = Graph::new("g")
+        .agent("draft", drafter())
+        .limits(capped)
+        .ledger(ledger.clone())
+        .run("hi")
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(KitError::Paused { .. } | KitError::Failed { .. })
+        ),
+        "{result:?}"
+    );
+    let text = config_error(Graph::new("g").agent("draft", drafter().ledger(ledger))).await;
+    assert_eq!(
+        text,
+        "agent `graph:g`: agent node `draft` sets its own ledger; set it on the graph"
+    );
+}
+
+#[tokio::test]
 async fn finished_run_resumes_to_its_output() {
     let store = Arc::new(troupekit_core::inmem::InMemCheckpoints::default());
     let built = Graph::new("lab3")
