@@ -3,10 +3,15 @@
 //! opaque pages an index emits, and hands both back on open.
 
 mod brute;
+mod hnsw;
+mod page;
+mod quant;
+mod rng;
 
 use std::fmt;
 
 pub use brute::BruteForce;
+pub use hnsw::Hnsw;
 
 /// Largest vector dimension an index accepts.
 /// Larger values are refused by `new_index` and by inserts.
@@ -21,10 +26,20 @@ pub const MAX_K: usize = 1_000;
 /// One search result: an id and its cosine similarity to the query.
 /// Higher scores are closer. Results come sorted by score descending,
 /// ties broken by the lower id.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Neighbor {
     pub id: u64,
     pub score: f32,
+}
+
+impl Neighbor {
+    /// Builds a result entry from an id and its cosine score.
+    /// Input: any id and score. Output: the neighbour.
+    /// Callers outside the crate use this, since the struct may grow.
+    pub fn new(id: u64, score: f32) -> Self {
+        Self { id, score }
+    }
 }
 
 /// Key of one persisted page.
@@ -111,9 +126,9 @@ impl HnswParams {
         self
     }
 
-    /// Sets the tombstone share of nodes that triggers a rebuild.
-    /// Input: a fraction in `(0.0, 1.0]`. Output: the updated params.
-    /// Checked by `new_index`.
+    /// Sets the share of removals since the last build that triggers a
+    /// rebuild, as a fraction of the node count. Input: `(0.0, 1.0]`.
+    /// Output: the updated params. Checked by `new_index`.
     pub fn with_max_deleted_fraction(mut self, fraction: f32) -> Self {
         self.max_deleted_fraction = fraction;
         self
@@ -147,9 +162,9 @@ impl HnswParams {
         self.seed
     }
 
-    /// Returns the tombstone share of nodes that triggers a rebuild.
-    /// A rebuild re-inserts live vectors in insert order.
-    /// Default 0.25.
+    /// Returns the share of removals since the last build that triggers
+    /// a rebuild. Each removal repairs links locally; a rebuild restores
+    /// full graph quality. Default 0.25.
     pub fn max_deleted_fraction(&self) -> f32 {
         self.max_deleted_fraction
     }
@@ -187,35 +202,50 @@ pub enum IndexError {
 /// at most `k` results, only ids where `allow` returns true.
 pub trait VectorIndex: Send + Sync {
     /// Returns the fixed dimension of every vector and query.
+    /// Set once by `new_index` and never changed.
+    /// Inserts and searches of another length are refused.
     fn dims(&self) -> usize;
 
-    /// Returns the number of live ids, tombstones excluded.
+    /// Returns the number of stored ids.
+    /// A replaced id counts once.
+    /// A removed id is gone at once and not counted.
     fn len(&self) -> usize;
 
-    /// Returns true when no live id is stored.
+    /// Returns true when no id is stored.
+    /// Same as `len() == 0`.
+    /// An index whose ids were all removed is empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the bytes held by stored vectors and graph links.
+    /// Vectors count in their in-memory format: `4*dims`, `2*dims` or
+    /// `dims + 4` bytes each for f32, f16 and i8.
     fn heap_bytes(&self) -> usize;
 
     /// Inserts a vector under `id`, replacing any vector already there.
+    /// Input: an id and a vector of `dims` finite values.
     /// Errors on a wrong dimension or a non-finite component.
     fn insert(&mut self, id: u64, vector: &[f32]) -> Result<(), IndexError>;
 
-    /// Removes `id`. Returns true when it was live.
+    /// Removes `id` and its vector from the index at once.
+    /// Input: any id. Output: true when the id was stored; an unknown or
+    /// already removed id returns false. Its page is deleted on the next drain.
     fn remove(&mut self, id: u64) -> bool;
 
     /// Returns at most `k` nearest live ids allowed by `allow`.
+    /// Sorted by score descending, ties by lower id.
     /// Errors on a wrong dimension, a non-finite query or `k > MAX_K`.
     fn search(&self, query: &[f32], k: usize, allow: Option<&dyn Fn(u64) -> bool>) -> Result<Vec<Neighbor>, IndexError>;
 
     /// Drains the page changes made since the last call.
+    /// The store writes them in the same transaction as the vectors.
+    /// Pages hold links only, never a vector; brute force emits none.
     fn take_changes(&mut self) -> Vec<PageChange>;
 
     /// Loads vectors and persisted pages into an empty index.
-    /// Pages are untrusted: any inconsistency is `CorruptPage`.
+    /// Pages are untrusted: any inconsistency is `CorruptPage` and
+    /// leaves the index empty, so the store rebuilds from vectors.
     fn restore(&mut self, vectors: &mut dyn Iterator<Item = (u64, Vec<f32>)>, pages: &mut dyn Iterator<Item = (PageKey, Vec<u8>)>) -> Result<(), IndexError>;
 }
 
@@ -226,16 +256,18 @@ impl fmt::Debug for dyn VectorIndex {
 }
 
 /// Builds an empty index of the given kind, dimension and format.
-/// Input: `dims` in `1..=MAX_DIMS`. Output: the boxed index, or
-/// `Invalid` for bad settings and `Unsupported` for a kind not built yet.
+/// Input: `dims` in `1..=MAX_DIMS` and, for HNSW, params in range.
+/// Output: the boxed index, or `Invalid` naming the bad setting.
 pub fn new_index(kind: &IndexKind, dims: usize, quant: Quantization) -> Result<Box<dyn VectorIndex>, IndexError> {
     if dims == 0 || dims > MAX_DIMS {
         return Err(IndexError::Invalid(format!("dims must be in 1..={MAX_DIMS}, got {dims}")));
     }
-    match (kind, quant) {
-        (IndexKind::BruteForce, Quantization::F32) => Ok(Box::new(BruteForce::new(dims))),
-        (IndexKind::BruteForce, _) => Err(IndexError::Unsupported("quantized brute force index")),
-        (IndexKind::Hnsw(_), _) => Err(IndexError::Unsupported("hnsw index")),
+    match kind {
+        IndexKind::BruteForce => Ok(Box::new(BruteForce::new(dims, quant))),
+        IndexKind::Hnsw(params) => {
+            hnsw::validate_params(params)?;
+            Ok(Box::new(Hnsw::new(dims, quant, params.clone())))
+        }
     }
 }
 
