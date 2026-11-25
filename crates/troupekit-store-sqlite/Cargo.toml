@@ -9,6 +9,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version = "1.89"
+autotests = false
 
 [dependencies]
 troupekit-core.workspace = true
@@ -24,3 +25,7 @@ sqlcipher-system = ["rusqlite/bundled-sqlcipher"]
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

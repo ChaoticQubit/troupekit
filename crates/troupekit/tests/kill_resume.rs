@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-mod common;
+use crate::common;
 
 use common::{graph_io, saved, start, tools, Hook};
 use std::path::{Path, PathBuf};
@@ -66,7 +66,7 @@ impl Worker {
         cmd.args([
             "--ignored",
             "--exact",
-            "kill_resume_worker",
+            "kill_resume::kill_resume_worker",
             "--test-threads=1",
             "--quiet",
         ])

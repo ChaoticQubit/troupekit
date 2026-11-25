@@ -9,6 +9,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autotests = false
 
 [dependencies]
 troupekit-core.workspace = true
@@ -28,3 +29,7 @@ reqwest = ["troupekit-agent/reqwest", "troupekit-graph/reqwest"]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
 troupekit-tools = { path = "../troupekit-tools", version = "0.1.0" }
 troupekit-providers = { path = "../troupekit-providers", version = "0.1.0", default-features = false }
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

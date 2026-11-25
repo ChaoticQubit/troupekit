@@ -7,6 +7,7 @@ if ! kiri image inspect "$tag" >/dev/null 2>&1; then
   kiri build -q -f "$root/Dockerfile.test" -t "$tag" "$root" >/dev/null
 fi
 exec kiri run --rm \
+  -e CARGO_BUILD_JOBS=3 \
   -v "$root":/src \
   -v troupekit-cargo-registry:/usr/local/cargo/registry \
   -v "$target":/target \

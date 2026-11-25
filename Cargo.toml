@@ -22,3 +22,9 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
 toml = "1"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
