@@ -501,8 +501,8 @@ impl BuiltGraph {
     }
 
     /// Continues graph run `run_id` from its latest checkpoint and returns
-    /// the last node's output. A finished run returns its output again.
-    /// Needs `Storage::sqlite(..)` or `Storage::custom(..)`.
+    /// the last node's output; a finished run returns it again. Needs
+    /// durable storage and a run this same workflow started.
     pub async fn resume(&self, run_id: RunId) -> Result<Value, KitError> {
         let inner = &self.inner;
         let Some(store) = &inner.store else {
@@ -518,6 +518,14 @@ impl BuiltGraph {
             ));
         };
         let mut run = GraphRun::from_checkpoint(&checkpoint)?;
+        if run.workflow() != &inner.workflow {
+            return Err(KitError::config(
+                &inner.owner,
+                format!(
+                    "run {run_id} was started by a different workflow; resume it with the graph that started it"
+                ),
+            ));
+        }
         Ok(self.finish(&mut run, store.as_ref()).await?.output)
     }
 
@@ -573,7 +581,10 @@ impl BuiltGraph {
                     })
                 }
                 GraphOutcome::Done(state) => {
-                    let output = state.get(&inner.last).cloned().unwrap_or(Value::Null);
+                    let output = state
+                        .get(&inner.last)
+                        .cloned()
+                        .expect("a finished chain run wrote its last node");
                     return Ok(GraphReport {
                         output,
                         state,

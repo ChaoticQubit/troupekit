@@ -286,6 +286,34 @@ async fn finished_run_resumes_to_its_output() {
 }
 
 #[tokio::test]
+async fn resume_with_a_changed_graph_is_refused() {
+    let store = Arc::new(troupekit_core::inmem::InMemCheckpoints::default());
+    let first = Graph::new("lab3")
+        .step("clean", clean_text)
+        .step("count", count_chars)
+        .checkpoints(Storage::custom(store.clone()))
+        .build()
+        .await
+        .unwrap();
+    let report = first.run_with(" ab ").await.unwrap();
+    let renamed = Graph::new("lab3")
+        .step("clean", clean_text)
+        .step("total", count_chars)
+        .checkpoints(Storage::custom(store))
+        .build()
+        .await
+        .unwrap();
+    let err = renamed.resume(report.run_id()).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "agent `graph:lab3`: run {} was started by a different workflow; resume it with the graph that started it",
+            report.run_id()
+        )
+    );
+}
+
+#[tokio::test]
 async fn cycle_is_refused() {
     let text = config_error(
         Graph::new("g")
