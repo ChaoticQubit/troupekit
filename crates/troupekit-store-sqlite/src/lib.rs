@@ -166,26 +166,23 @@ fn validate(limits: &Limits) -> Result<(), CoreError> {
     Ok(())
 }
 
-#[cfg(unix)]
+/// Creates the store file when it does not exist yet, so the read-write
+/// open that follows finds it on every platform. On Unix the new file is
+/// 0600. Input: the path. Output: `Ok` when the file exists afterwards,
+/// `CoreError::Store` when it cannot be created.
 fn create_private(path: &Path) -> Result<(), CoreError> {
-    use std::os::unix::fs::OpenOptionsExt;
     if path.exists() {
         return Ok(());
     }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map(drop)
-        .or_else(|e| match e.kind() {
-            std::io::ErrorKind::AlreadyExists => Ok(()),
-            _ => Err(CoreError::Store(format!("cannot create store: {e}"))),
-        })
-}
-
-#[cfg(not(unix))]
-fn create_private(_path: &Path) -> Result<(), CoreError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path).map(drop).or_else(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => Ok(()),
+        _ => Err(CoreError::Store(format!("cannot create store: {e}"))),
+    })?;
+    assert!(path.exists(), "store file missing after create");
     Ok(())
 }
 

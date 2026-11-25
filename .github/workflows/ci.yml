@@ -73,6 +73,9 @@ jobs:
       - name: build without the TLS stack
         if: matrix.phone
         run: cargo build -p troupekit --no-default-features --features sqlite --locked --target ${{ matrix.target }}
+      - name: store test on Windows
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test -p troupekit-store-sqlite --locked --test smoke
 
   test:
     name: test ${{ matrix.runner }}
