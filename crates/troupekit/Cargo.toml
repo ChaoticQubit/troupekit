@@ -24,6 +24,14 @@ reqwest = ["troupekit-agent/reqwest", "troupekit-graph/reqwest", "troupekit-host
 sqlcipher = ["sqlite", "troupekit-store-sqlite/sqlcipher"]
 sqlcipher-system = ["sqlite", "troupekit-store-sqlite/sqlcipher-system"]
 
+[[example]]
+name = "kill_resume"
+required-features = ["sqlite"]
+
+[[test]]
+name = "kill_resume"
+required-features = ["sqlite"]
+
 [dev-dependencies]
 async-trait.workspace = true
 serde_json.workspace = true
