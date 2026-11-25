@@ -203,8 +203,14 @@ pub fn expand_tool(t: &ToolFn) -> Vec<Piece> {
     } else {
         "fn invoke"
     }));
+    let mut outer = Vec::new();
     let mut params = Vec::new();
-    for param in &t.params {
+    let mut forward = Vec::new();
+    for (i, param) in t.params.iter().enumerate() {
+        outer.push(code(&format!("__troupekit_a{i}:")));
+        outer.extend(param.ty.iter().map(|tok| Piece::Orig(tok.span())));
+        outer.push(code(","));
+        forward.push(format!("__troupekit_a{i}"));
         if param.is_mut {
             params.push(code("mut"));
         }
@@ -213,12 +219,26 @@ pub fn expand_tool(t: &ToolFn) -> Vec<Piece> {
         params.extend(param.ty.iter().map(|tok| Piece::Orig(tok.span())));
         params.push(code(","));
     }
-    invoke.push(Piece::Group(Delim::Paren, params));
-    if !t.ret.is_empty() {
-        invoke.push(code("->"));
-        invoke.extend(t.ret.iter().map(|tok| Piece::Orig(tok.span())));
-    }
-    invoke.push(Piece::Orig(t.body_span));
+    invoke.push(Piece::Group(Delim::Paren, outer));
+    let ret = |list: &mut Vec<Piece>| {
+        if !t.ret.is_empty() {
+            list.push(code("->"));
+            list.extend(t.ret.iter().map(|tok| Piece::Orig(tok.span())));
+        }
+    };
+    ret(&mut invoke);
+    let mut inner = vec![code(if t.is_async { "async fn" } else { "fn" })];
+    inner.push(ident.clone());
+    inner.push(Piece::Group(Delim::Paren, params));
+    ret(&mut inner);
+    inner.push(Piece::Orig(t.body_span));
+    inner.push(ident.clone());
+    inner.push(code(&format!(
+        "({}){}",
+        forward.join(", "),
+        if t.is_async { ".await" } else { "" }
+    )));
+    invoke.push(Piece::Group(Delim::Brace, inner));
     out.push(Piece::Group(Delim::Brace, invoke));
 
     out.extend(cfg());
@@ -240,17 +260,11 @@ pub fn expand_tool(t: &ToolFn) -> Vec<Piece> {
     }
     out.push(Piece::Group(Delim::Brace, fields));
 
-    let bindings: Vec<&str> = t
-        .params
-        .iter()
-        .filter(|p| p.kind == ParamKind::Arg)
-        .map(|p| p.ident.as_str())
-        .collect();
     let call_args: Vec<String> = t
         .params
         .iter()
         .map(|p| match p.kind {
-            ParamKind::Arg => p.ident.clone(),
+            ParamKind::Arg => format!("__troupekit_args.{}", p.ident),
             ParamKind::Context { by_ref: true } => "__troupekit_ctx".to_string(),
             ParamKind::Context { by_ref: false } => {
                 "::core::clone::Clone::clone(__troupekit_ctx)".to_string()
@@ -271,14 +285,13 @@ pub fn expand_tool(t: &ToolFn) -> Vec<Piece> {
          }} \
          async fn call(&self, __troupekit_value: {p}::serde_json::Value, __troupekit_ctx: &{p}::ToolContext) \
              -> ::core::result::Result<{p}::ToolOutput, {p}::ToolError> {{ \
-             let {args_ty} {{ {bindings} }} = {p}::serde_json::from_value(__troupekit_value) \
+             let __troupekit_args: {args_ty} = {p}::serde_json::from_value(__troupekit_value) \
                  .map_err(|e| {p}::ToolError::InvalidArgs(::std::string::ToString::to_string(&e)))?; \
              ::core::result::Result::Ok({p}::IntoToolOutput::into_output(Self::invoke({call}){await_suffix})) \
          }} \
          }}",
         name = quote_str(&t.name),
         description = quote_str(&t.description),
-        bindings = bindings.join(", "),
         call = call_args.join(", "),
     )));
     out
@@ -786,11 +799,11 @@ mod tests {
         for part in [
             "#[doc = \"Adds two numbers.\"]",
             "pub struct add ;",
-            "impl add {pub async fn invoke (a : i64 , o : Option < u8 > , ctx : ToolContext ,) -> i64 {a}}",
+            "impl add {pub async fn invoke (__troupekit_a0: i64 , __troupekit_a1: Option < u8 > , __troupekit_a2: ToolContext ,) -> i64 {async fn add (a : i64 , o : Option < u8 > , ctx : ToolContext ,) -> i64 {a} add (__troupekit_a0, __troupekit_a1, __troupekit_a2).await}}",
             "struct __troupekit_args_add {a : i64 , #[serde(default)] o : Option < u8 > ,}",
             "#[serde(crate = \"::troupekit::__private::serde\", deny_unknown_fields)]",
-            "let __troupekit_args_add { a, o } =",
-            "Self::invoke(a, o, ::core::clone::Clone::clone(__troupekit_ctx)).await",
+            "let __troupekit_args: __troupekit_args_add =",
+            "Self::invoke(__troupekit_args.a, __troupekit_args.o, ::core::clone::Clone::clone(__troupekit_ctx)).await",
             "spec::<__troupekit_args_add>(\"add\", \"Adds two numbers.\")",
         ] {
             assert!(out.contains(part), "missing {part:?} in {out}");

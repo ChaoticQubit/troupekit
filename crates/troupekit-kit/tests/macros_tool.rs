@@ -141,3 +141,25 @@ async fn raw_ident_arg_reads_plain_key() {
         .unwrap();
     assert_eq!(out, ToolOutput::text("x"));
 }
+
+/// Echoes the query.
+#[troupekit::tool]
+fn query(query: String, __troupekit_ctx: i64, ctx: &ToolContext) -> String {
+    format!("{query} {__troupekit_ctx} {}", ctx.run_id.is_some())
+}
+
+#[tokio::test]
+async fn params_named_like_the_tool_or_its_internals_still_bind() {
+    let out = query
+        .call(
+            json!({"query": "q", "__troupekit_ctx": 7}),
+            &ToolContext::for_call(RunId::new(), 3, 0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out, ToolOutput::text("q 7 true"));
+    assert_eq!(
+        query::invoke("x".into(), 1, &ToolContext::default()),
+        "x 1 false"
+    );
+}
