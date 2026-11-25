@@ -86,7 +86,7 @@ fn encode_header(index: &Hnsw) -> Vec<u8> {
     }
     out.push(index.top);
     out.extend_from_slice(&(index.ids.len() as u64).to_le_bytes());
-    out.extend_from_slice(&(index.live as u64).to_le_bytes());
+    out.extend_from_slice(&(index.ids.len() as u64).to_le_bytes());
     out.extend_from_slice(&(p.m() as u64).to_le_bytes());
     out.extend_from_slice(&(p.ef_construction() as u64).to_le_bytes());
     out.extend_from_slice(&(p.ef_search() as u64).to_le_bytes());
@@ -127,7 +127,7 @@ fn decode_header(index: &Hnsw, bytes: &[u8]) -> Result<Header, IndexError> {
     }
     let rng = Rng::from_state(r.u64()?).ok_or_else(|| corrupt(&what, "zero generator state"))?;
     assert_eq!(r.left(), 0, "header length was checked up front");
-    if top > MAX_LEVEL || live > nodes || entry.is_none() != (nodes == 0) {
+    if top > MAX_LEVEL || live != nodes || entry.is_none() != (nodes == 0) {
         return Err(corrupt(&what, "inconsistent counts"));
     }
     Ok(Header { entry, top, nodes, live, rng })
@@ -135,8 +135,7 @@ fn decode_header(index: &Hnsw, bytes: &[u8]) -> Result<Header, IndexError> {
 
 fn encode_node(index: &Hnsw, slot: usize) -> Vec<u8> {
     let level = index.levels[slot];
-    let tomb = index.deleted[slot];
-    let mut out = vec![FORMAT, level, u8::from(tomb)];
+    let mut out = vec![FORMAT, level, 0u8];
     assert_eq!(index.links[slot].len(), level as usize + 1, "layer count out of step with level");
     for layer in &index.links[slot] {
         let count = u16::try_from(layer.len()).expect("link count bounded by 2m <= 256");
@@ -145,23 +144,15 @@ fn encode_node(index: &Hnsw, slot: usize) -> Vec<u8> {
             out.extend_from_slice(&index.ids[n as usize].to_le_bytes());
         }
     }
-    if tomb {
-        let mut buf = Vec::with_capacity(index.dims);
-        for x in index.data.decode(slot, index.dims, &mut buf) {
-            out.extend_from_slice(&x.to_le_bytes());
-        }
-    }
     out
 }
 
 /// One node page decoded but not yet linked to slots.
 /// Neighbour ids are checked against the node set afterwards.
-/// `vector` is set only for a tombstone.
+/// Pages never carry a vector: vectors come from the store.
 struct NodePage {
     level: u8,
-    tomb: bool,
     layers: Vec<Vec<u64>>,
-    vector: Option<Vec<f32>>,
 }
 
 fn decode_node(index: &Hnsw, id: u64, top: u8, bytes: &[u8]) -> Result<NodePage, IndexError> {
@@ -174,11 +165,9 @@ fn decode_node(index: &Hnsw, id: u64, top: u8, bytes: &[u8]) -> Result<NodePage,
     if level > top {
         return Err(corrupt(&what, "level above the header top level"));
     }
-    let tomb = match r.u8()? {
-        0 => false,
-        1 => true,
-        _ => return Err(corrupt(&what, "bad tombstone flag")),
-    };
+    if r.u8()? != 0 {
+        return Err(corrupt(&what, "tombstone flag set; removed nodes have no page"));
+    }
     let mut layers = Vec::with_capacity(level as usize + 1);
     for layer in 0..=level as usize {
         let count = r.u16()? as usize;
@@ -198,25 +187,10 @@ fn decode_node(index: &Hnsw, id: u64, top: u8, bytes: &[u8]) -> Result<NodePage,
         }
         layers.push(links);
     }
-    let vector = if tomb {
-        if r.left() != 4 * index.dims {
-            return Err(corrupt(&what, "tombstone vector of the wrong length"));
-        }
-        let mut v = Vec::with_capacity(index.dims);
-        for _ in 0..index.dims {
-            v.push(f32::from_bits(r.u32()?));
-        }
-        if check_vector(index.dims, &v).is_err() {
-            return Err(corrupt(&what, "tombstone vector is not finite"));
-        }
-        Some(v)
-    } else {
-        if r.left() != 0 {
-            return Err(corrupt(&what, "live page carries trailing bytes"));
-        }
-        None
-    };
-    Ok(NodePage { level, tomb, layers, vector })
+    if r.left() != 0 {
+        return Err(corrupt(&what, "page carries trailing bytes"));
+    }
+    Ok(NodePage { level, layers })
 }
 
 /// Drains the change sets of an HNSW index into pages.
@@ -297,8 +271,8 @@ fn restore_into(index: &mut Hnsw, vectors: &mut dyn Iterator<Item = (u64, Vec<f3
     let mut decoded: BTreeMap<u64, NodePage> = BTreeMap::new();
     for (&id, bytes) in &node_bytes {
         let page = decode_node(index, id, header.top, bytes)?;
-        if page.tomb == live.contains_key(&id) {
-            return Err(corrupt(&format!("node {id}"), "tombstone flag disagrees with the live vectors"));
+        if !live.contains_key(&id) {
+            return Err(corrupt(&format!("node {id}"), "node page without a live vector"));
         }
         decoded.insert(id, page);
     }
@@ -324,18 +298,11 @@ fn restore_into(index: &mut Hnsw, vectors: &mut dyn Iterator<Item = (u64, Vec<f3
     }
     let slot_of: HashMap<u64, u32> = decoded.keys().enumerate().map(|(i, &id)| (id, i as u32)).collect();
     for (id, page) in decoded {
-        let v = match page.vector {
-            Some(v) => v,
-            None => live.remove(&id).expect("live page checked against the live map"),
-        };
+        let v = live.remove(&id).expect("node page checked against the live map");
         index.ids.push(id);
         index.levels.push(page.level);
-        index.deleted.push(page.tomb);
         index.links.push(page.layers.iter().map(|l| l.iter().map(|n| slot_of[n]).collect()).collect());
         index.data.push(&v);
-        if !page.tomb {
-            index.live += 1;
-        }
     }
     assert!(live.is_empty(), "every live vector was checked to have a node page");
     index.slot_of = slot_of;
@@ -345,6 +312,6 @@ fn restore_into(index: &mut Hnsw, vectors: &mut dyn Iterator<Item = (u64, Vec<f3
     index.dirty.clear();
     index.dropped.clear();
     index.header_dirty = false;
-    assert_eq!(index.live as u64, header.live, "live count restored");
+    assert_eq!(index.ids.len() as u64, header.live, "node count restored");
     Ok(())
 }

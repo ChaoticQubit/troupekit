@@ -193,24 +193,25 @@ fn restore_after_remove_without_live_vector_keeps_results() {
     assert_same_results(index.as_ref(), restored.as_ref(), &queries);
 }
 
-fn tombstoned() -> (Disk, u64) {
+fn removed() -> (Disk, u64) {
     let (mut index, mut disk, _) = built(200, 83);
     disk.remove(index.as_mut(), 17);
     (disk, 17)
 }
 
 #[test]
-fn tombstone_vector_wrong_length_or_nan_is_corrupt() {
-    let (mut disk, id) = tombstoned();
-    let page = disk.pages.get_mut(&PageKey::Node(id)).unwrap();
-    page.truncate(page.len() - 4);
+fn tombstone_flag_is_corrupt() {
+    let (mut disk, _) = removed();
+    let page = disk.pages.get_mut(&PageKey::Node(5)).unwrap();
+    page[2] = 1;
     assert_corrupt(&disk);
-    let (mut disk, id) = tombstoned();
-    let page = disk.pages.get_mut(&PageKey::Node(id)).unwrap();
-    let at = page.len() - 4;
-    page[at..].copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+    let (mut disk, _) = removed();
+    let page = disk.pages.get_mut(&PageKey::Node(5)).unwrap();
+    page[2] = 1;
+    page.extend(std::iter::repeat_n(0u8, 4 * DIMS));
     assert_corrupt(&disk);
-    let (disk, _) = tombstoned();
+    let (disk, id) = removed();
+    assert!(!disk.pages.contains_key(&PageKey::Node(id)));
     disk.restore(params()).1.unwrap();
 }
 
@@ -222,37 +223,51 @@ fn live_page_with_vector_is_corrupt() {
 }
 
 #[test]
-fn id_both_tombstone_and_live_is_corrupt() {
-    let (mut disk, id) = tombstoned();
-    disk.vectors.insert(id, vec![0.5; DIMS]);
+fn node_page_without_live_vector_is_corrupt() {
+    let (_, mut disk, _) = built(200, 87);
+    disk.vectors.remove(&17);
     assert_corrupt(&disk);
 }
 
 #[test]
-fn rebuild_deletes_dropped_tombstone_pages() {
+fn remove_deletes_the_node_page_at_once() {
     let data = clustered(85, 100, DIMS, 5, 0.4);
     let mut index = fresh(params());
     let mut disk = Disk::default();
     for (i, v) in data.iter().enumerate() {
         disk.insert(index.as_mut(), i as u64 + 1, v);
     }
-    let mut deletes = Vec::new();
     for id in 1..=26u64 {
         assert!(index.remove(id));
         disk.vectors.remove(&id);
         let changes = index.take_changes();
-        deletes.extend(changes.iter().filter_map(|c| match c {
-            PageChange::Delete(PageKey::Node(n)) => Some(*n),
-            _ => None,
-        }));
+        assert!(changes.contains(&PageChange::Delete(PageKey::Node(id))), "id {id}: {changes:?}");
+        assert!(!changes.iter().any(|c| matches!(c, PageChange::Put(PageKey::Node(n), _) if *n == id)));
         disk.apply(changes);
+        assert!(!disk.pages.contains_key(&PageKey::Node(id)));
     }
-    assert_eq!(deletes, (1..=26).collect::<Vec<u64>>());
     assert_eq!(index.len(), 74);
     assert_eq!(disk.pages.len(), 75);
     let (restored, r) = disk.restore(params());
     r.unwrap();
     assert_same_results(index.as_ref(), restored.as_ref(), &data);
+}
+
+#[test]
+fn removed_vector_leaves_no_bytes_in_any_page() {
+    let (mut index, mut disk, _) = built(300, 88);
+    let marker: Vec<f32> = (0..DIMS).map(|i| 1234.5 + i as f32).collect();
+    disk.insert(index.as_mut(), 999, &marker);
+    disk.remove(index.as_mut(), 999);
+    let needle: Vec<u8> = marker[..4].iter().flat_map(|x| x.to_le_bytes()).collect();
+    for (key, bytes) in &disk.pages {
+        assert!(!bytes.windows(needle.len()).any(|w| w == needle.as_slice()), "{key:?} holds the removed vector");
+        if let PageKey::Node(n) = key {
+            assert_ne!(*n, 999);
+        }
+        assert!(!matches!(key, PageKey::Node(_)) || bytes.windows(8).all(|w| w != 999u64.to_le_bytes()), "{key:?} still links to the removed id");
+    }
+    assert!(index.search(&marker, 300, None).unwrap().iter().all(|n| n.id != 999));
 }
 
 #[test]

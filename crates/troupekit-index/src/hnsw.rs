@@ -37,8 +37,9 @@ impl Ord for Cand {
 
 /// Approximate index after Malkov and Yashunin: a layered graph with
 /// greedy descent and a beam search of width `ef` on layer 0.
-/// Removal leaves a traversable tombstone; past `max_deleted_fraction`
-/// the graph rebuilds from live vectors in insert order.
+/// Removal unlinks the node at once and repairs its neighbours, so no
+/// removed vector stays in memory or in a page; past
+/// `max_deleted_fraction` removals the graph rebuilds in id order.
 #[derive(Debug)]
 pub struct Hnsw {
     pub(crate) dims: usize,
@@ -46,13 +47,12 @@ pub struct Hnsw {
     pub(crate) params: HnswParams,
     pub(crate) ids: Vec<u64>,
     pub(crate) levels: Vec<u8>,
-    pub(crate) deleted: Vec<bool>,
     pub(crate) links: Vec<Vec<Vec<u32>>>,
     pub(crate) data: Slots,
     pub(crate) slot_of: HashMap<u64, u32>,
     pub(crate) entry: Option<u32>,
     pub(crate) top: u8,
-    pub(crate) live: usize,
+    pub(crate) removed_since_build: usize,
     pub(crate) rng: Rng,
     pub(crate) dirty: BTreeSet<u64>,
     pub(crate) dropped: BTreeSet<u64>,
@@ -73,13 +73,12 @@ impl Hnsw {
             params,
             ids: Vec::new(),
             levels: Vec::new(),
-            deleted: Vec::new(),
             links: Vec::new(),
             data: Slots::new(quant),
             slot_of: HashMap::new(),
             entry: None,
             top: 0,
-            live: 0,
+            removed_since_build: 0,
             rng,
             dirty: BTreeSet::new(),
             dropped: BTreeSet::new(),
@@ -97,10 +96,6 @@ impl Hnsw {
 
     fn node_count(&self) -> usize {
         self.ids.len()
-    }
-
-    fn tombstones(&self) -> usize {
-        self.node_count() - self.live
     }
 
     fn sim_to(&self, query: &[f32], qn: f64, slot: u32, buf: &mut Vec<f32>) -> f32 {
@@ -178,7 +173,7 @@ impl Hnsw {
     /// link, then pruned ones fill the free slots, so equal vectors stay linked.
     fn select(&self, candidates: &[Cand], cap: usize) -> Vec<u32> {
         let mut sorted: Vec<Cand> = candidates.to_vec();
-        sorted.sort_by(|x, y| y.rank.0.score.total_cmp(&x.rank.0.score).then_with(|| y.slot.cmp(&x.slot)));
+        sorted.sort_by(|x, y| y.rank.0.score.total_cmp(&x.rank.0.score).then_with(|| y.rank.0.id.cmp(&x.rank.0.id)));
         let mut kept: Vec<u32> = Vec::with_capacity(cap);
         let mut pruned: Vec<u32> = Vec::new();
         let mut a = Vec::with_capacity(self.dims);
@@ -257,13 +252,8 @@ impl Hnsw {
         }
         let mut entries = vec![ep];
         for layer in (0..=level.min(self.top) as usize).rev() {
-            let (found, chosen) = {
-                let deleted = &self.deleted;
-                let live_not_self = |s: u32| s != slot && !deleted[s as usize];
-                let found = self.search_layer(vector, qn, &entries, self.params.ef_construction(), layer, &live_not_self);
-                let chosen = self.select(&found, self.params.m());
-                (found, chosen)
-            };
+            let found = self.search_layer(vector, qn, &entries, self.params.ef_construction(), layer, &not_self);
+            let chosen = self.select(&found, self.params.m());
             self.set_links(slot, layer, chosen.clone());
             for n in chosen {
                 self.add_back_link(n, slot, layer);
@@ -278,7 +268,6 @@ impl Hnsw {
         let slot = u32::try_from(self.ids.len()).expect("node count checked below u32::MAX");
         self.ids.push(id);
         self.levels.push(level);
-        self.deleted.push(false);
         self.links.push(vec![Vec::new(); level as usize + 1]);
         self.data.push(vector);
         self.slot_of.insert(id, slot);
@@ -288,7 +277,6 @@ impl Hnsw {
     fn insert_new(&mut self, id: u64, vector: &[f32]) {
         let level = self.rng.level(self.params.m());
         let slot = self.push_node(id, vector, level);
-        self.live += 1;
         self.dirty.insert(id);
         self.dropped.remove(&id);
         self.link(slot, vector);
@@ -301,29 +289,101 @@ impl Hnsw {
 
     fn rebuild(&mut self) {
         let mut buf = Vec::with_capacity(self.dims);
-        let live: Vec<(u64, Vec<f32>)> = (0..self.node_count()).filter(|&s| !self.deleted[s]).map(|s| (self.ids[s], self.data.decode(s, self.dims, &mut buf).to_vec())).collect();
-        let dropped: Vec<u64> = (0..self.node_count()).filter(|&s| self.deleted[s]).map(|s| self.ids[s]).collect();
+        let mut nodes: Vec<(u64, Vec<f32>)> = (0..self.node_count()).map(|s| (self.ids[s], self.data.decode(s, self.dims, &mut buf).to_vec())).collect();
+        nodes.sort_by_key(|(id, _)| *id);
         let mut fresh = Hnsw::new(self.dims, self.quant, self.params.clone());
-        for (id, v) in &live {
+        for (id, v) in &nodes {
             fresh.insert_new(*id, v);
         }
         fresh.dropped = std::mem::take(&mut self.dropped);
-        fresh.dropped.extend(dropped);
-        for id in &fresh.ids {
-            fresh.dropped.remove(id);
-        }
         fresh.header_dirty = true;
-        assert_eq!(fresh.live, live.len(), "rebuild lost live vectors");
+        assert_eq!(fresh.node_count(), nodes.len(), "rebuild lost vectors");
         *self = fresh;
+    }
+
+    /// Removes every link to `slot` and repairs each node that pointed
+    /// at it: its remaining links plus the removed node's links are
+    /// ranked from that node and re-selected under the cap.
+    fn unlink(&mut self, slot: u32) {
+        let level = self.levels[slot as usize] as usize;
+        let mut buf = Vec::with_capacity(self.dims);
+        let mut scratch = Vec::with_capacity(self.dims);
+        for layer in 0..=level {
+            let gone: Vec<u32> = self.links[slot as usize][layer].clone();
+            for p in 0..self.node_count() as u32 {
+                if p == slot || (self.levels[p as usize] as usize) < layer || !self.links[p as usize][layer].contains(&slot) {
+                    continue;
+                }
+                let mut pool: Vec<u32> = Vec::new();
+                for &c in self.links[p as usize][layer].iter().chain(gone.iter()) {
+                    if c != slot && c != p && !pool.contains(&c) {
+                        pool.push(c);
+                    }
+                }
+                let base = self.data.decode(p as usize, self.dims, &mut buf).to_vec();
+                let bn = norm(&base);
+                let mut cands: Vec<Cand> = pool.iter().map(|&c| self.rank_of(&base, bn, c, &mut scratch)).collect();
+                cands.sort_by(|a, b| b.cmp(a));
+                let kept = self.select(&cands, self.cap(layer));
+                self.set_links(p, layer, kept);
+            }
+        }
+        assert!(self.links.iter().enumerate().all(|(p, layers)| p as u32 == slot || layers.iter().all(|l| !l.contains(&slot))), "a link to the removed node survived");
+    }
+
+    /// Drops an unlinked `slot` by moving the last slot into its place.
+    /// Every link to the moved slot is renumbered; the entry point moves
+    /// to the highest remaining node when the removed node held it.
+    fn drop_slot(&mut self, slot: u32) {
+        let last = (self.node_count() - 1) as u32;
+        let was_entry = self.entry == Some(slot);
+        let entry_was_last = self.entry == Some(last);
+        let id = self.ids[slot as usize];
+        self.slot_of.remove(&id);
+        if slot != last {
+            self.ids.swap(slot as usize, last as usize);
+            self.levels.swap(slot as usize, last as usize);
+            self.links.swap(slot as usize, last as usize);
+            self.data.move_slot(last as usize, slot as usize, self.dims);
+            self.slot_of.insert(self.ids[slot as usize], slot);
+            for layers in self.links.iter_mut() {
+                for l in layers.iter_mut() {
+                    for c in l.iter_mut() {
+                        if *c == last {
+                            *c = slot;
+                        }
+                    }
+                }
+            }
+        }
+        self.ids.pop();
+        self.levels.pop();
+        self.links.pop();
+        self.data.truncate(last as usize, self.dims);
+        if self.ids.is_empty() {
+            self.entry = None;
+            self.top = 0;
+        } else if was_entry {
+            let mut best = 0usize;
+            for s in 1..self.node_count() {
+                if self.levels[s] > self.levels[best] {
+                    best = s;
+                }
+            }
+            self.entry = Some(best as u32);
+            self.top = self.levels[best];
+        } else if entry_was_last {
+            self.entry = Some(slot);
+        }
     }
 
     fn assert_shape(&self) {
         let n = self.node_count();
-        assert!(self.levels.len() == n && self.deleted.len() == n && self.links.len() == n, "node arrays out of step");
+        assert!(self.levels.len() == n && self.links.len() == n, "node arrays out of step");
         assert_eq!(self.slot_of.len(), n, "slot map out of step with nodes");
         assert_eq!(self.data.count(self.dims), n, "vector data out of step with nodes");
-        assert!(self.live <= n, "more live ids than nodes");
         assert_eq!(self.entry.is_none(), n == 0, "entry point out of step with nodes");
+        assert!(self.entry.is_none_or(|e| self.levels[e as usize] == self.top), "entry point is not on the top level");
     }
 }
 
@@ -353,7 +413,7 @@ impl VectorIndex for Hnsw {
     }
 
     fn len(&self) -> usize {
-        self.live
+        self.node_count()
     }
 
     fn heap_bytes(&self) -> usize {
@@ -367,10 +427,6 @@ impl VectorIndex for Hnsw {
         match self.slot_of.get(&id).copied() {
             Some(slot) => {
                 self.data.set(slot as usize, vector);
-                if self.deleted[slot as usize] {
-                    self.deleted[slot as usize] = false;
-                    self.live += 1;
-                }
                 self.dirty.insert(id);
                 self.link(slot, vector);
                 self.header_dirty = true;
@@ -390,15 +446,14 @@ impl VectorIndex for Hnsw {
         let Some(&slot) = self.slot_of.get(&id) else {
             return false;
         };
-        if self.deleted[slot as usize] {
-            return false;
-        }
-        self.deleted[slot as usize] = true;
-        self.live -= 1;
-        self.dirty.insert(id);
+        self.unlink(slot);
+        self.drop_slot(slot);
+        self.dirty.remove(&id);
+        self.dropped.insert(id);
         self.header_dirty = true;
-        let limit = self.params.max_deleted_fraction() as f64 * self.node_count() as f64;
-        if self.tombstones() as f64 > limit {
+        self.removed_since_build += 1;
+        let limit = f64::from(self.params.max_deleted_fraction()) * self.node_count() as f64;
+        if self.node_count() > 0 && self.removed_since_build as f64 > limit {
             self.rebuild();
         }
         self.assert_shape();
@@ -411,7 +466,7 @@ impl VectorIndex for Hnsw {
         let Some(mut ep) = self.entry else {
             return Ok(Vec::new());
         };
-        if k == 0 || self.live == 0 {
+        if k == 0 {
             return Ok(Vec::new());
         }
         let qn = norm(query);
@@ -423,7 +478,7 @@ impl VectorIndex for Hnsw {
             }
             layer -= 1;
         }
-        let returnable = |s: u32| !self.deleted[s as usize] && allow.is_none_or(|f| f(self.ids[s as usize]));
+        let returnable = |s: u32| allow.is_none_or(|f| f(self.ids[s as usize]));
         let ef = self.params.ef_search().max(k);
         let found = self.search_layer(query, qn, &[ep], ef, 0, &returnable);
         let mut top = TopK::new(k);
@@ -433,7 +488,7 @@ impl VectorIndex for Hnsw {
         let hits = top.into_sorted();
         assert!(hits.len() <= k, "hnsw returned more than k");
         assert!(hits.windows(2).all(|w| Ranked(w[0]) > Ranked(w[1])), "hnsw result is not sorted by score then id");
-        assert!(hits.iter().all(|n| self.slot_of.get(&n.id).is_some_and(|&s| !self.deleted[s as usize])), "hnsw returned a tombstone");
+        assert!(hits.iter().all(|n| self.slot_of.contains_key(&n.id)), "hnsw returned a removed id");
         Ok(hits)
     }
 

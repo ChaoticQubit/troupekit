@@ -105,7 +105,7 @@ fn filter_matching_one_node_still_finds_it() {
 }
 
 #[test]
-fn tombstones_are_never_returned() {
+fn removed_ids_are_never_returned() {
     let data = clustered(61, 1_000, 16, 10, 0.4);
     let mut index = hnsw_with(16, HnswParams::default().with_max_deleted_fraction(1.0));
     for (i, v) in data.iter().enumerate() {
@@ -135,7 +135,7 @@ fn rebuild_after_deleted_fraction_keeps_recall() {
         assert!(oracle.remove(id));
     }
     assert_eq!(index.len(), 2_400);
-    assert!(index.heap_bytes() < bytes_before, "rebuild must drop tombstones");
+    assert!(index.heap_bytes() < bytes_before, "removal must free vector memory");
     let recall = recall_at_10(index.as_ref(), oracle.as_ref(), queries);
     assert!(recall >= 0.95, "recall@10 after rebuild {recall}");
 }
@@ -187,4 +187,21 @@ fn equal_vectors_stay_reachable_after_pruning() {
             assert_eq!(got[0].id, id);
         }
     }
+}
+
+#[test]
+fn removal_repair_keeps_recall_without_rebuild() {
+    let data = clustered(91, 3_100, 32, 30, 0.35);
+    let (items, queries) = data.split_at(3_000);
+    let mut index = hnsw_with(32, HnswParams::default().with_max_deleted_fraction(1.0));
+    let mut oracle = brute(32);
+    build(index.as_mut(), oracle.as_mut(), items);
+    for id in (0..3_000).filter(|id| id % 10 < 3) {
+        assert!(index.remove(id));
+        assert!(oracle.remove(id));
+        assert!(!index.remove(id));
+    }
+    assert_eq!(index.len(), 2_100);
+    let recall = recall_at_10(index.as_ref(), oracle.as_ref(), queries);
+    assert!(recall >= 0.95, "recall@10 after local repair {recall}");
 }

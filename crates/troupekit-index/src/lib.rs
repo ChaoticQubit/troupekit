@@ -126,9 +126,9 @@ impl HnswParams {
         self
     }
 
-    /// Sets the tombstone share of nodes that triggers a rebuild.
-    /// Input: a fraction in `(0.0, 1.0]`. Output: the updated params.
-    /// Checked by `new_index`.
+    /// Sets the share of removals since the last build that triggers a
+    /// rebuild, as a fraction of the node count. Input: `(0.0, 1.0]`.
+    /// Output: the updated params. Checked by `new_index`.
     pub fn with_max_deleted_fraction(mut self, fraction: f32) -> Self {
         self.max_deleted_fraction = fraction;
         self
@@ -162,9 +162,9 @@ impl HnswParams {
         self.seed
     }
 
-    /// Returns the tombstone share of nodes that triggers a rebuild.
-    /// A rebuild re-inserts live vectors in insert order.
-    /// Default 0.25.
+    /// Returns the share of removals since the last build that triggers
+    /// a rebuild. Each removal repairs links locally; a rebuild restores
+    /// full graph quality. Default 0.25.
     pub fn max_deleted_fraction(&self) -> f32 {
         self.max_deleted_fraction
     }
@@ -206,14 +206,14 @@ pub trait VectorIndex: Send + Sync {
     /// Inserts and searches of another length are refused.
     fn dims(&self) -> usize;
 
-    /// Returns the number of live ids.
-    /// Tombstones of an HNSW index are not counted.
+    /// Returns the number of stored ids.
     /// A replaced id counts once.
+    /// A removed id is gone at once and not counted.
     fn len(&self) -> usize;
 
-    /// Returns true when no live id is stored.
+    /// Returns true when no id is stored.
     /// Same as `len() == 0`.
-    /// Tombstones alone leave an index empty.
+    /// An index whose ids were all removed is empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -228,9 +228,9 @@ pub trait VectorIndex: Send + Sync {
     /// Errors on a wrong dimension or a non-finite component.
     fn insert(&mut self, id: u64, vector: &[f32]) -> Result<(), IndexError>;
 
-    /// Removes `id` from search results.
-    /// Input: any id. Output: true when the id was live.
-    /// An unknown or already removed id returns false.
+    /// Removes `id` and its vector from the index at once.
+    /// Input: any id. Output: true when the id was stored; an unknown or
+    /// already removed id returns false. Its page is deleted on the next drain.
     fn remove(&mut self, id: u64) -> bool;
 
     /// Returns at most `k` nearest live ids allowed by `allow`.
@@ -240,7 +240,7 @@ pub trait VectorIndex: Send + Sync {
 
     /// Drains the page changes made since the last call.
     /// The store writes them in the same transaction as the vectors.
-    /// Brute force always returns an empty list.
+    /// Pages hold links only, never a vector; brute force emits none.
     fn take_changes(&mut self) -> Vec<PageChange>;
 
     /// Loads vectors and persisted pages into an empty index.
