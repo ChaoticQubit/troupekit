@@ -1,15 +1,25 @@
 mod common;
 
+#[cfg(feature = "sqlite")]
 use common::{finish, graph_io, start, tools};
 use std::sync::Arc;
-use troupekit::core::clock::{Clock, FixedClock, SystemClock};
+#[cfg(feature = "sqlite")]
+use troupekit::core::clock::SystemClock;
+use troupekit::core::clock::{Clock, FixedClock};
+#[cfg(feature = "sqlite")]
 use troupekit::core::error::CoreError;
 use troupekit::core::event::Usage;
 use troupekit::core::ids::RunId;
+#[cfg(feature = "sqlite")]
 use troupekit::core::message::{Message, Role};
-use troupekit::core::store::{Checkpoint, JobState};
-use troupekit::{SqliteStore, Troupe};
+use troupekit::core::store::Checkpoint;
+#[cfg(feature = "sqlite")]
+use troupekit::core::store::JobState;
+#[cfg(feature = "sqlite")]
+use troupekit::SqliteStore;
+use troupekit::Troupe;
 
+#[cfg(feature = "sqlite")]
 fn system() -> Arc<dyn Clock> {
     Arc::new(SystemClock)
 }
@@ -44,6 +54,7 @@ async fn builder_without_sqlite_uses_memory_stores() {
     assert!(other.checkpoints().latest(run).await.unwrap().is_none());
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_data_survives_a_rebuild_on_the_same_path() {
     let dir = tempfile::tempdir().unwrap();
@@ -89,6 +100,7 @@ async fn sqlite_data_survives_a_rebuild_on_the_same_path() {
     ));
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn runner_on_sqlite_matches_the_in_memory_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -118,6 +130,7 @@ async fn runner_on_sqlite_matches_the_in_memory_run() {
     );
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn unwritable_path_is_a_store_error() {
     let dir = tempfile::tempdir().unwrap();
@@ -126,6 +139,7 @@ async fn unwritable_path_is_a_store_error() {
     assert!(matches!(err, CoreError::Store(_)), "{err:?}");
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn troupe_ledger_plugged_into_the_io_is_durable() {
     let dir = tempfile::tempdir().unwrap();
@@ -145,6 +159,7 @@ async fn troupe_ledger_plugged_into_the_io_is_durable() {
     assert_eq!(troupe.ledger().period_total("user:1").await.unwrap(), 30);
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn store_settings_pass_through_sqlite_with() {
     let dir = tempfile::tempdir().unwrap();
@@ -184,6 +199,7 @@ async fn clock_setting_drives_the_memory_queue() {
     clock_drives_queue(troupe, clock).await;
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn clock_setting_drives_the_sqlite_queue() {
     let dir = tempfile::tempdir().unwrap();
