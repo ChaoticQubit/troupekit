@@ -125,6 +125,8 @@ struct Inner {
     store: Option<Arc<dyn CheckpointStore>>,
     retries: u32,
     laws: Laws,
+    #[cfg(feature = "knowledge")]
+    preamble: Option<troupekit_context::tools::KnowledgeKit>,
 }
 
 impl BuiltAgent {
@@ -144,8 +146,33 @@ impl BuiltAgent {
                 store,
                 retries,
                 laws,
+                #[cfg(feature = "knowledge")]
+                preamble: None,
             }),
         }
+    }
+
+    #[cfg(feature = "knowledge")]
+    pub(crate) fn with_preamble(
+        mut self,
+        preamble: Option<troupekit_context::tools::KnowledgeKit>,
+    ) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("a fresh BuiltAgent is not shared");
+        inner.preamble = preamble;
+        self
+    }
+
+    #[cfg(feature = "knowledge")]
+    async fn messages(&self, input: Input) -> Result<Vec<Message>, KitError> {
+        match &self.inner.preamble {
+            Some(kit) => crate::memory::prepend(kit, input.0).await,
+            None => Ok(input.0),
+        }
+    }
+
+    #[cfg(not(feature = "knowledge"))]
+    async fn messages(&self, input: Input) -> Result<Vec<Message>, KitError> {
+        Ok(input.0)
     }
 
     /// Runs the agent once on `input` and returns the answer as text.
@@ -160,13 +187,9 @@ impl BuiltAgent {
     /// The run id in the outcome works with `resume`.
     pub async fn run_with(&self, input: impl Into<Input>) -> Result<RunOutcome, KitError> {
         let inner = &self.inner;
-        let mut run = AgentRun::new(
-            &inner.persona,
-            input.into().0,
-            inner.limits.clone(),
-            &inner.io,
-        )
-        .await?;
+        let messages = self.messages(input.into()).await?;
+        let mut run =
+            AgentRun::new(&inner.persona, messages, inner.limits.clone(), &inner.io).await?;
         let store: Arc<dyn CheckpointStore> = match &inner.store {
             Some(store) => store.clone(),
             None => Arc::new(InMemCheckpoints::default()),

@@ -34,6 +34,9 @@ pub enum KitError {
     Graph(#[from] GraphError),
     #[error(transparent)]
     Store(#[from] CoreError),
+    #[cfg(feature = "knowledge")]
+    #[error(transparent)]
+    Context(#[from] troupekit_context::ContextError),
     #[error("run {run_id} failed: {reason}")]
     Failed { run_id: RunId, reason: String },
     #[error("run {run_id} paused: {reason:?}")]

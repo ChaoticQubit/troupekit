@@ -50,7 +50,11 @@ pub struct Agent {
     limits: Limits,
     max_turns: Option<u32>,
     max_tokens: Option<u32>,
-    storage: Storage,
+    pub(crate) storage: Storage,
+    #[cfg(feature = "knowledge")]
+    pub(crate) memory: Option<crate::memory::AgentMemory>,
+    #[cfg(feature = "knowledge")]
+    pub(crate) knowledge: Option<crate::knowledge::Knowledge>,
     catalog: Option<Catalog>,
     api_key: Option<Secret>,
     api_key_env: Option<String>,
@@ -84,6 +88,10 @@ impl Agent {
             max_turns: None,
             max_tokens: None,
             storage: Storage::memory(),
+            #[cfg(feature = "knowledge")]
+            memory: None,
+            #[cfg(feature = "knowledge")]
+            knowledge: None,
             catalog: None,
             api_key: None,
             api_key_env: None,
@@ -192,6 +200,24 @@ impl Agent {
     /// Returns the builder.
     pub fn eval_fn(mut self, name: impl Into<String>, f: EvalFn) -> Self {
         self.eval_fns.push((name.into(), f));
+        self
+    }
+
+    /// Gives the agent long-term memory for one user and session: the five
+    /// memory tools, bound to them, and a preamble of facts and summary.
+    /// Needs `AgentMemory::sqlite(..)` or `.knowledge(..)` in 0.2.
+    #[cfg(feature = "knowledge")]
+    pub fn memory(mut self, memory: crate::memory::AgentMemory) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Lets the agent search a folder: ingested at `build` (unchanged files
+    /// skipped) and served by the `search_knowledge` tool, fenced as
+    /// untrusted text. Takes `Knowledge::dir(..)` or a path.
+    #[cfg(feature = "knowledge")]
+    pub fn knowledge(mut self, knowledge: impl Into<crate::knowledge::Knowledge>) -> Self {
+        self.knowledge = Some(knowledge.into());
         self
     }
 
@@ -336,41 +362,63 @@ impl Agent {
                 ),
             ));
         }
-        let prepared = self.prepare(None)?;
+        #[cfg(feature = "knowledge")]
+        let (this, preamble) = {
+            self.prepare(None)?;
+            crate::memory::attach(self).await?
+        };
+        #[cfg(not(feature = "knowledge"))]
+        let this = self;
+        let prepared = this.prepare(None)?;
         let mut io = SimpleIo::new(prepared.registry);
         io.models
             .insert(prepared.persona.model.clone(), prepared.handle);
-        for (eval, f) in &self.eval_fns {
+        for (eval, f) in &this.eval_fns {
             io.evals.register(eval, f.clone())?;
         }
-        io.events = self.events.clone().unwrap_or_else(|| Arc::new(Discard));
-        io.ledger = self
+        io.events = this.events.clone().unwrap_or_else(|| Arc::new(Discard));
+        io.ledger = this
             .ledger
             .clone()
             .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
         let probe = vec![Message::text(Role::User, "build check")];
-        AgentRun::new(&prepared.persona, probe, self.limits.clone(), &io).await?;
-        let store = self.storage.open().await?;
-        Ok(BuiltAgent::new(
+        AgentRun::new(&prepared.persona, probe, this.limits.clone(), &io).await?;
+        let store = this.storage.open().await?;
+        let built = BuiltAgent::new(
             prepared.persona,
             io,
-            self.limits,
+            this.limits,
             store,
-            self.retries,
+            this.retries,
             prepared.laws,
-        ))
+        );
+        #[cfg(feature = "knowledge")]
+        let built = built.with_preamble(preamble);
+        Ok(built)
     }
 
     pub(crate) fn graph_conflict(&self) -> Option<&'static str> {
         if self.limits != Limits::default() {
-            Some("limits; set them")
+            Some("limits; set them on the graph")
         } else if !self.law_paths.is_empty() || !self.inline_laws.is_empty() {
-            Some("laws; set them")
+            Some("laws; set them on the graph")
         } else if self.ledger.is_some() {
-            Some("ledger; set it")
+            Some("ledger; set it on the graph")
+        } else if self.has_context() {
+            Some("memory or knowledge; graphs do not take them in 0.2")
         } else {
             None
         }
+    }
+
+    #[cfg(feature = "knowledge")]
+    fn has_context(&self) -> bool {
+        self.memory.is_some() || self.knowledge.is_some()
+    }
+
+    #[cfg(not(feature = "knowledge"))]
+    fn has_context(&self) -> bool {
+        false
     }
 
     pub(crate) fn same_model(&self, other: &Agent) -> bool {

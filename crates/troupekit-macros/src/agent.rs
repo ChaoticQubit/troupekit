@@ -6,7 +6,7 @@ use crate::tokens::{Delim, Error, Piece, SpanId, Tok};
 use crate::tool::crate_path;
 
 const WHAT: &str = "#[agent]";
-const KEYS: [&str; 16] = [
+const KEYS: [&str; 18] = [
     "model",
     "tools",
     "evals",
@@ -21,6 +21,8 @@ const KEYS: [&str; 16] = [
     "instructions",
     "laws",
     "auto_laws",
+    "memory",
+    "knowledge",
     "name",
     "crate",
 ];
@@ -304,6 +306,17 @@ mod tests {
         a.calls.iter().map(|c| c.method).collect()
     }
 
+    #[test]
+    fn memory_and_knowledge_keys_become_builder_calls() {
+        let a = parse(
+            "model = \"m/x\", memory = mem(1), knowledge = \"docs\"",
+            &format!("{DOC}fn calc() {{}}"),
+        )
+        .unwrap();
+        assert_eq!(methods(&a), ["model", "memory", "knowledge"]);
+        assert_eq!(a.calls[1].value.len(), 2);
+    }
+
     fn rejects(attr: &str, item: &str, message: &str) -> Error {
         let err = parse(attr, item).unwrap_err();
         assert_eq!(err.message, message, "{attr} {item}");
@@ -493,7 +506,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_key() {
-        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, name, crate");
+        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, name, crate");
     }
 
     #[test]

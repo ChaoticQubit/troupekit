@@ -2,11 +2,14 @@
 //! files are skipped by content hash, changed files are replaced whole and
 //! a file that fails is recorded and the walk goes on.
 
-use std::path::Path;
-use troupekit_context::chunk::ChunkConfig;
-use troupekit_context::embed::Embedder;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+pub use troupekit_context::chunk::ChunkConfig;
+pub use troupekit_context::embed::Embedder;
 use troupekit_context::ingest::{document_records, Document, Origin};
-use troupekit_context::load::{walk, LoadSettings};
+use troupekit_context::load::walk;
+pub use troupekit_context::load::LoadSettings;
 use troupekit_context::ContextError;
 use troupekit_core::clock::{Clock, SystemClock};
 use troupekit_store_sqlite::SqliteVectors;
@@ -189,4 +192,104 @@ pub async fn ingest_dir(
         "more files handled than the walk allows"
     );
     Ok(report)
+}
+
+/// A folder an agent can search: `Knowledge::dir("docs")` plus settings.
+/// At `build` the folder is ingested into index `index` of the store file
+/// (unchanged files skipped) and the agent gets the `search_knowledge`
+/// tool. `embedder` is required in 0.2.
+#[derive(Clone)]
+pub struct Knowledge {
+    pub(crate) dir: PathBuf,
+    pub(crate) index: String,
+    pub(crate) store: Option<PathBuf>,
+    pub(crate) embedder: Option<Arc<dyn Embedder>>,
+    pub(crate) load: LoadSettings,
+    pub(crate) chunk: ChunkConfig,
+}
+
+impl Knowledge {
+    /// Starts settings for folder `dir`, read at `build`.
+    /// Index `docs`, the agent's SQLite checkpoint file or
+    /// `./troupekit.db`, and the `ingest_dir` walk and chunk defaults.
+    pub fn dir(dir: impl AsRef<Path>) -> Self {
+        let defaults = IngestSettings::default();
+        Knowledge {
+            dir: dir.as_ref().to_path_buf(),
+            index: defaults.scope().to_string(),
+            store: None,
+            embedder: None,
+            load: defaults.load().clone(),
+            chunk: defaults.chunk(),
+        }
+    }
+
+    /// Sets the vector index and scope the folder is stored under.
+    /// 1 to 64 of `[a-z0-9_]`, checked at `build`.
+    /// Default `docs`.
+    pub fn index(mut self, index: impl Into<String>) -> Self {
+        self.index = index.into();
+        self
+    }
+
+    /// Sets the SQLite file the index lives in.
+    /// Default: the agent's `Storage::sqlite` file, else `./troupekit.db`.
+    /// Returns the settings.
+    pub fn store(mut self, path: impl AsRef<Path>) -> Self {
+        self.store = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Sets the embedder for the folder and for searches. Required in 0.2;
+    /// the dimensions must match an existing index of the same name.
+    /// Returns the settings.
+    pub fn embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
+    /// Sets the folder walk bounds and filters.
+    /// Default `LoadSettings::default()`.
+    /// Returns the settings.
+    pub fn load(mut self, load: LoadSettings) -> Self {
+        self.load = load;
+        self
+    }
+
+    /// Sets the chunk size and overlap, in estimated tokens.
+    /// Default 200 tokens with 20 of overlap.
+    /// Returns the settings.
+    pub fn chunk(mut self, chunk: ChunkConfig) -> Self {
+        self.chunk = chunk;
+        self
+    }
+}
+
+impl From<&str> for Knowledge {
+    fn from(dir: &str) -> Self {
+        Knowledge::dir(dir)
+    }
+}
+
+impl From<&Path> for Knowledge {
+    fn from(dir: &Path) -> Self {
+        Knowledge::dir(dir)
+    }
+}
+
+impl From<PathBuf> for Knowledge {
+    fn from(dir: PathBuf) -> Self {
+        Knowledge::dir(dir)
+    }
+}
+
+impl fmt::Debug for Knowledge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Knowledge")
+            .field("dir", &self.dir)
+            .field("index", &self.index)
+            .field("store", &self.store)
+            .field("embedder", &self.embedder.is_some())
+            .finish_non_exhaustive()
+    }
 }

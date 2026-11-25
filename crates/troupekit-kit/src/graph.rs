@@ -190,9 +190,7 @@ impl Graph {
             match self.node(id) {
                 Node::Agent(agent) => {
                     if let Some(what) = agent.graph_conflict() {
-                        return Err(fail(format!(
-                            "agent node `{id}` sets its own {what} on the graph"
-                        )));
+                        return Err(fail(format!("agent node `{id}` sets its own {what}")));
                     }
                     let key = match keys.get(agent.name()) {
                         Some((key, first)) if first.same_model(agent) => key.clone(),
