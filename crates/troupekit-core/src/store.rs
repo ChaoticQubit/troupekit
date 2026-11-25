@@ -1,4 +1,5 @@
 use crate::error::CoreError;
+use crate::event::Usage;
 use crate::ids::RunId;
 use crate::message::Message;
 use async_trait::async_trait;
@@ -143,4 +144,13 @@ pub trait JobQueue: Send + Sync {
     async fn complete(&self, lease: &Lease) -> Result<(), CoreError>;
     async fn fail(&self, lease: &Lease, error: &str) -> Result<(), CoreError>;
     async fn reschedule(&self, lease: &Lease, due_ms: i64) -> Result<(), CoreError>;
+}
+
+/// Spend totals per key for the current period, kept by the host (for
+/// example one row per goal and month). `period_total` returns millionths
+/// of a US dollar spent so far; `record` adds one call's usage.
+#[async_trait]
+pub trait UsageLedger: Send + Sync {
+    async fn period_total(&self, key: &str) -> Result<u64, CoreError>;
+    async fn record(&self, key: &str, usage: Usage) -> Result<(), CoreError>;
 }
