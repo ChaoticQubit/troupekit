@@ -103,3 +103,16 @@ fn unit_is_ok() {
     assert_eq!(2.5f64.into_output(), ToolOutput::text("2.5"));
     assert_eq!(ToolOutput::error("e").into_output(), ToolOutput::error("e"));
 }
+
+#[test]
+fn stateless_tools_share_one_arc_and_stateful_ones_do_not() {
+    use troupekit::AsTool;
+    let first = crate::tools_mod::shout.into_arc();
+    let again = crate::tools_mod::shout.into_arc();
+    assert!(std::sync::Arc::ptr_eq(&first, &again));
+    let make = || troupekit::tool("t", "T.", |a: crate::common::AddArgs| async move { a.a });
+    assert!(!std::sync::Arc::ptr_eq(
+        &make().into_arc(),
+        &make().into_arc()
+    ));
+}

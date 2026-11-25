@@ -375,6 +375,46 @@ async fn same_tool_twice_is_shared_different_tool_same_name_is_refused() {
     );
 }
 
+#[tokio::test]
+async fn equal_spec_tools_with_different_state_are_refused() {
+    let model = shouting_model();
+    let tenant = |name: &str, offset: i64| {
+        let search = tool("search", "Search.", move |a: AddArgs| async move {
+            a.a + a.b + offset
+        });
+        Agent::new(name)
+            .instructions("Search.")
+            .model("fake/m")
+            .model_client(model.clone())
+            .tool(search)
+    };
+    let text = config_error(
+        Graph::new("g")
+            .agent("text", tenant("first", 1))
+            .agent("again", tenant("second", 2)),
+    )
+    .await;
+    assert_eq!(
+        text,
+        "agent `graph:g`: tool `search` has two different implementations; pass one shared tool to both agents"
+    );
+    let shared: Arc<dyn troupekit::Tool> =
+        Arc::new(tool("search", "Search.", |a: AddArgs| async move { a.a }));
+    let caller = |name: &str| {
+        Agent::new(name)
+            .instructions("Search.")
+            .model("fake/m")
+            .model_client(model.clone())
+            .tool_arc(shared.clone())
+    };
+    let built = Graph::new("g")
+        .agent("text", caller("first"))
+        .agent("again", caller("second"))
+        .build()
+        .await;
+    assert!(built.is_ok());
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_checkpoints_allow_graph_resume() {

@@ -663,7 +663,10 @@ fn arg_names(spec: &ToolSpec) -> Vec<String> {
 fn share(registry: &mut ToolRegistry, tool: Arc<dyn Tool>) -> Result<(), String> {
     let name = tool.spec().name.clone();
     match registry.get(&name) {
-        Some(existing) if existing.spec() == tool.spec() => Ok(()),
+        Some(existing) if Arc::ptr_eq(&existing, &tool) => Ok(()),
+        Some(existing) if existing.spec() == tool.spec() => Err(format!(
+            "tool `{name}` has two different implementations; pass one shared tool to both agents"
+        )),
         Some(_) => Err(format!(
             "tool `{name}` is registered twice with different specs"
         )),

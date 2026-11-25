@@ -2,8 +2,10 @@ use crate::output::IntoToolOutput;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::any::TypeId;
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use troupekit_tools::{typed_tool, Tool, ToolContext, ToolSpec};
 
 /// Anything an agent or graph accepts as a tool: every `Tool + 'static`.
@@ -15,8 +17,8 @@ use troupekit_tools::{typed_tool, Tool, ToolContext, ToolSpec};
 )]
 pub trait AsTool: Tool + 'static {
     /// Moves the tool behind an `Arc<dyn Tool>` for a registry.
-    /// Returns the shared tool; its spec is unchanged.
-    /// Called once per registration.
+    /// A zero-sized tool, such as a `#[tool]` fn, returns one shared `Arc`
+    /// per type, so graphs can tell two uses of it are the same tool.
     fn into_arc(self) -> Arc<dyn Tool>
     where
         Self: Sized;
@@ -27,7 +29,18 @@ impl<T: Tool + 'static> AsTool for T {
     where
         Self: Sized,
     {
-        Arc::new(self)
+        if std::mem::size_of::<T>() != 0 {
+            return Arc::new(self);
+        }
+        static SHARED: OnceLock<Mutex<HashMap<TypeId, Arc<dyn Tool>>>> = OnceLock::new();
+        let mut shared = SHARED
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        shared
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Arc::new(self))
+            .clone()
     }
 }
 
