@@ -294,3 +294,22 @@ fn brute_force_contract() {
 fn large_finite_components_do_not_overflow() {
     case_large_components_do_not_overflow(brute);
 }
+
+#[test]
+fn constructors_never_panic_on_caller_input() {
+    let kinds = [IndexKind::BruteForce, IndexKind::Hnsw(HnswParams::default()), IndexKind::Hnsw(HnswParams::default().with_m(0).with_ef_search(0))];
+    for kind in &kinds {
+        for quant in [Quantization::F32, Quantization::F16, Quantization::I8] {
+            for dims in [0, 1, MAX_DIMS, MAX_DIMS + 1, usize::MAX] {
+                let valid_params = !matches!(kind, IndexKind::Hnsw(p) if p.m() == 0);
+                match new_index(kind, dims, quant) {
+                    Ok(index) => {
+                        assert!(valid_params && (1..=MAX_DIMS).contains(&dims));
+                        assert_eq!(index.dims(), dims);
+                    }
+                    Err(e) => assert!(matches!(e, IndexError::Invalid(_)), "{e:?}"),
+                }
+            }
+        }
+    }
+}
