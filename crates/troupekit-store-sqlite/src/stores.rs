@@ -4,7 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde_json::Value;
 use troupekit_core::error::CoreError;
 use troupekit_core::ids::RunId;
-use troupekit_core::store::{Checkpoint, CheckpointStore};
+use troupekit_core::message::Message;
+use troupekit_core::store::{Checkpoint, CheckpointStore, MemoryLog};
 
 /// Starts the write transaction every check-then-write uses. `IMMEDIATE`
 /// takes the write lock at once, so two handles never both pass a check.
@@ -177,6 +178,92 @@ impl CheckpointStore for SqliteStore {
             assert_eq!(max_step(&tx, &run)?, Some(max));
             tx.commit().map_err(db)?;
             Ok(deleted as u64)
+        })
+        .await
+    }
+}
+
+fn log_len(tx: &Transaction<'_>, log: &str) -> Result<u64, CoreError> {
+    let count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM memory_entry WHERE log = ?1",
+            [log],
+            |row| row.get(0),
+        )
+        .map_err(db)?;
+    from_sql_int("log length", count)
+}
+
+#[async_trait]
+impl MemoryLog for SqliteStore {
+    async fn append(
+        &self,
+        log: &str,
+        expected_len: u64,
+        entries: Vec<Message>,
+    ) -> Result<u64, CoreError> {
+        let mut encoded = Vec::with_capacity(entries.len());
+        for message in &entries {
+            encoded.push(
+                serde_json::to_vec(message)
+                    .map_err(|e| CoreError::Store(format!("cannot encode message: {e}")))?,
+            );
+        }
+        let log = log.to_string();
+        self.call(move |conn| {
+            let tx = immediate(conn)?;
+            let actual = log_len(&tx, &log)?;
+            if actual != expected_len {
+                return Err(CoreError::Conflict {
+                    expected: expected_len,
+                    actual,
+                });
+            }
+            let added = encoded.len() as u64;
+            {
+                let mut insert = tx
+                    .prepare_cached(
+                        "INSERT INTO memory_entry (log, idx, message_json) VALUES (?1, ?2, ?3)",
+                    )
+                    .map_err(db)?;
+                for (offset, bytes) in encoded.iter().enumerate() {
+                    let idx = to_sql_int("log index", actual + offset as u64)?;
+                    let inserted = insert.execute(params![log, idx, bytes]).map_err(db)?;
+                    assert_eq!(inserted, 1);
+                }
+            }
+            let len = log_len(&tx, &log)?;
+            assert_eq!(len, actual + added);
+            tx.commit().map_err(db)?;
+            Ok(len)
+        })
+        .await
+    }
+
+    async fn read(&self, log: &str) -> Result<Vec<Message>, CoreError> {
+        let log = log.to_string();
+        self.call(move |conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT idx, message_json FROM memory_entry WHERE log = ?1 ORDER BY idx",
+                )
+                .map_err(db)?;
+            let rows = stmt
+                .query_map([&log], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(db)?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (idx, bytes) = row.map_err(db)?;
+                if from_sql_int("log index", idx)? != out.len() as u64 {
+                    return Err(corrupt(format!("log has a gap at index {}", out.len())));
+                }
+                let message = serde_json::from_slice(&bytes)
+                    .map_err(|e| corrupt(format!("message is not valid: {e}")))?;
+                out.push(message);
+            }
+            Ok(out)
         })
         .await
     }

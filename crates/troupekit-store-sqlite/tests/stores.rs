@@ -200,3 +200,141 @@ async fn history_above_the_setting_is_rejected() {
     s.prune(run, 2).await.unwrap();
     assert_eq!(s.history(run).await.unwrap().len(), 2);
 }
+
+use std::sync::Arc;
+use troupekit_core::message::{ContentPart, MediaSource, Message, Role};
+
+#[tokio::test]
+async fn second_concurrent_writer_conflicts() {
+    let t = temp();
+    let m = Arc::new(t.open().await);
+    assert_eq!(
+        m.append("g1", 0, vec![Message::text(Role::User, "a")])
+            .await
+            .unwrap(),
+        1
+    );
+    let (a, b) = tokio::join!(
+        m.append("g1", 1, vec![Message::text(Role::User, "b")]),
+        m.append("g1", 1, vec![Message::text(Role::User, "c")]),
+    );
+    assert!(a.is_ok() != b.is_ok());
+    let err = a.err().or(b.err()).unwrap();
+    assert_eq!(
+        err,
+        CoreError::Conflict {
+            expected: 1,
+            actual: 2
+        }
+    );
+    assert_eq!(m.read("g1").await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn conflicting_append_writes_nothing() {
+    let t = temp();
+    let m = t.open().await;
+    m.append("log", 0, vec![Message::text(Role::User, "a")])
+        .await
+        .unwrap();
+    let many = vec![
+        Message::text(Role::User, "x"),
+        Message::text(Role::User, "y"),
+    ];
+    let err = m.append("log", 0, many).await.unwrap_err();
+    assert_eq!(
+        err,
+        CoreError::Conflict {
+            expected: 0,
+            actual: 1
+        }
+    );
+    assert_eq!(
+        m.read("log").await.unwrap(),
+        vec![Message::text(Role::User, "a")]
+    );
+}
+
+#[tokio::test]
+async fn log_survives_reopen_in_order() {
+    let t = temp();
+    let texts = ["one", "two", "three", "four"];
+    {
+        let m = t.open().await;
+        m.append("log", 0, vec![Message::text(Role::User, texts[0])])
+            .await
+            .unwrap();
+        let rest = texts[1..]
+            .iter()
+            .map(|s| Message::text(Role::Assistant, *s))
+            .collect();
+        assert_eq!(m.append("log", 1, rest).await.unwrap(), 4);
+    }
+    let read = t.open().await.read("log").await.unwrap();
+    assert_eq!(read.len(), 4);
+    assert_eq!(read[0], Message::text(Role::User, "one"));
+    assert_eq!(read[3], Message::text(Role::Assistant, "four"));
+}
+
+#[tokio::test]
+async fn unknown_log_reads_empty() {
+    let t = temp();
+    let m = t.open().await;
+    assert!(m.read("nobody").await.unwrap().is_empty());
+    assert_eq!(m.append("fresh", 0, Vec::new()).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn every_content_part_round_trips() {
+    let t = temp();
+    let messages = vec![
+        Message {
+            role: Role::User,
+            parts: vec![
+                ContentPart::Text {
+                    text: "look".into(),
+                },
+                ContentPart::Image {
+                    media_type: "image/png".into(),
+                    source: MediaSource::Base64 {
+                        data: "aGk=".into(),
+                    },
+                },
+                ContentPart::Image {
+                    media_type: "image/jpeg".into(),
+                    source: MediaSource::Url {
+                        url: "https://example.com/a.jpg".into(),
+                    },
+                },
+            ],
+        },
+        Message {
+            role: Role::Assistant,
+            parts: vec![
+                ContentPart::ToolCall {
+                    id: "c1".into(),
+                    name: "search".into(),
+                    arguments: json!({"q": "rust", "n": 3}),
+                },
+                ContentPart::Hosted {
+                    tool: Some("web".into()),
+                    block: json!({"raw": [1, 2]}),
+                },
+            ],
+        },
+        Message {
+            role: Role::Tool,
+            parts: vec![ContentPart::ToolResult {
+                call_id: "c1".into(),
+                content: "found".into(),
+                is_error: false,
+            }],
+        },
+    ];
+    t.open()
+        .await
+        .append("parts", 0, messages.clone())
+        .await
+        .unwrap();
+    assert_eq!(t.open().await.read("parts").await.unwrap(), messages);
+}
