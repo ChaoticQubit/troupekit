@@ -338,3 +338,57 @@ async fn every_content_part_round_trips() {
         .unwrap();
     assert_eq!(t.open().await.read("parts").await.unwrap(), messages);
 }
+
+#[tokio::test]
+async fn blobs_round_trip() {
+    let t = temp();
+    let b = t.open().await;
+    b.put("goals/1/plan.pdf", vec![1, 2, 3]).await.unwrap();
+    assert_eq!(b.get("goals/1/plan.pdf").await.unwrap(), vec![1, 2, 3]);
+    assert!(matches!(b.get("nope").await, Err(CoreError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn put_replaces_existing_bytes() {
+    let t = temp();
+    let b = t.open().await;
+    b.put("p", vec![1, 2, 3]).await.unwrap();
+    b.put("p", vec![9]).await.unwrap();
+    assert_eq!(b.get("p").await.unwrap(), vec![9]);
+}
+
+#[tokio::test]
+async fn missing_blob_is_not_found() {
+    let t = temp();
+    let err = t.open().await.get("missing/path").await.unwrap_err();
+    assert_eq!(err, CoreError::NotFound("missing/path".into()));
+}
+
+#[tokio::test]
+async fn empty_blob_round_trips() {
+    let t = temp();
+    let b = t.open().await;
+    b.put("empty", Vec::new()).await.unwrap();
+    assert_eq!(b.get("empty").await.unwrap(), Vec::<u8>::new());
+}
+
+#[tokio::test]
+async fn blob_survives_reopen() {
+    let t = temp();
+    t.open().await.put("keep", vec![7; 1000]).await.unwrap();
+    assert_eq!(t.open().await.get("keep").await.unwrap(), vec![7; 1000]);
+}
+
+#[tokio::test]
+async fn blob_above_the_setting_is_rejected() {
+    let t = temp();
+    let b = t.with(|b| b.max_blob_bytes(8)).await;
+    b.put("old", vec![1]).await.unwrap();
+    let err = b.put("old", vec![0; 9]).await.unwrap_err();
+    assert!(
+        matches!(&err, CoreError::Store(m) if m.contains("max_blob_bytes")),
+        "{err:?}"
+    );
+    assert_eq!(b.get("old").await.unwrap(), vec![1]);
+    b.put("fits", vec![0; 8]).await.unwrap();
+}

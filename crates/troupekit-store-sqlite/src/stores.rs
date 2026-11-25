@@ -5,7 +5,7 @@ use serde_json::Value;
 use troupekit_core::error::CoreError;
 use troupekit_core::ids::RunId;
 use troupekit_core::message::Message;
-use troupekit_core::store::{Checkpoint, CheckpointStore, MemoryLog};
+use troupekit_core::store::{BlobStore, Checkpoint, CheckpointStore, MemoryLog};
 
 /// Starts the write transaction every check-then-write uses. `IMMEDIATE`
 /// takes the write lock at once, so two handles never both pass a check.
@@ -264,6 +264,48 @@ impl MemoryLog for SqliteStore {
                 out.push(message);
             }
             Ok(out)
+        })
+        .await
+    }
+}
+
+#[async_trait]
+impl BlobStore for SqliteStore {
+    async fn put(&self, path: &str, bytes: Vec<u8>) -> Result<(), CoreError> {
+        let max = self.limits().blob_bytes_max;
+        if bytes.len() as u64 > max {
+            return Err(CoreError::Store(format!(
+                "blob is {} bytes, above max_blob_bytes {max}",
+                bytes.len()
+            )));
+        }
+        let path = path.to_string();
+        self.call(move |conn| {
+            let written = conn
+                .execute(
+                    "INSERT INTO blob_entry (path, bytes) VALUES (?1, ?2) \
+                     ON CONFLICT (path) DO UPDATE SET bytes = excluded.bytes",
+                    params![path, bytes],
+                )
+                .map_err(db)?;
+            assert_eq!(written, 1);
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get(&self, path: &str) -> Result<Vec<u8>, CoreError> {
+        let path = path.to_string();
+        self.call(move |conn| {
+            let bytes: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT bytes FROM blob_entry WHERE path = ?1",
+                    [&path],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db)?;
+            bytes.ok_or(CoreError::NotFound(path))
         })
         .await
     }
