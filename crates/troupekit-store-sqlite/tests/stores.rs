@@ -512,3 +512,43 @@ async fn hostile_names_are_stored_as_plain_data() {
         .unwrap();
     assert_eq!(tables, 6);
 }
+
+fn nested(depth: usize) -> serde_json::Value {
+    let mut value = json!(0);
+    for level in 0..depth {
+        value = if level % 2 == 0 {
+            json!([value])
+        } else {
+            json!({ "k": value })
+        };
+    }
+    value
+}
+
+#[tokio::test]
+async fn state_too_deep_to_read_back_is_rejected() {
+    let t = temp();
+    let s = t.open().await;
+    let run = RunId::new();
+    s.save(cp(run, 0)).await.unwrap();
+    for depth in [128, 129] {
+        let deep = Checkpoint {
+            run_id: run,
+            step: 1,
+            state: nested(depth),
+        };
+        let err = s.save(deep).await.unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Store(m) if m.contains("nests deeper")),
+            "{err:?}"
+        );
+        assert_eq!(s.latest(run).await.unwrap(), Some(cp(run, 0)));
+    }
+    let deepest = Checkpoint {
+        run_id: run,
+        step: 1,
+        state: nested(127),
+    };
+    s.save(deepest.clone()).await.unwrap();
+    assert_eq!(s.latest(run).await.unwrap(), Some(deepest));
+}

@@ -36,6 +36,28 @@ pub(crate) fn corrupt(what: String) -> CoreError {
     CoreError::Store(format!("corrupt store: {what}"))
 }
 
+const STATE_DEPTH_MAX: usize = 127;
+
+/// Tells whether `value` nests arrays and objects at most `levels_left`
+/// deep. Recursion stops one level past the limit, so it is bounded.
+/// Input: the value and the levels it may still use. Output: true when
+/// the value fits, which is what `decode_state` can read back.
+fn fits_depth(value: &Value, levels_left: usize) -> bool {
+    assert!(
+        levels_left <= STATE_DEPTH_MAX,
+        "depth budget above the limit"
+    );
+    match value {
+        Value::Array(items) => {
+            levels_left > 0 && items.iter().all(|v| fits_depth(v, levels_left - 1))
+        }
+        Value::Object(map) => {
+            levels_left > 0 && map.values().all(|v| fits_depth(v, levels_left - 1))
+        }
+        _ => true,
+    }
+}
+
 fn decode_state(bytes: &[u8]) -> Result<Value, CoreError> {
     serde_json::from_slice(bytes).map_err(|e| corrupt(format!("checkpoint state is not JSON: {e}")))
 }
@@ -63,6 +85,11 @@ fn row_checkpoint(run_id: RunId, step: i64, bytes: &[u8]) -> Result<Checkpoint, 
 impl CheckpointStore for SqliteStore {
     async fn save(&self, cp: Checkpoint) -> Result<(), CoreError> {
         let step = to_sql_int("step", cp.step)?;
+        if !fits_depth(&cp.state, STATE_DEPTH_MAX) {
+            return Err(CoreError::Store(format!(
+                "checkpoint state nests deeper than {STATE_DEPTH_MAX} levels"
+            )));
+        }
         let bytes = serde_json::to_vec(&cp.state)
             .map_err(|e| CoreError::Store(format!("cannot encode checkpoint state: {e}")))?;
         let max = self.limits().state_bytes_max;
