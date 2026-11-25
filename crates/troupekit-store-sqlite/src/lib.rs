@@ -502,6 +502,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(written, 1);
-        assert_eq!(pragma(&store, "user_version").await, 1);
+        assert_eq!(pragma(&store, "user_version").await, i64::from(SCHEMA_VERSION));
     }
 }

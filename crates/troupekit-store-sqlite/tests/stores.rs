@@ -510,7 +510,7 @@ async fn hostile_names_are_stored_as_plain_data() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(tables, 6);
+    assert_eq!(tables, 17);
 }
 
 fn nested(depth: usize) -> serde_json::Value {
