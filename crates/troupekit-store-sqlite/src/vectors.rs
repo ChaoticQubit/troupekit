@@ -4,8 +4,8 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transact
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use troupekit_core::error::CoreError;
-use troupekit_core::store::{Filter, Scored, VectorRecord, VectorStore};
-use troupekit_index::{new_index, HnswParams, IndexError, IndexKind, PageChange, PageKey, Quantization, VectorIndex, MAX_DIMS};
+use troupekit_core::store::{Filter, KeywordStore, Scored, VectorRecord, VectorStore};
+use troupekit_index::{new_index, HnswParams, IndexError, IndexKind, PageChange, PageKey, Quantization, VectorIndex, MAX_DIMS, MAX_K};
 
 const NAME_BYTES_MAX: usize = 64;
 const ID_BYTES_MAX: usize = 256;
@@ -16,6 +16,8 @@ const MAX_META_PAIRS_DEFAULT: usize = 64;
 const MAX_META_KEY_BYTES_DEFAULT: usize = 256;
 const MAX_META_VALUE_BYTES_DEFAULT: usize = 4096;
 const MAX_BATCH_DEFAULT: usize = 10_000;
+const MAX_QUERY_TERMS_DEFAULT: usize = 32;
+const MAX_QUERY_CHARS_DEFAULT: usize = 2_000;
 const KIND_BRUTE: &str = "brute_force";
 const KIND_HNSW: &str = "hnsw";
 const SCOPE_KEY: &str = "scope";
@@ -23,8 +25,8 @@ const SOURCE_KEY: &str = "source";
 
 /// Settings of one named vector index. `dims` is required; the rest has
 /// safe defaults: brute force, f32 in memory, 1 MiB of text per chunk,
-/// 64 meta pairs of at most 256 and 4 096 bytes, 10 000 records per call.
-/// Built with `new(dims)` and the `with_*` setters.
+/// 64 meta pairs of at most 256 and 4 096 bytes, 10 000 records per call,
+/// keyword queries of 32 terms and 2 000 chars. Built with `new(dims)`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorSettings {
@@ -36,6 +38,8 @@ pub struct VectorSettings {
     max_meta_key_bytes: usize,
     max_meta_value_bytes: usize,
     max_batch: usize,
+    max_query_terms: usize,
+    max_query_chars: usize,
 }
 
 impl VectorSettings {
@@ -52,6 +56,8 @@ impl VectorSettings {
             max_meta_key_bytes: MAX_META_KEY_BYTES_DEFAULT,
             max_meta_value_bytes: MAX_META_VALUE_BYTES_DEFAULT,
             max_batch: MAX_BATCH_DEFAULT,
+            max_query_terms: MAX_QUERY_TERMS_DEFAULT,
+            max_query_chars: MAX_QUERY_CHARS_DEFAULT,
         }
     }
 
@@ -111,6 +117,22 @@ impl VectorSettings {
         self
     }
 
+    /// Sets the most terms in one keyword query, which bounds the FTS5
+    /// work per call. More terms fail with `CoreError::Store`.
+    /// Default 32.
+    pub fn with_max_query_terms(mut self, terms: usize) -> Self {
+        self.max_query_terms = terms;
+        self
+    }
+
+    /// Sets the longest keyword query in chars.
+    /// A longer query fails with `CoreError::Store`.
+    /// Default 2 000.
+    pub fn with_max_query_chars(mut self, chars: usize) -> Self {
+        self.max_query_chars = chars;
+        self
+    }
+
     /// Returns the dimension of every vector and query.
     /// It is fixed per index name once the index exists.
     /// Required, no default.
@@ -165,6 +187,20 @@ impl VectorSettings {
     /// Default 10 000.
     pub fn max_batch(&self) -> usize {
         self.max_batch
+    }
+
+    /// Returns the most terms in one keyword query.
+    /// Checked before the query reaches FTS5.
+    /// Default 32.
+    pub fn max_query_terms(&self) -> usize {
+        self.max_query_terms
+    }
+
+    /// Returns the longest keyword query in chars.
+    /// Checked before the query reaches FTS5.
+    /// Default 2 000.
+    pub fn max_query_chars(&self) -> usize {
+        self.max_query_chars
     }
 }
 
@@ -570,6 +606,74 @@ impl VectorStore for SqliteVectors {
     }
 }
 
+#[async_trait]
+impl KeywordStore for SqliteVectors {
+    async fn search_text(&self, query: &str, k: usize, filter: &Filter) -> Result<Vec<Scored>, CoreError> {
+        let settings = read_cached(&self.state).settings.clone();
+        let chars = query.chars().count();
+        if chars > settings.max_query_chars {
+            return Err(CoreError::Store(format!("query is {chars} chars, above max_query_chars {}", settings.max_query_chars)));
+        }
+        if k > MAX_K {
+            return Err(CoreError::Store(format!("k must be at most {MAX_K}, got {k}")));
+        }
+        if filter.0.len() > settings.max_meta_pairs {
+            return Err(CoreError::Store(format!(
+                "filter has {} pairs, above max_meta_pairs {}",
+                filter.0.len(),
+                settings.max_meta_pairs
+            )));
+        }
+        let (terms, fts) = fts_query(query);
+        if terms.len() > settings.max_query_terms {
+            return Err(CoreError::Store(format!(
+                "query has {} terms, above max_query_terms {}",
+                terms.len(),
+                settings.max_query_terms
+            )));
+        }
+        if terms.is_empty() || k == 0 {
+            return Ok(Vec::new());
+        }
+        let name = self.state.name.clone();
+        let pairs: Vec<(String, String)> = filter.0.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        self.store
+            .call(move |conn| {
+                let limit = 3 + 2 * pairs.len();
+                let sql = format!(
+                    "SELECT c.id, c.text, c.meta_json, -bm25(chunk_fts) AS score \
+                     FROM chunk_fts JOIN chunk c ON c.key = chunk_fts.rowid \
+                     WHERE chunk_fts MATCH ?1 AND c.index_name = ?2{} \
+                     ORDER BY score DESC, c.id ASC LIMIT ?{limit}",
+                    meta_clauses("c.key", pairs.len(), 3)
+                );
+                let mut values: Vec<rusqlite::types::Value> = vec![fts.into(), name.into()];
+                for (key, value) in pairs {
+                    values.push(key.into());
+                    values.push(value.into());
+                }
+                values.push((k as i64).into());
+                let mut stmt = conn.prepare(&sql).map_err(db)?;
+                let rows = stmt
+                    .query_map(params_from_iter(values), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, f64>(3)?))
+                    })
+                    .map_err(db)?;
+                let mut hits = Vec::new();
+                for row in rows {
+                    let (id, text, meta_json, score) = row.map_err(db)?;
+                    let meta: BTreeMap<String, String> =
+                        serde_json::from_str(&meta_json).map_err(|e| CoreError::Store(format!("corrupt store: chunk meta: {e}")))?;
+                    hits.push(Scored { id, score: score as f32, text, meta });
+                }
+                assert!(hits.len() <= k, "keyword search returned more than k hits");
+                assert!(hits.windows(2).all(|w| w[0].score >= w[1].score), "keyword hits sorted by score");
+                Ok(hits)
+            })
+            .await
+    }
+}
+
 /// Takes the write lock of a cached index. A lock poisoned by a panic
 /// mid-update is taken anyway and marked stale, so the next step reloads
 /// it from the file. Output: the guard.
@@ -825,11 +929,9 @@ fn delete_row(conn: &Connection, key: i64, text: &str) -> Result<(), CoreError> 
 /// Input: a connection, the name and at least one pair. Output: the keys.
 fn allowed_keys(conn: &Connection, name: &str, pairs: &[(String, String)]) -> Result<HashSet<u64>, CoreError> {
     assert!(!pairs.is_empty(), "an empty filter allows every key");
-    let mut sql = String::from("SELECT key FROM chunk WHERE index_name = ?1");
+    let sql = format!("SELECT key FROM chunk WHERE index_name = ?1{}", meta_clauses("key", pairs.len(), 2));
     let mut values: Vec<&str> = vec![name];
-    for (position, (key, value)) in pairs.iter().enumerate() {
-        let k = 2 + 2 * position;
-        sql.push_str(&format!(" AND key IN (SELECT chunk_key FROM chunk_meta WHERE key = ?{k} AND value = ?{})", k + 1));
+    for (key, value) in pairs {
         values.push(key);
         values.push(value);
     }
@@ -840,6 +942,29 @@ fn allowed_keys(conn: &Connection, name: &str, pairs: &[(String, String)]) -> Re
         out.insert(to_id(row.map_err(db)?)?);
     }
     Ok(out)
+}
+
+/// Builds one `AND <column> IN (...)` clause per filter pair, with the
+/// key and value of pair `i` bound at `?first + 2i` and the next number.
+/// Input: the key column, the pair count and the first parameter number.
+/// Output: SQL text shaped by the count alone, never by a value.
+fn meta_clauses(column: &str, pairs: usize, first: usize) -> String {
+    let mut sql = String::new();
+    for position in 0..pairs {
+        let k = first + 2 * position;
+        sql.push_str(&format!(" AND {column} IN (SELECT chunk_key FROM chunk_meta WHERE key = ?{k} AND value = ?{})", k + 1));
+    }
+    sql
+}
+
+/// Turns caller text into an FTS5 query of plain terms: split on every
+/// non-alphanumeric char, lowercased, each term quoted, joined with `OR`.
+/// No operator, column filter, prefix or `NEAR` survives. Input: the
+/// text. Output: the terms and the query, empty when no term is left.
+fn fts_query(text: &str) -> (Vec<String>, String) {
+    let terms: Vec<String> = text.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).map(str::to_lowercase).collect();
+    let quoted: Vec<String> = terms.iter().map(|t| format!("\"{}\"", t.replace('"', "\"\""))).collect();
+    (terms, quoted.join(" OR "))
 }
 
 /// Reads the generation of index `name`. Input: a connection and the
@@ -954,6 +1079,8 @@ fn check_settings(settings: &VectorSettings) -> Result<(), CoreError> {
         ("max_meta_key_bytes", settings.max_meta_key_bytes),
         ("max_meta_value_bytes", settings.max_meta_value_bytes),
         ("max_batch", settings.max_batch),
+        ("max_query_terms", settings.max_query_terms),
+        ("max_query_chars", settings.max_query_chars),
     ] {
         if value == 0 {
             return Err(CoreError::Store(format!("{field} must be at least 1")));
@@ -1088,6 +1215,14 @@ mod tests {
         conn.execute("INSERT INTO vector_index VALUES ('x', ?1, ?2)", params![kind_name(&kind).unwrap(), params_json(&kind).unwrap()])
             .unwrap();
         assert_eq!(stored_kind(&conn, "x").unwrap(), kind);
+    }
+
+    #[test]
+    fn fts_query_quotes_plain_terms() {
+        assert_eq!(fts_query("NEAR(a b)").1, "\"near\" OR \"a\" OR \"b\"");
+        assert_eq!(fts_query("text:secret a*").1, "\"text\" OR \"secret\" OR \"a\"");
+        assert_eq!(fts_query("\" ^ * ()").0.len(), 0);
+        assert_eq!(fts_query("Café-au-lait").0, ["café", "au", "lait"]);
     }
 
     #[test]

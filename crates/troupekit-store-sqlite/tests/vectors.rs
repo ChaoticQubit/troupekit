@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use troupekit_core::error::CoreError;
 use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemVectors;
-use troupekit_core::store::{BlobStore, Checkpoint, CheckpointStore, Filter, Scored, VectorRecord, VectorStore};
+use troupekit_core::store::{BlobStore, Checkpoint, CheckpointStore, Filter, KeywordStore, Scored, VectorRecord, VectorStore};
 use troupekit_store_sqlite::{HnswParams, IndexKind, Quantization, SqliteStore, SqliteVectors, VectorSettings};
 
 const DIMS: usize = 8;
@@ -491,6 +491,8 @@ async fn defaults_are_the_safe_values() {
     assert_eq!(s.max_meta_key_bytes(), 256);
     assert_eq!(s.max_meta_value_bytes(), 4096);
     assert_eq!(s.max_batch(), 10_000);
+    assert_eq!(s.max_query_terms(), 32);
+    assert_eq!(s.max_query_chars(), 2_000);
     let t = temp();
     let store = SqliteStore::open(&t.path).await.unwrap();
     let v = store.vectors("docs", s).await.unwrap();
@@ -499,4 +501,101 @@ async fn defaults_are_the_safe_values() {
     let conn = rusqlite::Connection::open(&t.path).unwrap();
     let row: String = conn.query_row("SELECT kind || ':' || params_json || ':' || generation FROM vector_index", [], |r| r.get(0)).unwrap();
     assert_eq!(row, "brute_force:{}:0");
+}
+
+#[tokio::test]
+async fn keyword_search_ranks_by_bm25() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let vectors = docs(&store).await;
+    let other = store.vectors("other", VectorSettings::new(DIMS)).await.unwrap();
+    vectors
+        .upsert(vec![
+            rec("once", vec![1.0; DIMS], "a refund is paid once the parcel is back at the warehouse", &[]),
+            rec("twice", vec![1.0; DIMS], "refund policy: refund in 14 days", &[]),
+            rec("none", vec![1.0; DIMS], "shipping takes two days", &[]),
+            rec("résumé", vec![1.0; DIMS], "Résumé of the REFUND rules", &[]),
+        ])
+        .await
+        .unwrap();
+    let fillers = (0..8).map(|i| rec(&format!("filler{i}"), vec![1.0; DIMS], &format!("shipping note number {i}"), &[])).collect();
+    vectors.upsert(fillers).await.unwrap();
+    other.upsert(vec![rec("elsewhere", vec![1.0; DIMS], "refund refund refund", &[])]).await.unwrap();
+    let hits = vectors.search_text("Refund", 10, &filter(&[])).await.unwrap();
+    let conn = rusqlite::Connection::open(&t.path).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id, -bm25(chunk_fts) FROM chunk_fts JOIN chunk c ON c.key = chunk_fts.rowid \
+             WHERE chunk_fts MATCH 'refund' AND c.index_name = 'docs' ORDER BY bm25(chunk_fts), c.id",
+        )
+        .unwrap();
+    let want: Vec<(String, f64)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect();
+    assert_eq!(want.len(), 3);
+    assert_eq!(ids(&hits), want.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>());
+    assert_eq!(hits[0].id, "twice");
+    for (hit, (_, score)) in hits.iter().zip(&want) {
+        assert!(hit.score > 0.0);
+        assert!((f64::from(hit.score) - score).abs() < 1e-4, "{} vs {score}", hit.score);
+    }
+    assert!(ids(&vectors.search_text("resume", 10, &filter(&[])).await.unwrap()).contains(&"résumé"));
+    assert_eq!(ids(&vectors.search_text("refund", 1, &filter(&[])).await.unwrap()), ["twice"]);
+    assert!(vectors.search_text("refund", 0, &filter(&[])).await.unwrap().is_empty());
+    assert!(vectors.search_text("absent", 10, &filter(&[])).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn fts_operators_in_query_are_plain_text() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let vectors = docs(&store).await;
+    vectors
+        .upsert(vec![
+            rec("a", vec![1.0; DIMS], "a near b and text secret", &[]),
+            rec("b", vec![1.0; DIMS], "nothing to see", &[]),
+        ])
+        .await
+        .unwrap();
+    for query in ["NEAR(a b)", "a*", "text:secret", "\"", "AND OR NOT", "^a", "\"unclosed", "a + b - c", "{text}: a", "col:* OR", "(((", "'; DROP TABLE chunk; --", ""] {
+        let result = vectors.search_text(query, 10, &filter(&[])).await;
+        assert!(result.is_ok(), "{query}: {result:?}");
+    }
+    assert_eq!(ids(&vectors.search_text("text:secret", 10, &filter(&[])).await.unwrap()), ["a"]);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk"), 2);
+}
+
+#[tokio::test]
+async fn keyword_filter_respects_scope() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let vectors = docs(&store).await;
+    vectors
+        .upsert(vec![
+            rec("a1", vec![1.0; DIMS], "refund policy", &[("scope", "tenant_a")]),
+            rec("b1", vec![1.0; DIMS], "refund policy", &[("scope", "tenant_b")]),
+            rec("b2", vec![1.0; DIMS], "refund refund policy", &[("scope", "tenant_b"), ("lang", "en")]),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(ids(&vectors.search_text("refund", 10, &filter(&[("scope", "tenant_a")])).await.unwrap()), ["a1"]);
+    let b = vectors.search_text("refund", 10, &filter(&[("scope", "tenant_b")])).await.unwrap();
+    assert_eq!(ids(&b), ["b2", "b1"]);
+    let both = vectors.search_text("refund", 10, &filter(&[("scope", "tenant_b"), ("lang", "en")])).await.unwrap();
+    assert_eq!(ids(&both), ["b2"]);
+    assert!(vectors.search_text("refund", 10, &filter(&[("scope", "x' OR '1'='1")])).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn query_term_and_length_caps() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let settings = VectorSettings::new(DIMS).with_max_query_terms(3).with_max_query_chars(20).with_max_meta_pairs(1);
+    let vectors = store.vectors("docs", settings).await.unwrap();
+    vectors.upsert(vec![rec("a", vec![1.0; DIMS], "one two three", &[])]).await.unwrap();
+    assert_eq!(ids(&vectors.search_text("one, two; three", 10, &filter(&[])).await.unwrap()), ["a"]);
+    store_error(vectors.search_text("one two three four", 10, &filter(&[])).await, "max_query_terms");
+    store_error(vectors.search_text(&"x".repeat(21), 10, &filter(&[])).await, "max_query_chars");
+    assert!(vectors.search_text(&"é".repeat(20), 10, &filter(&[])).await.is_ok());
+    store_error(vectors.search_text("one", 1_001, &filter(&[])).await, "k must be");
+    store_error(vectors.search_text("one", 1, &filter(&[("a", "1"), ("b", "2")])).await, "max_meta_pairs");
+    store_error(store.vectors("docs", VectorSettings::new(DIMS).with_max_query_terms(0)).await, "max_query_terms");
 }
