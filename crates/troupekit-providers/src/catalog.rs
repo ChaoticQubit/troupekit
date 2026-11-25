@@ -281,6 +281,62 @@ impl Catalog {
         self.connect_with(selector, key, Arc::new(transport))
     }
 
+    /// Builds an embedder for `selector` (`vendor/model`, an embedding
+    /// row) through `transport`, using `key` unless the vendor takes none.
+    /// Returns a selector error, or `MissingKey` when a needed key is absent.
+    #[cfg(feature = "embeddings")]
+    pub fn embedder_with(
+        &self,
+        selector: &str,
+        key: Option<Secret>,
+        transport: Arc<dyn Transport>,
+    ) -> Result<crate::embed::HttpEmbedder, CatalogError> {
+        let (vendor_id, model_id) = selector
+            .split_once('/')
+            .filter(|(v, m)| !v.is_empty() && !m.is_empty())
+            .ok_or_else(|| CatalogError::BadSelector(selector.to_owned()))?;
+        let vendor = self
+            .vendor(vendor_id)
+            .ok_or_else(|| CatalogError::UnknownVendor(vendor_id.to_owned()))?;
+        if vendor.protocol == Protocol::Anthropic {
+            return Err(CatalogError::BadSelector(format!(
+                "{selector}: vendor has no embeddings endpoint"
+            )));
+        }
+        let spec = self
+            .embeddings
+            .iter()
+            .find(|e| e.vendor == vendor_id && e.id == model_id)
+            .ok_or_else(|| CatalogError::UnknownModel(selector.to_owned()))?;
+        let key = match vendor.auth {
+            AuthStyle::NoKey => None,
+            _ => Some(key.ok_or_else(|| CatalogError::MissingKey(vendor.id.clone()))?),
+        };
+        Ok(crate::embed::HttpEmbedder::new(
+            selector.to_owned(),
+            spec.id.clone(),
+            vendor.endpoint(),
+            key,
+            transport,
+            spec.dims,
+            spec.max_batch,
+        ))
+    }
+
+    /// Builds an embedder like `embedder_with`, over a new default
+    /// `ReqwestTransport`. Returns `Transport` when the HTTP client
+    /// cannot start, else what `embedder_with` returns.
+    #[cfg(all(feature = "embeddings", feature = "reqwest"))]
+    pub fn embedder(
+        &self,
+        selector: &str,
+        key: Option<Secret>,
+    ) -> Result<crate::embed::HttpEmbedder, CatalogError> {
+        let transport = crate::reqwest_transport::ReqwestTransport::new()
+            .map_err(|e| CatalogError::Transport(e.message))?;
+        self.embedder_with(selector, key, Arc::new(transport))
+    }
+
     pub(crate) fn resolve(
         &self,
         selector: &str,

@@ -3,6 +3,8 @@
 //! Start with `Catalog::load` and `Catalog::connect("vendor/model", key)`.
 
 pub mod catalog;
+#[cfg(feature = "embeddings")]
+pub mod embed;
 pub mod fold;
 pub mod middleware;
 pub mod model;
@@ -15,6 +17,8 @@ pub mod transport;
 pub mod wire;
 
 pub use catalog::{Catalog, CatalogError, EmbeddingSpec, Price};
+#[cfg(feature = "embeddings")]
+pub use embed::HttpEmbedder;
 pub use middleware::{FallbackModel, MeteredModel, RetryModel, RetryPolicy};
 pub use model::{Endpoint, HttpModel, Model};
 pub use request::{CompletionRequest, CompletionResponse, Delta, StopReason};
