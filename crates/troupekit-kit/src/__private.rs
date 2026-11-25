@@ -1,3 +1,4 @@
+pub use crate::agent::Agent;
 pub use crate::output::IntoToolOutput;
 pub use crate::tool::{spec, AsTool};
 pub use async_trait::async_trait;
