@@ -111,8 +111,7 @@ impl GuardedHttp {
             let addr = pinned_addr(&url, self.allow).await?;
             let mut builder = reqwest::Client::builder()
                 .redirect(Policy::none())
-                .no_proxy()
-                .timeout(self.limits.timeout);
+                .no_proxy();
             if let Some(Host::Domain(domain)) = url.host() {
                 builder = builder.resolve(domain, addr);
             }
