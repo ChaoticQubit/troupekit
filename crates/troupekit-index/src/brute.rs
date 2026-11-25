@@ -111,9 +111,9 @@ pub struct BruteForce {
 
 impl BruteForce {
     /// Builds an empty exact index of dimension `dims` and format `quant`.
-    /// Input: `dims` in `1..=MAX_DIMS`, checked by `new_index`.
-    /// Output: the index; prefer `new_index` for a boxed one.
-    pub fn new(dims: usize, quant: Quantization) -> Self {
+    /// Input: `dims` in `1..=MAX_DIMS`, already checked by `new_index`,
+    /// the only public way in. Output: the empty index.
+    pub(crate) fn new(dims: usize, quant: Quantization) -> Self {
         assert!(dims > 0 && dims <= crate::MAX_DIMS, "dims out of range");
         Self { dims, quant, ids: Vec::new(), data: Slots::new(quant), slot_of: HashMap::new() }
     }

@@ -188,35 +188,50 @@ pub enum IndexError {
 /// at most `k` results, only ids where `allow` returns true.
 pub trait VectorIndex: Send + Sync {
     /// Returns the fixed dimension of every vector and query.
+    /// Set once by `new_index` and never changed.
+    /// Inserts and searches of another length are refused.
     fn dims(&self) -> usize;
 
-    /// Returns the number of live ids, tombstones excluded.
+    /// Returns the number of live ids.
+    /// Tombstones of an HNSW index are not counted.
+    /// A replaced id counts once.
     fn len(&self) -> usize;
 
     /// Returns true when no live id is stored.
+    /// Same as `len() == 0`.
+    /// Tombstones alone leave an index empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the bytes held by stored vectors and graph links.
+    /// Vectors count in their in-memory format: `4*dims`, `2*dims` or
+    /// `dims + 4` bytes each for f32, f16 and i8.
     fn heap_bytes(&self) -> usize;
 
     /// Inserts a vector under `id`, replacing any vector already there.
+    /// Input: an id and a vector of `dims` finite values.
     /// Errors on a wrong dimension or a non-finite component.
     fn insert(&mut self, id: u64, vector: &[f32]) -> Result<(), IndexError>;
 
-    /// Removes `id`. Returns true when it was live.
+    /// Removes `id` from search results.
+    /// Input: any id. Output: true when the id was live.
+    /// An unknown or already removed id returns false.
     fn remove(&mut self, id: u64) -> bool;
 
     /// Returns at most `k` nearest live ids allowed by `allow`.
+    /// Sorted by score descending, ties by lower id.
     /// Errors on a wrong dimension, a non-finite query or `k > MAX_K`.
     fn search(&self, query: &[f32], k: usize, allow: Option<&dyn Fn(u64) -> bool>) -> Result<Vec<Neighbor>, IndexError>;
 
     /// Drains the page changes made since the last call.
+    /// The store writes them in the same transaction as the vectors.
+    /// Brute force always returns an empty list.
     fn take_changes(&mut self) -> Vec<PageChange>;
 
     /// Loads vectors and persisted pages into an empty index.
-    /// Pages are untrusted: any inconsistency is `CorruptPage`.
+    /// Pages are untrusted: any inconsistency is `CorruptPage` and
+    /// leaves the index empty, so the store rebuilds from vectors.
     fn restore(&mut self, vectors: &mut dyn Iterator<Item = (u64, Vec<f32>)>, pages: &mut dyn Iterator<Item = (PageKey, Vec<u8>)>) -> Result<(), IndexError>;
 }
 
