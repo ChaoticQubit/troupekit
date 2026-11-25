@@ -163,3 +163,23 @@ async fn params_named_like_the_tool_or_its_internals_still_bind() {
         "x 1 false"
     );
 }
+
+/// Counts down to zero.
+#[troupekit::tool]
+fn countdown(n: u32) -> u32 {
+    if n == 0 {
+        0
+    } else {
+        1 + Self::invoke(n - 1)
+    }
+}
+
+#[tokio::test]
+async fn tool_bodies_keep_self_access() {
+    assert_eq!(countdown::invoke(3), 3);
+    let out = countdown
+        .call(json!({"n": 4}), &ToolContext::default())
+        .await
+        .unwrap();
+    assert_eq!(out, ToolOutput::text("4"));
+}

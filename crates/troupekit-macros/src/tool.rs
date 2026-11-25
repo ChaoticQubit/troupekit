@@ -204,40 +204,31 @@ pub fn expand_tool(t: &ToolFn) -> Vec<Piece> {
         "fn invoke"
     }));
     let mut outer = Vec::new();
-    let mut params = Vec::new();
-    let mut forward = Vec::new();
+    let mut inner = Vec::new();
+    if t.params
+        .iter()
+        .any(|p| p.ident.strip_prefix("r#").unwrap_or(&p.ident) == plain)
+    {
+        inner.push(code("#[allow(dead_code)] fn"));
+        inner.push(ident.clone());
+        inner.push(code("() {}"));
+    }
     for (i, param) in t.params.iter().enumerate() {
         outer.push(code(&format!("__troupekit_a{i}:")));
         outer.extend(param.ty.iter().map(|tok| Piece::Orig(tok.span())));
         outer.push(code(","));
-        forward.push(format!("__troupekit_a{i}"));
-        if param.is_mut {
-            params.push(code("mut"));
-        }
-        params.push(Piece::Orig(param.ident_span));
-        params.push(code(":"));
-        params.extend(param.ty.iter().map(|tok| Piece::Orig(tok.span())));
-        params.push(code(","));
+        inner.push(code(if param.is_mut { "let mut" } else { "let" }));
+        inner.push(Piece::Orig(param.ident_span));
+        inner.push(code(":"));
+        inner.extend(param.ty.iter().map(|tok| Piece::Orig(tok.span())));
+        inner.push(code(&format!("= __troupekit_a{i};")));
     }
     invoke.push(Piece::Group(Delim::Paren, outer));
-    let ret = |list: &mut Vec<Piece>| {
-        if !t.ret.is_empty() {
-            list.push(code("->"));
-            list.extend(t.ret.iter().map(|tok| Piece::Orig(tok.span())));
-        }
-    };
-    ret(&mut invoke);
-    let mut inner = vec![code(if t.is_async { "async fn" } else { "fn" })];
-    inner.push(ident.clone());
-    inner.push(Piece::Group(Delim::Paren, params));
-    ret(&mut inner);
+    if !t.ret.is_empty() {
+        invoke.push(code("->"));
+        invoke.extend(t.ret.iter().map(|tok| Piece::Orig(tok.span())));
+    }
     inner.push(Piece::Orig(t.body_span));
-    inner.push(ident.clone());
-    inner.push(code(&format!(
-        "({}){}",
-        forward.join(", "),
-        if t.is_async { ".await" } else { "" }
-    )));
     invoke.push(Piece::Group(Delim::Brace, inner));
     out.push(Piece::Group(Delim::Brace, invoke));
 
@@ -799,7 +790,7 @@ mod tests {
         for part in [
             "#[doc = \"Adds two numbers.\"]",
             "pub struct add ;",
-            "impl add {pub async fn invoke (__troupekit_a0: i64 , __troupekit_a1: Option < u8 > , __troupekit_a2: ToolContext ,) -> i64 {async fn add (a : i64 , o : Option < u8 > , ctx : ToolContext ,) -> i64 {a} add (__troupekit_a0, __troupekit_a1, __troupekit_a2).await}}",
+            "impl add {pub async fn invoke (__troupekit_a0: i64 , __troupekit_a1: Option < u8 > , __troupekit_a2: ToolContext ,) -> i64 {let a : i64 = __troupekit_a0; let o : Option < u8 > = __troupekit_a1; let ctx : ToolContext = __troupekit_a2; {a}}}",
             "struct __troupekit_args_add {a : i64 , #[serde(default)] o : Option < u8 > ,}",
             "#[serde(crate = \"::troupekit::__private::serde\", deny_unknown_fields)]",
             "let __troupekit_args: __troupekit_args_add =",
@@ -808,6 +799,9 @@ mod tests {
         ] {
             assert!(out.contains(part), "missing {part:?} in {out}");
         }
+        let clash = lex("/// Q.\nfn query(query: String) -> String { query }");
+        let out = render(&expand_tool(&parse_tool(&[], &clash).unwrap()), &clash);
+        assert!(out.contains("#[allow(dead_code)] fn query () {}"), "{out}");
         let sync = lex("/// S.\nfn s(ctx: &ToolContext) {}");
         let out = render(&expand_tool(&parse_tool(&[], &sync).unwrap()), &sync);
         assert!(out.contains("Self::invoke(__troupekit_ctx))"), "{out}");
