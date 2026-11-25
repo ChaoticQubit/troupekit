@@ -1,7 +1,8 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
 
-use crate::{check_k, check_vector, IndexError, Neighbor, PageChange, PageKey, VectorIndex};
+use crate::quant::Slots;
+use crate::{check_k, check_vector, IndexError, Neighbor, PageChange, PageKey, Quantization, VectorIndex};
 
 /// A search candidate ordered so that greater means closer.
 /// Higher score wins; on equal scores the lower id wins.
@@ -102,27 +103,24 @@ pub(crate) fn norm(v: &[f32]) -> f32 {
 #[derive(Debug)]
 pub struct BruteForce {
     dims: usize,
+    quant: Quantization,
     ids: Vec<u64>,
-    data: Vec<f32>,
+    data: Slots,
     slot_of: HashMap<u64, usize>,
 }
 
 impl BruteForce {
-    /// Builds an empty exact index of dimension `dims`.
+    /// Builds an empty exact index of dimension `dims` and format `quant`.
     /// Input: `dims` in `1..=MAX_DIMS`, checked by `new_index`.
     /// Output: the index; prefer `new_index` for a boxed one.
-    pub fn new(dims: usize) -> Self {
+    pub fn new(dims: usize, quant: Quantization) -> Self {
         assert!(dims > 0 && dims <= crate::MAX_DIMS, "dims out of range");
-        Self { dims, ids: Vec::new(), data: Vec::new(), slot_of: HashMap::new() }
-    }
-
-    fn slot(&self, i: usize) -> &[f32] {
-        &self.data[i * self.dims..(i + 1) * self.dims]
+        Self { dims, quant, ids: Vec::new(), data: Slots::new(quant), slot_of: HashMap::new() }
     }
 
     fn check_shape(&self) {
         assert_eq!(self.ids.len(), self.slot_of.len(), "slot map out of step with ids");
-        assert_eq!(self.data.len(), self.ids.len() * self.dims, "vector data out of step with ids");
+        assert_eq!(self.data.count(self.dims), self.ids.len(), "vector data out of step with ids");
     }
 }
 
@@ -136,17 +134,17 @@ impl VectorIndex for BruteForce {
     }
 
     fn heap_bytes(&self) -> usize {
-        self.ids.len() * self.dims * std::mem::size_of::<f32>()
+        self.ids.len() * self.data.bytes_per_vector(self.dims)
     }
 
     fn insert(&mut self, id: u64, vector: &[f32]) -> Result<(), IndexError> {
         check_vector(self.dims, vector)?;
         match self.slot_of.get(&id) {
-            Some(&i) => self.data[i * self.dims..(i + 1) * self.dims].copy_from_slice(vector),
+            Some(&i) => self.data.set(i, vector),
             None => {
                 self.slot_of.insert(id, self.ids.len());
                 self.ids.push(id);
-                self.data.extend_from_slice(vector);
+                self.data.push(vector);
             }
         }
         self.check_shape();
@@ -161,11 +159,11 @@ impl VectorIndex for BruteForce {
         if i != last {
             let moved = self.ids[last];
             self.ids[i] = moved;
-            self.data.copy_within(last * self.dims..(last + 1) * self.dims, i * self.dims);
+            self.data.move_slot(last, i, self.dims);
             self.slot_of.insert(moved, i);
         }
         self.ids.pop();
-        self.data.truncate(last * self.dims);
+        self.data.truncate(last, self.dims);
         self.check_shape();
         true
     }
@@ -176,12 +174,14 @@ impl VectorIndex for BruteForce {
         let qn = norm(query);
         let mut top = TopK::new(k);
         let mut allowed = 0usize;
+        let mut buf = Vec::with_capacity(self.dims);
         for (i, &id) in self.ids.iter().enumerate() {
             if allow.is_some_and(|f| !f(id)) {
                 continue;
             }
             allowed += 1;
-            top.push(Neighbor { id, score: cosine_with_norm(query, qn, self.slot(i)) });
+            let v = self.data.decode(i, self.dims, &mut buf);
+            top.push(Neighbor { id, score: cosine_with_norm(query, qn, v) });
         }
         let hits = top.into_sorted();
         assert_result_law(&hits, k.min(allowed));
@@ -201,7 +201,7 @@ impl VectorIndex for BruteForce {
         }
         for (id, v) in vectors {
             if let Err(e) = self.insert(id, &v) {
-                *self = Self::new(self.dims);
+                *self = Self::new(self.dims, self.quant);
                 return Err(e);
             }
         }

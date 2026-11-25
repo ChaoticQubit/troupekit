@@ -3,6 +3,7 @@
 //! opaque pages an index emits, and hands both back on open.
 
 mod brute;
+mod quant;
 
 use std::fmt;
 
@@ -232,10 +233,9 @@ pub fn new_index(kind: &IndexKind, dims: usize, quant: Quantization) -> Result<B
     if dims == 0 || dims > MAX_DIMS {
         return Err(IndexError::Invalid(format!("dims must be in 1..={MAX_DIMS}, got {dims}")));
     }
-    match (kind, quant) {
-        (IndexKind::BruteForce, Quantization::F32) => Ok(Box::new(BruteForce::new(dims))),
-        (IndexKind::BruteForce, _) => Err(IndexError::Unsupported("quantized brute force index")),
-        (IndexKind::Hnsw(_), _) => Err(IndexError::Unsupported("hnsw index")),
+    match kind {
+        IndexKind::BruteForce => Ok(Box::new(BruteForce::new(dims, quant))),
+        IndexKind::Hnsw(_) => Err(IndexError::Unsupported("hnsw index")),
     }
 }
 
