@@ -71,8 +71,8 @@ impl Graph {
     }
 
     /// Adds agent node `id` running `agent` on the previous node's output.
-    /// The agent's model, tools and evals join the graph; its own storage,
-    /// retries, events and ledger are replaced by the graph's.
+    /// The agent keeps its own model binding; its tools and evals join the
+    /// graph, and its storage, retries, events and ledger are the graph's.
     pub fn agent(mut self, id: impl Into<String>, agent: Agent) -> Self {
         self.nodes.push((id.into(), Node::Agent(Box::new(agent))));
         self
@@ -168,6 +168,7 @@ impl Graph {
         let mut registry = ToolRegistry::new();
         let mut agent_io = SimpleIo::new(ToolRegistry::new());
         let mut files: HashMap<String, String> = HashMap::new();
+        let mut keys: HashMap<String, (String, &Agent)> = HashMap::new();
         for (i, id) in order.iter().enumerate() {
             let feeder = feeder(&order, i);
             match self.node(id) {
@@ -177,25 +178,25 @@ impl Graph {
                             "agent node `{id}` sets its own {what}; set them on the graph"
                         )));
                     }
-                    let prepared = agent.prepare()?;
+                    let key = match keys.get(agent.name()) {
+                        Some((key, first)) if first.same_model(agent) => key.clone(),
+                        Some(_) => {
+                            return Err(fail(format!(
+                                "two different agents are named `{}`",
+                                agent.name()
+                            )));
+                        }
+                        None => {
+                            let key = format!("agent-{}", keys.len());
+                            keys.insert(agent.name().to_string(), (key.clone(), agent));
+                            key
+                        }
+                    };
+                    let prepared = agent.prepare(Some(&key))?;
                     for tool in &prepared.tools {
                         share(&mut registry, tool.clone()).map_err(fail)?;
                     }
-                    let selector = prepared.persona.model.clone();
-                    match agent_io.models.get(&selector) {
-                        Some(existing)
-                            if prepared.client_set
-                                && !Arc::ptr_eq(&existing.model, &prepared.handle.model) =>
-                        {
-                            return Err(fail(format!(
-                                "model `{selector}` has two different model clients; share one Arc"
-                            )));
-                        }
-                        Some(_) => {}
-                        None => {
-                            agent_io.models.insert(selector, prepared.handle);
-                        }
-                    }
+                    agent_io.models.entry(key).or_insert(prepared.handle);
                     for (eval, f) in prepared.eval_fns {
                         agent_io.evals.register(&eval, f)?;
                     }

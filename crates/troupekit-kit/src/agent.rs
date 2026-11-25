@@ -25,7 +25,6 @@ pub(crate) struct Prepared {
     pub tools: Vec<Arc<dyn Tool>>,
     pub registry: ToolRegistry,
     pub handle: ModelHandle,
-    pub client_set: bool,
     pub eval_fns: Vec<(String, EvalFn)>,
     pub laws: Laws,
 }
@@ -328,7 +327,7 @@ impl Agent {
     /// Fails with the first problem: settings, tools, persona, laws,
     /// evals, model, key or storage. Makes no model call.
     pub async fn build(self) -> Result<BuiltAgent, KitError> {
-        let prepared = self.prepare()?;
+        let prepared = self.prepare(None)?;
         let mut io = SimpleIo::new(prepared.registry);
         io.models
             .insert(prepared.persona.model.clone(), prepared.handle);
@@ -363,11 +362,27 @@ impl Agent {
         }
     }
 
+    pub(crate) fn same_model(&self, other: &Agent) -> bool {
+        fn same<T: ?Sized>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
+            match (a, b) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+        }
+        self.model == other.model
+            && same(&self.model_client, &other.model_client)
+            && same(&self.transport, &other.transport)
+            && self.api_key == other.api_key
+            && self.api_key_env == other.api_key_env
+            && self.catalog == other.catalog
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    pub(crate) fn prepare(&self) -> Result<Prepared, KitError> {
+    pub(crate) fn prepare(&self, model_key: Option<&str>) -> Result<Prepared, KitError> {
         let name = self.name.as_str();
         if self.retries > MAX_RETRIES {
             return Err(KitError::config(
@@ -395,7 +410,8 @@ impl Agent {
             registry.register(tool.clone())?;
         }
         let tool_names: Vec<String> = registry.specs().into_iter().map(|s| s.name).collect();
-        let (persona, persona_text) = self.persona(instructions, selector, &tool_names)?;
+        let (persona, persona_text) =
+            self.persona(instructions, model_key.unwrap_or(selector), &tool_names)?;
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
         let handle = resolve(ModelChoice {
@@ -414,7 +430,6 @@ impl Agent {
             tools: self.tools.clone(),
             registry,
             handle,
-            client_set: self.model_client.is_some(),
             eval_fns: self.eval_fns.clone(),
             laws,
         })

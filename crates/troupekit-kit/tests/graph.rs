@@ -181,17 +181,43 @@ async fn agent_and_step_sharing_a_tool_see_plain_output() {
 }
 
 #[tokio::test]
-async fn two_model_clients_for_one_selector_are_refused() {
-    let first = drafter();
-    let second = Agent::new("second")
-        .instructions("x")
-        .model("fake/m")
-        .model_client(echo_model());
-    let text = config_error(Graph::new("g").agent("draft", first).agent("again", second)).await;
-    assert_eq!(
-        text,
-        "agent `graph:g`: model `fake/m` has two different model clients; share one Arc"
+async fn same_selector_nodes_keep_their_own_model_clients() {
+    let caller = || {
+        Agent::new("caller")
+            .instructions("Call shout.")
+            .model("fake/m")
+            .model_client(shouting_model())
+            .tool(shout)
+    };
+    let output = Graph::new("g")
+        .agent("draft", drafter())
+        .agent("text", caller())
+        .run("hi")
+        .await
+        .unwrap();
+    assert_eq!(output, json!("got HI"));
+    let output = Graph::new("g")
+        .agent("text", caller())
+        .agent("draft", drafter())
+        .run("hi")
+        .await
+        .unwrap();
+    assert!(
+        output.as_str().unwrap().starts_with("Hello! You said:"),
+        "{output}"
     );
+}
+
+#[tokio::test]
+async fn one_agent_name_with_two_model_clients_is_refused() {
+    let other = drafter().model_client(shouting_model());
+    for (first, second) in [(drafter(), other.clone()), (other, drafter())] {
+        let text = config_error(Graph::new("g").agent("draft", first).agent("again", second)).await;
+        assert_eq!(
+            text,
+            "agent `graph:g`: two different agents are named `drafter`"
+        );
+    }
 }
 
 #[tokio::test]
