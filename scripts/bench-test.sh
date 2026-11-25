@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+unset CARGO_BUILD_JOBS RUSTC_WRAPPER CARGO_INCREMENTAL
 here="$(cd "$(dirname "$0")" && pwd)"
 bench="$here/bench.sh"
 work="$(mktemp -d)"
@@ -69,6 +70,15 @@ wait "$pid" 2>/dev/null && fail "interrupted run exited zero"
 same_libs interrupt
 
 if sh "$bench" t-bad nope best 1 >/dev/null 2>&1; then fail "unknown scenario accepted"; fi
+
+dirty="$work/tree-2/crates/troupekit-core/src/lib.rs"
+echo "pub const LOCAL_EDIT: u8 = 1;" >> "$dirty"
+cp "$dirty" "$work/dirty.expected"
+err="$(sh "$bench" t-dirty incr worst 1 2>&1 >/dev/null)" && fail "dirty tree accepted"
+echo "$err" | grep -q "tree has local edits to crates/troupekit-core/src/lib.rs" || fail "dirty tree message: $err"
+cmp -s "$dirty" "$work/dirty.expected" || fail "local edit in tree-2 was lost"
+[ "$(rows t-dirty)" = 0 ] || fail "dirty run wrote rows"
+cp "$work/lib-2.orig" "$dirty"
 
 known="$work/known.csv"
 head -1 "$BENCH_OUT" > "$known"

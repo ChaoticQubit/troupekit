@@ -65,6 +65,7 @@ case "$condition" in
   *) echo "bad condition: $condition" >&2; exit 2 ;;
 esac
 for t in $sel; do [ -f "$t/$lib" ] || { echo "not a tree: $t" >&2; exit 2; }; done
+for t in $sel; do git -C "$t" diff --quiet HEAD -- "$lib" || { echo "tree has local edits to $lib: $t" >&2; exit 2; }; done
 
 case "$scenario" in
   clean|incr) build="cargo build --workspace --all-targets --locked" ;;
