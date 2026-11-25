@@ -87,6 +87,11 @@ impl Worker {
         assert!(!status.success(), "a killed worker does not exit cleanly");
     }
 
+    fn kill_any(mut self) {
+        self.0.kill().unwrap();
+        self.0.wait().unwrap();
+    }
+
     async fn finish(mut self) {
         let start = Instant::now();
         loop {
@@ -202,7 +207,7 @@ async fn killed_at_random_once(dir: &Path, round: usize, rng: &mut XorShift, ref
             worker.finish().await;
             break;
         }
-        worker.kill();
+        worker.kill_any();
     }
     let store = SqliteStore::open(&path).await.unwrap();
     if store.job(id).await.unwrap() != Some(JobState::Done) {
