@@ -2,6 +2,7 @@ use troupekit_agent::{AgentError, PersonaError};
 use troupekit_core::error::CoreError;
 use troupekit_core::event::PauseReason;
 use troupekit_core::ids::RunId;
+use troupekit_graph::{GraphError, WorkflowError};
 use troupekit_providers::CatalogError;
 use troupekit_tools::ToolError;
 
@@ -27,6 +28,10 @@ pub enum KitError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Tool(#[from] ToolError),
+    #[error(transparent)]
+    Workflow(#[from] WorkflowError),
+    #[error(transparent)]
+    Graph(#[from] GraphError),
     #[error(transparent)]
     Store(#[from] CoreError),
     #[error("run {run_id} failed: {reason}")]

@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use toml::Value as Toml;
 use troupekit_agent::{
-    AgentRun, EvalFn, EventSink, InMemoryLedger, Limits, Persona, SimpleIo, UsageLedger,
+    AgentRun, EvalFn, EventSink, InMemoryLedger, Limits, ModelHandle, Persona, SimpleIo,
+    UsageLedger,
 };
 use troupekit_core::message::{Message, Role};
 use troupekit_core::secret::Secret;
@@ -17,6 +18,17 @@ use troupekit_providers::{Catalog, Model, Price, Transport};
 use troupekit_tools::{Tool, ToolRegistry, Toolkit};
 
 const MAX_RETRIES: u32 = 32;
+
+pub(crate) struct Prepared {
+    pub persona: Persona,
+    pub persona_text: String,
+    pub tools: Vec<Arc<dyn Tool>>,
+    pub registry: ToolRegistry,
+    pub handle: ModelHandle,
+    pub client_set: bool,
+    pub eval_fns: Vec<(String, EvalFn)>,
+    pub laws: Laws,
+}
 const DEFAULT_RETRIES: u32 = 3;
 const DEFAULT_ROLE: &str = "An assistant.";
 const DEFAULT_GOAL: &str = "Answer the user's request.";
@@ -316,6 +328,36 @@ impl Agent {
     /// Fails with the first problem: settings, tools, persona, laws,
     /// evals, model, key or storage. Makes no model call.
     pub async fn build(self) -> Result<BuiltAgent, KitError> {
+        let prepared = self.prepare()?;
+        let mut io = SimpleIo::new(prepared.registry);
+        io.models
+            .insert(prepared.persona.model.clone(), prepared.handle);
+        for (eval, f) in &self.eval_fns {
+            io.evals.register(eval, f.clone())?;
+        }
+        io.events = self.events.clone().unwrap_or_else(|| Arc::new(Discard));
+        io.ledger = self
+            .ledger
+            .clone()
+            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
+        let probe = vec![Message::text(Role::User, "build check")];
+        AgentRun::new(&prepared.persona, probe, self.limits.clone(), &io).await?;
+        let store = self.storage.open().await?;
+        Ok(BuiltAgent::new(
+            prepared.persona,
+            io,
+            self.limits,
+            store,
+            self.retries,
+            prepared.laws,
+        ))
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn prepare(&self) -> Result<Prepared, KitError> {
         let name = self.name.as_str();
         if self.retries > MAX_RETRIES {
             return Err(KitError::config(
@@ -343,7 +385,7 @@ impl Agent {
             registry.register(tool.clone())?;
         }
         let tool_names: Vec<String> = registry.specs().into_iter().map(|s| s.name).collect();
-        let persona = self.persona(instructions, selector, &tool_names)?;
+        let (persona, persona_text) = self.persona(instructions, selector, &tool_names)?;
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
         let handle = resolve(ModelChoice {
@@ -356,27 +398,16 @@ impl Agent {
             api_key_env: self.api_key_env.as_deref(),
             transport: self.transport.clone(),
         })?;
-        let mut io = SimpleIo::new(registry);
-        io.models.insert(selector.to_string(), handle);
-        for (eval, f) in &self.eval_fns {
-            io.evals.register(eval, f.clone())?;
-        }
-        io.events = self.events.clone().unwrap_or_else(|| Arc::new(Discard));
-        io.ledger = self
-            .ledger
-            .clone()
-            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
-        let probe = vec![Message::text(Role::User, "build check")];
-        AgentRun::new(&persona, probe, self.limits.clone(), &io).await?;
-        let store = self.storage.open().await?;
-        Ok(BuiltAgent::new(
+        Ok(Prepared {
             persona,
-            io,
-            self.limits,
-            store,
-            self.retries,
+            persona_text,
+            tools: self.tools.clone(),
+            registry,
+            handle,
+            client_set: self.model_client.is_some(),
+            eval_fns: self.eval_fns.clone(),
             laws,
-        ))
+        })
     }
 
     /// Builds the agent and runs it once on `input`.
@@ -398,7 +429,7 @@ impl Agent {
         instructions: &str,
         selector: &str,
         tools: &[String],
-    ) -> Result<Persona, KitError> {
+    ) -> Result<(Persona, String), KitError> {
         let text_or = |v: &Option<String>, default: &str| {
             Toml::String(v.clone().unwrap_or_else(|| default.to_string()))
         };
@@ -428,7 +459,8 @@ impl Agent {
         let text = toml::to_string(&table).map_err(|e| {
             KitError::config(&self.name, format!("persona does not serialize: {e}"))
         })?;
-        Ok(Persona::parse(&format!("agent:{}", self.name), &text)?)
+        let persona = Persona::parse(&format!("agent:{}", self.name), &text)?;
+        Ok((persona, text))
     }
 }
 

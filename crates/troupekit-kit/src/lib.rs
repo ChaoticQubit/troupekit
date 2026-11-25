@@ -1,6 +1,7 @@
 mod agent;
 mod built;
 mod error;
+mod graph;
 mod laws;
 mod model;
 mod output;
@@ -13,6 +14,7 @@ pub mod __private;
 pub use agent::Agent;
 pub use built::{BuiltAgent, Input, RunOutcome};
 pub use error::KitError;
+pub use graph::{BuiltGraph, Graph, GraphReport};
 pub use laws::Laws;
 pub use output::{IntoToolOutput, Json};
 pub use storage::Storage;
@@ -24,7 +26,8 @@ pub use troupekit_tools::{Tool, ToolContext, ToolOutput};
 /// Builder, built agent, outcome, storage, laws, errors and tools.
 /// `AsTool`, `IntoToolOutput` and `Input` stay at the crate root.
 pub mod prelude {
-    pub use crate::{agent, tool, Agent, BuiltAgent, Json, KitError, Laws, RunOutcome, Storage};
+    pub use crate::{
+        agent, tool, Agent, BuiltAgent, BuiltGraph, Graph, Json, KitError, Laws, RunOutcome,
+        Storage,
+    };
 }
-
-use troupekit_graph as _;
