@@ -195,6 +195,39 @@ async fn two_model_clients_for_one_selector_are_refused() {
 }
 
 #[tokio::test]
+async fn agent_limits_and_laws_belong_to_the_graph() {
+    let limited = drafter().limits(troupekit_agent::Limits {
+        run: Some(10),
+        ..Default::default()
+    });
+    let text = config_error(Graph::new("g").agent("draft", limited)).await;
+    assert_eq!(
+        text,
+        "agent `graph:g`: agent node `draft` sets its own limits; set them on the graph"
+    );
+    let lawful = drafter().law("def main = 1");
+    let text = config_error(Graph::new("g").agent("draft", lawful)).await;
+    assert_eq!(
+        text,
+        "agent `graph:g`: agent node `draft` sets its own laws; set them on the graph"
+    );
+}
+
+#[tokio::test]
+async fn finished_run_resumes_to_its_output() {
+    let store = Arc::new(troupekit_core::inmem::InMemCheckpoints::default());
+    let built = Graph::new("lab3")
+        .step("clean", clean_text)
+        .checkpoints(Storage::custom(store))
+        .build()
+        .await
+        .unwrap();
+    let report = built.run_with(" ab ").await.unwrap();
+    assert_eq!(built.resume(report.run_id()).await.unwrap(), json!("ab"));
+    assert_eq!(built.resume(report.run_id()).await.unwrap(), json!("ab"));
+}
+
+#[tokio::test]
 async fn cycle_is_refused() {
     let text = config_error(
         Graph::new("g")

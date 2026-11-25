@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use troupekit_agent::{
-    drive, AgentIo, AgentRun, EventSink, Limits, Persona, SimpleIo, StepOutcome,
+    drive, AgentIo, AgentRun, EventSink, Limits, Persona, RunState, SimpleIo, StepOutcome,
 };
 use troupekit_core::event::{Event, Usage};
 use troupekit_core::ids::RunId;
@@ -215,6 +215,22 @@ impl BuiltAgent {
         store: &dyn CheckpointStore,
     ) -> Result<RunOutcome, KitError> {
         let io: &dyn AgentIo = &self.inner.io;
+        match run.state().clone() {
+            RunState::Done { output } => return Ok(outcome(run, output)),
+            RunState::Failed { error } => {
+                return Err(KitError::Failed {
+                    run_id: run.run_id(),
+                    reason: error,
+                })
+            }
+            RunState::Paused { reason, .. } => {
+                return Err(KitError::Paused {
+                    run_id: run.run_id(),
+                    reason,
+                })
+            }
+            _ => {}
+        }
         let mut attempts = 0u32;
         loop {
             match drive(run, io, store).await? {

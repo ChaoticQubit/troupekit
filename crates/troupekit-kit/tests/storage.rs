@@ -52,8 +52,10 @@ async fn custom_store_keeps_runs_for_resume() {
         .await
         .unwrap();
     let first = built.run_with("Ada").await.unwrap();
-    assert_eq!(
-        built.resume(first.run_id()).await.unwrap(),
-        "Hello! You said: Ada"
-    );
+    for _ in 0..2 {
+        assert_eq!(
+            built.resume(first.run_id()).await.unwrap(),
+            "Hello! You said: Ada"
+        );
+    }
 }

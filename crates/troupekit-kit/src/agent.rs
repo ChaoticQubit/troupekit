@@ -353,6 +353,16 @@ impl Agent {
         ))
     }
 
+    pub(crate) fn graph_conflict(&self) -> Option<&'static str> {
+        if self.limits != Limits::default() {
+            Some("limits")
+        } else if !self.law_paths.is_empty() || !self.inline_laws.is_empty() {
+            Some("laws")
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.name
     }

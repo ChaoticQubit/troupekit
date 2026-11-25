@@ -172,6 +172,11 @@ impl Graph {
             let feeder = feeder(&order, i);
             match self.node(id) {
                 Node::Agent(agent) => {
+                    if let Some(what) = agent.graph_conflict() {
+                        return Err(fail(format!(
+                            "agent node `{id}` sets its own {what}; set them on the graph"
+                        )));
+                    }
                     let prepared = agent.prepare()?;
                     for tool in &prepared.tools {
                         share(&mut registry, tool.clone()).map_err(fail)?;
@@ -541,8 +546,11 @@ impl BuiltGraph {
         let cap =
             2 * u64::from(inner.workflow.max_steps) + u64::from(inner.workflow.max_retries) + 8;
         for _ in 0..cap {
+            let before = run.steps();
             let outcome = run.step(&inner.io).await;
-            store.save(run.checkpoint()).await?;
+            if run.steps() != before {
+                store.save(run.checkpoint()).await?;
+            }
             match outcome {
                 GraphOutcome::Continue => {}
                 GraphOutcome::RetryAt { at_ms, .. } => {
