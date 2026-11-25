@@ -29,10 +29,10 @@ const BLOB_BYTES_MAX_DEFAULT: u64 = 64 * 1024 * 1024;
 const HISTORY_STEPS_MAX_DEFAULT: u64 = 100_000;
 const BUSY_TIMEOUT_MS_DEFAULT: u32 = 5_000;
 
-/// How hard a commit is pushed to disk. `Full` survives power loss.
-/// `Normal` is faster and can lose the last commits on power loss, never on
-/// a process kill, and never corrupts the file. Durability belongs to one
-/// connection, so two handles on one file may differ.
+/// How hard a commit is pushed to disk, per connection. `Full` survives
+/// power loss and also sets `fullfsync`, which Apple platforms need to reach
+/// stable storage. `Normal` is faster and can lose the last commits on power
+/// loss, never on a process kill, and never corrupts the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Durability {
@@ -217,11 +217,15 @@ fn open_connection(settings: &SqliteStoreBuilder) -> Result<Connection, CoreErro
             "store cannot use WAL, got {mode}"
         )));
     }
-    let synchronous = match settings.durability {
-        Durability::Full => "FULL",
-        Durability::Normal => "NORMAL",
+    let (synchronous, fullfsync) = match settings.durability {
+        Durability::Full => ("FULL", true),
+        Durability::Normal => ("NORMAL", false),
     };
     conn.pragma_update(None, "synchronous", synchronous)
+        .map_err(db)?;
+    conn.pragma_update(None, "fullfsync", fullfsync)
+        .map_err(db)?;
+    conn.pragma_update(None, "checkpoint_fullfsync", fullfsync)
         .map_err(db)?;
     conn.pragma_update(None, "trusted_schema", "OFF")
         .map_err(db)?;
@@ -384,6 +388,8 @@ mod tests {
         assert!(builder.clock.now_ms() >= before);
         let (_dir, store) = temp_store(|b| b).await;
         assert_eq!(pragma(&store, "synchronous").await, 2);
+        assert_eq!(pragma(&store, "fullfsync").await, 1);
+        assert_eq!(pragma(&store, "checkpoint_fullfsync").await, 1);
         assert_eq!(pragma(&store, "busy_timeout").await, 5_000);
         assert_eq!(pragma(&store, "trusted_schema").await, 0);
     }
@@ -392,6 +398,8 @@ mod tests {
     async fn durability_normal_sets_synchronous_normal() {
         let (_dir, store) = temp_store(|b| b.durability(Durability::Normal)).await;
         assert_eq!(pragma(&store, "synchronous").await, 1);
+        assert_eq!(pragma(&store, "fullfsync").await, 0);
+        assert_eq!(pragma(&store, "checkpoint_fullfsync").await, 0);
     }
 
     #[tokio::test]
