@@ -9,6 +9,13 @@ pub use troupekit_host as host;
 
 #[cfg(feature = "sqlite")]
 pub use troupekit_store_sqlite::{Durability, SqliteStore, SqliteStoreBuilder};
+#[cfg(feature = "knowledge")]
+pub use troupekit_context as context;
+#[cfg(feature = "knowledge")]
+pub use troupekit_store_sqlite::{HnswParams, IndexKind, OpenReport, Quantization, SqliteVectors, VectorSettings};
+
+#[cfg(feature = "knowledge")]
+pub mod knowledge;
 
 use std::sync::Arc;
 use troupekit_agent::InMemoryLedger;

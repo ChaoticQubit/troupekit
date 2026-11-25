@@ -60,10 +60,67 @@ CREATE TABLE usage_total (
 PRAGMA application_id = 1414679380;
 ";
 
+const STEP_2: &str = "
+CREATE TABLE vector_index (
+  name TEXT NOT NULL PRIMARY KEY CHECK (length(name) BETWEEN 1 AND 64),
+  dims INTEGER NOT NULL CHECK (dims BETWEEN 1 AND 65536),
+  kind TEXT NOT NULL CHECK (kind IN ('brute_force', 'hnsw')),
+  params_json TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+  created_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE chunk (
+  key INTEGER PRIMARY KEY AUTOINCREMENT,
+  index_name TEXT NOT NULL,
+  id TEXT NOT NULL CHECK (length(id) BETWEEN 1 AND 256),
+  text TEXT NOT NULL,
+  meta_json TEXT NOT NULL,
+  vector BLOB NOT NULL,
+  UNIQUE (index_name, id)
+) STRICT;
+
+CREATE TABLE chunk_meta (
+  chunk_key INTEGER NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (chunk_key, key)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX chunk_meta_lookup ON chunk_meta (key, value, chunk_key);
+
+CREATE VIRTUAL TABLE chunk_fts USING fts5(
+  text,
+  content = 'chunk',
+  content_rowid = 'key',
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TABLE index_page (
+  index_name TEXT NOT NULL,
+  page INTEGER NOT NULL CHECK (page >= 0),
+  bytes BLOB NOT NULL,
+  PRIMARY KEY (index_name, page)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE ingest_source (
+  index_name TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  source TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  chunks INTEGER NOT NULL CHECK (chunks >= 0),
+  status TEXT NOT NULL CHECK (status IN ('done', 'failed')),
+  error TEXT,
+  at_ms INTEGER NOT NULL,
+  CHECK ((status = 'failed') = (error IS NOT NULL)),
+  PRIMARY KEY (index_name, scope, source)
+) STRICT, WITHOUT ROWID;
+";
+
 /// Ordered migration scripts. Step `n` takes a file from version `n - 1`
 /// to `n`. A released step is never edited; a schema change is a new step
 /// appended at the end.
-pub(crate) const STEPS: &[&str] = &[STEP_1];
+pub(crate) const STEPS: &[&str] = &[STEP_1, STEP_2];
 
 /// What the header of a store file says before any migration.
 /// Read by `read_header` on any connection, keyed or not.
@@ -170,19 +227,30 @@ mod tests {
     #[test]
     fn fresh_database_migrates_to_latest() {
         let mut conn = memory();
-        assert_eq!(migrate(&mut conn, STEPS).unwrap(), 1);
+        assert_eq!(migrate(&mut conn, STEPS).unwrap(), crate::SCHEMA_VERSION);
         let header = read_header(&conn).unwrap();
-        assert_eq!(header.user_version, 1);
+        assert_eq!(header.user_version, crate::SCHEMA_VERSION);
         assert_eq!(header.application_id, APPLICATION_ID);
         assert_eq!(
             tables(&conn),
             [
                 "blob_entry",
                 "checkpoint",
+                "chunk",
+                "chunk_fts",
+                "chunk_fts_config",
+                "chunk_fts_data",
+                "chunk_fts_docsize",
+                "chunk_fts_idx",
+                "chunk_meta",
+                "index_page",
+                "ingest_source",
                 "job",
                 "lease_token",
                 "memory_entry",
-                "usage_total"
+                "sqlite_sequence",
+                "usage_total",
+                "vector_index"
             ]
         );
         let last: i64 = conn
@@ -196,7 +264,7 @@ mod tests {
         let mut conn = memory();
         migrate(&mut conn, STEPS).unwrap();
         let before = tables(&conn);
-        assert_eq!(migrate(&mut conn, STEPS).unwrap(), 1);
+        assert_eq!(migrate(&mut conn, STEPS).unwrap(), crate::SCHEMA_VERSION);
         assert_eq!(tables(&conn), before);
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM lease_token", [], |r| r.get(0))
@@ -212,7 +280,10 @@ mod tests {
         let err = migrate(&mut conn, STEPS).unwrap_err();
         assert_eq!(
             err,
-            CoreError::Store("store is version 5, this troupekit reads up to 1".into())
+            CoreError::Store(format!(
+                "store is version 5, this troupekit reads up to {}",
+                crate::SCHEMA_VERSION
+            ))
         );
         assert_eq!(read_header(&conn).unwrap().user_version, 5);
     }

@@ -1,0 +1,1 @@
+Warranty lasts one year.
