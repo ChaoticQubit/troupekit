@@ -1,0 +1,6 @@
+{
+  "env": {
+    "CARGO_BUILD_JOBS": "3",
+    "RUSTC_WRAPPER": "sccache"
+  }
+}
