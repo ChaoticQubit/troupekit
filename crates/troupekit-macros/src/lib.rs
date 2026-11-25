@@ -10,10 +10,11 @@ mod lit;
 mod tokens;
 mod tool;
 
-/// Turns a fn into a tool value: `#[tool] async fn add(a: i64, b: i64)`
-/// makes `add` a unit struct implementing `Tool`, with the doc comment as
-/// description and the arguments as the JSON schema. The body stays
-/// callable as `add::invoke(..)`. Keys: `name`, `description`, `crate`.
+/// Turns a fn into a tool value: `#[tool] async fn add(a: i64, b: i64)` makes
+/// `add` a unit struct implementing `Tool`; the doc comment is the description,
+/// the arguments the schema, and the body stays callable as `add::invoke(..)`.
+/// An imported `add` turns a `let add` binding into a unit-struct pattern:
+/// rename the binding or use the tool by path. Keys: name, description, crate.
 #[proc_macro_attribute]
 pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut source = tokens::Source::new();
