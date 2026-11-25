@@ -168,8 +168,8 @@ fn validate(limits: &Limits) -> Result<(), CoreError> {
 
 /// Creates the store file when it does not exist yet, so the read-write
 /// open that follows finds it on every platform. On Unix the new file is
-/// 0600. Input: the path. Output: `Ok` when the file exists afterwards,
-/// `CoreError::Store` when it cannot be created.
+/// 0600. Input: the path. Output: `Ok` when it created the file or found
+/// an entry there, `CoreError::Store` when it cannot be created.
 fn create_private(path: &Path) -> Result<(), CoreError> {
     if path.exists() {
         return Ok(());
@@ -181,9 +181,7 @@ fn create_private(path: &Path) -> Result<(), CoreError> {
     options.open(path).map(drop).or_else(|e| match e.kind() {
         std::io::ErrorKind::AlreadyExists => Ok(()),
         _ => Err(CoreError::Store(format!("cannot create store: {e}"))),
-    })?;
-    assert!(path.exists(), "store file missing after create");
-    Ok(())
+    })
 }
 
 fn open_connection(settings: &SqliteStoreBuilder) -> Result<Connection, CoreError> {

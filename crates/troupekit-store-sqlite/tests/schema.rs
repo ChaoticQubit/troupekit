@@ -152,3 +152,13 @@ async fn table_named_like_an_internal_one_is_still_foreign() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(table_names(&path), ["sqliteXnotes"]);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dangling_symlink_path_is_a_store_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("link.db");
+    std::os::unix::fs::symlink(dir.path().join("missing.db"), &path).unwrap();
+    let err = SqliteStore::open(&path).await.unwrap_err();
+    assert!(matches!(&err, CoreError::Store(_)), "{err:?}");
+}
