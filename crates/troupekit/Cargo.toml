@@ -31,6 +31,10 @@ sqlcipher-system = ["sqlite", "troupekit-store-sqlite/sqlcipher-system"]
 name = "kill_resume"
 required-features = ["sqlite"]
 
+[[example]]
+name = "support_agent"
+required-features = ["knowledge"]
+
 [[test]]
 name = "main"
 path = "tests/main.rs"

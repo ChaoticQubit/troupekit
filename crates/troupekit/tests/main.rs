@@ -4,3 +4,5 @@ mod common;
 mod knowledge;
 #[cfg(feature = "sqlite")]
 mod kill_resume;
+#[cfg(feature = "knowledge")]
+mod support;
