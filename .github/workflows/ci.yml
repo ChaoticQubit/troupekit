@@ -1,0 +1,233 @@
+name: ci
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  BEND_NO_TELEMETRY: "1"
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            cross: false
+            phone: false
+          - target: aarch64-apple-ios
+            runner: macos-latest
+            cross: true
+            phone: true
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: false
+            phone: false
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            cross: false
+            phone: false
+          - target: aarch64-linux-android
+            runner: ubuntu-latest
+            cross: true
+            phone: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            cross: false
+            phone: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+      - name: add target
+        if: matrix.cross
+        run: rustup target add ${{ matrix.target }}
+      - name: android toolchain
+        if: matrix.target == 'aarch64-linux-android'
+        shell: bash
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: build workspace
+        if: '!matrix.cross'
+        run: cargo build --workspace --locked
+      - name: build workspace for target
+        if: matrix.cross
+        run: cargo build --workspace --locked --target ${{ matrix.target }}
+      - name: build without the TLS stack
+        if: matrix.phone
+        run: cargo build -p troupekit --no-default-features --features sqlite --locked --target ${{ matrix.target }}
+
+  test:
+    name: test ${{ matrix.runner }}
+    if: ${{ !startsWith(github.head_ref, 'release/') }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-test-${{ hashFiles('Cargo.lock') }}
+      - name: boundary
+        run: sh scripts/check-boundary.sh
+      - name: test changed crates
+        shell: bash
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          set +e
+          pkgs="$(sh scripts/changed-crates.sh "origin/$BASE")"
+          code=$?
+          set -e
+          if [ "$code" -eq 3 ]; then
+            echo "no crate changed"
+            exit 0
+          fi
+          if [ "$code" -ne 0 ]; then
+            echo "changed-crates.sh failed with exit $code"
+            exit "$code"
+          fi
+          cargo test --locked $pkgs
+
+  cipher:
+    name: cipher ${{ matrix.feature }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [sqlcipher, sqlcipher-system]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.feature }}-${{ hashFiles('Cargo.lock') }}
+      - name: system OpenSSL
+        if: matrix.feature == 'sqlcipher-system'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: test
+        run: cargo test -p troupekit-store-sqlite --features ${{ matrix.feature }} --locked
+
+  cipher-build:
+    name: cipher-build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-ios
+            runner: macos-latest
+          - target: aarch64-linux-android
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cipher-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+      - name: add target
+        run: rustup target add ${{ matrix.target }}
+      - name: android toolchain
+        if: matrix.target == 'aarch64-linux-android'
+        shell: bash
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: build
+        run: cargo build -p troupekit-store-sqlite --features sqlcipher --locked --target ${{ matrix.target }}
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        id: deny-cache
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: ${{ runner.os }}-cargo-deny-0.22.1
+      - name: install cargo-deny
+        if: steps.deny-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --version 0.22.1 --locked
+      - name: check
+        run: cargo deny check
+
+  proofs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: install bend 2.0.40
+        shell: bash
+        run: |
+          name=bend-2.0.40-linux-x64.tar.gz
+          tmp="$(mktemp -d)"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$tmp/$name" "https://github.com/bendlang/bend/releases/download/v2.0.40/$name"
+          echo "c9ff8d67bd903fb6ad9a26b43d8a62c01021de82a44d55ce4a3dcd4732113d6b  $tmp/$name" | sha256sum -c -
+          tar -xzf "$tmp/$name" -C "$tmp"
+          mkdir -p "$HOME/.bend/bin"
+          mv "$tmp/bend/bend2" "$tmp/bend/guide" "$HOME/.bend/"
+          mv "$tmp/bend/bin/bend" "$HOME/.bend/bin/bend"
+          echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - name: version
+        shell: bash
+        run: test "$(bend version)" = "bend 2.0.40"
+      - name: proofs
+        shell: bash
+        working-directory: proofs/agent-run
+        run: bend PROOF.bend | tee out.txt && grep -qx "ALL PROOFS CHECK" out.txt
+
+  full:
+    name: full ${{ matrix.runner }}
+    if: ${{ startsWith(github.head_ref, 'release/') }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-full-${{ hashFiles('Cargo.lock') }}
+      - name: full suite
+        env:
+          TROUPEKIT_E2E_RUNS: "100"
+        run: cargo test --workspace --locked
