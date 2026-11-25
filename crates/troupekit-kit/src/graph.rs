@@ -74,6 +74,8 @@ impl Graph {
     /// Adds agent node `id` running `agent` on the previous node's output.
     /// The agent keeps its own model binding; its tools and evals join the
     /// graph, and its storage, retries, events and ledger are the graph's.
+    /// An agent with its own limits or laws fails `build`: set them on the
+    /// graph, so no spend cap is dropped.
     pub fn agent(mut self, id: impl Into<String>, agent: Agent) -> Self {
         self.nodes.push((id.into(), Node::Agent(Box::new(agent))));
         self
