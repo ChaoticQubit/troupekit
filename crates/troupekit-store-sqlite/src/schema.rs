@@ -86,7 +86,7 @@ pub(crate) fn read_header(conn: &Connection) -> Result<Header, CoreError> {
         .map_err(db)?;
     let has_tables: bool = conn
         .query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\')",
             [],
             |row| row.get(0),
         )

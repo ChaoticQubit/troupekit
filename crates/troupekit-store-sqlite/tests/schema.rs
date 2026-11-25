@@ -133,3 +133,22 @@ async fn versioned_file_without_the_id_is_refused_and_left_unchanged() {
     assert_eq!(pragma_i64(&path, "user_version"), 1);
     assert_eq!(table_names(&path), ["notes"]);
 }
+
+#[tokio::test]
+async fn table_named_like_an_internal_one_is_still_foreign() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lookalike.db");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sqliteXnotes (x INTEGER)")
+            .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    let err = SqliteStore::open(&path).await.unwrap_err();
+    assert!(
+        matches!(&err, CoreError::Store(m) if m.contains("not a troupekit store")),
+        "{err:?}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(table_names(&path), ["sqliteXnotes"]);
+}
