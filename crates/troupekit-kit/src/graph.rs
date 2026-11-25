@@ -223,6 +223,11 @@ impl Graph {
                             args.join(", ")
                         )));
                     }
+                    if !takes_text(&tool.spec().schema["properties"][feeder]) {
+                        return Err(fail(format!(
+                            "step `{id}` argument `{feeder}` must accept a string; every graph node is fed text"
+                        )));
+                    }
                     registry.register(Arc::new(StepTool::new(id, tool.clone())))?;
                 }
             }
@@ -672,6 +677,21 @@ fn input_state(text: &str) -> Map<String, Value> {
     let mut state = Map::new();
     state.insert(INPUT.into(), Value::String(text.to_string()));
     state
+}
+
+fn takes_text(schema: &Value) -> bool {
+    match schema {
+        Value::Bool(any) => *any,
+        Value::Object(map) => match map.get("type") {
+            Some(Value::String(t)) => t == "string",
+            Some(Value::Array(types)) => types.iter().any(|t| t == "string"),
+            Some(_) => false,
+            None => !["$ref", "anyOf", "oneOf", "allOf", "enum", "const", "not"]
+                .iter()
+                .any(|k| map.contains_key(*k)),
+        },
+        _ => false,
+    }
 }
 
 fn arg_names(spec: &ToolSpec) -> Vec<String> {

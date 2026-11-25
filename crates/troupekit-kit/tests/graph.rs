@@ -31,6 +31,24 @@ fn shout(text: String) -> String {
     text.to_uppercase()
 }
 
+/// Adds one.
+#[tool]
+fn increment(input: i64) -> i64 {
+    input + 1
+}
+
+/// Takes optional text.
+#[tool]
+fn maybe_text(input: Option<String>) -> String {
+    input.unwrap_or_default()
+}
+
+/// Takes any JSON value.
+#[tool]
+fn any_value(input: serde_json::Value) -> String {
+    input.to_string()
+}
+
 fn drafter() -> Agent {
     Agent::new("drafter")
         .instructions("Draft.")
@@ -145,6 +163,24 @@ async fn fn_args_must_match_feeding_nodes() {
         text,
         "agent `graph:pipeline`: step `loud` takes (text) but is fed by (draft); name its arguments after the nodes that feed it"
     );
+}
+
+#[tokio::test]
+async fn step_arguments_must_accept_text() {
+    let text = config_error(Graph::new("g").step("inc", increment)).await;
+    assert_eq!(
+        text,
+        "agent `graph:g`: step `inc` argument `input` must accept a string; every graph node is fed text"
+    );
+    assert_eq!(
+        Graph::new("g")
+            .step("m", maybe_text)
+            .run("x")
+            .await
+            .unwrap(),
+        json!("x")
+    );
+    assert!(Graph::new("g").step("a", any_value).build().await.is_ok());
 }
 
 #[tokio::test]
