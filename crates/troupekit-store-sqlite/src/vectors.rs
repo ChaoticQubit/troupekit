@@ -340,21 +340,28 @@ impl SqliteStore {
                     }
                 };
                 assert_eq!(state.dims, settings.dims, "cached dims differ from the stored row");
-                {
-                    let mut cached = write_cached(&state);
-                    if cached.settings != settings {
-                        cached.settings = settings;
-                        cached.stale = true;
-                    }
-                    if kind_changed {
-                        cached.stale = true;
-                        rebuild_kind(&tx, &state, &mut cached)?;
-                    } else {
-                        reload_if_needed(&tx, &state, &mut cached)?;
-                    }
-                    assert!(!cached.stale, "an opened index is fresh");
+                let mut cached = write_cached(&state);
+                if cached.settings != settings {
+                    cached.settings = settings;
+                    cached.stale = true;
                 }
-                tx.commit().map_err(db)?;
+                let rebuilt_at = if kind_changed {
+                    cached.stale = true;
+                    Some(rebuild_kind(&tx, &state, &mut cached)?)
+                } else {
+                    reload_if_needed(&tx, &state, &mut cached)?;
+                    None
+                };
+                if let Err(e) = tx.commit() {
+                    cached.stale = true;
+                    return Err(db(e));
+                }
+                if let Some(generation) = rebuilt_at {
+                    cached.generation = generation;
+                    cached.stale = false;
+                }
+                assert!(!cached.stale, "an opened index is fresh");
+                drop(cached);
                 Ok(state)
             })
             .await?;
@@ -779,10 +786,10 @@ fn reload_if_needed(conn: &Connection, state: &IndexState, cached: &mut Cached) 
 }
 
 /// Rebuilds the index under the kind in `cached.settings`, rewrites all
-/// pages and stores the new kind, all in the caller's transaction.
-/// Input: a connection inside a write transaction. Output: `Ok` with
-/// `cached` fresh at the bumped generation.
-fn rebuild_kind(conn: &Connection, state: &IndexState, cached: &mut Cached) -> Result<(), CoreError> {
+/// pages and stores the new kind, all in the caller's transaction. The
+/// cache stays stale: the caller publishes the generation after commit.
+/// Input: a connection inside a write transaction. Output: the new generation.
+fn rebuild_kind(conn: &Connection, state: &IndexState, cached: &mut Cached) -> Result<i64, CoreError> {
     let kind = cached.settings.kind.clone();
     let index = build_from_file(conn, &kind, state.dims, cached.settings.quantization, &state.name)?;
     conn.execute(
@@ -794,10 +801,10 @@ fn rebuild_kind(conn: &Connection, state: &IndexState, cached: &mut Cached) -> R
     conn.execute("DELETE FROM index_page WHERE index_name = ?1", [&state.name]).map_err(db)?;
     let changes = cached.index.take_changes();
     write_pages(conn, &state.name, changes)?;
-    cached.generation = bump_generation(conn, &state.name)?;
-    cached.stale = false;
+    let generation = bump_generation(conn, &state.name)?;
+    assert!(cached.stale, "a rebuilt index stays stale until its commit");
     cached.report.loads += 1;
-    Ok(())
+    Ok(generation)
 }
 
 /// Builds a fresh index by inserting every stored vector of `name`.

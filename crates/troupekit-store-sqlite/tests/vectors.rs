@@ -291,6 +291,33 @@ async fn switching_kind_rebuilds_and_keeps_results() {
 }
 
 #[tokio::test]
+async fn failed_kind_switch_never_publishes_its_generation() {
+    let t = temp();
+    let store = SqliteStore::open(&t.path).await.unwrap();
+    let brute = docs(&store).await;
+    brute.upsert(vec![rec("first", vec![1.0; DIMS], "t", &[])]).await.unwrap();
+    let before = count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'");
+    rusqlite::Connection::open(&t.path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_switch AFTER UPDATE OF generation ON vector_index WHEN NEW.kind = 'hnsw' \
+             BEGIN SELECT RAISE(ABORT, 'switch refused'); END;",
+        )
+        .unwrap();
+    let hnsw = VectorSettings::new(DIMS).with_kind(IndexKind::Hnsw(HnswParams::default()));
+    assert!(store.vectors("docs", hnsw).await.is_err());
+    assert_eq!(count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'"), before);
+    assert_eq!(count(&t.path, "SELECT COUNT(*) FROM vector_index WHERE kind = 'brute_force'"), 1);
+    let other = SqliteStore::open(&t.path).await.unwrap();
+    let mut second = vec![0.0; DIMS];
+    second[0] = 1.0;
+    docs(&other).await.upsert(vec![rec("second", second.clone(), "t", &[])]).await.unwrap();
+    assert_eq!(count(&t.path, "SELECT generation FROM vector_index WHERE name = 'docs'"), before + 1);
+    assert_eq!(brute.len().await.unwrap(), 2);
+    assert_eq!(ids(&brute.search(&second, 1, &filter(&[])).await.unwrap()), ["second"]);
+}
+
+#[tokio::test]
 async fn replace_source_drops_orphans() {
     let t = temp();
     let store = SqliteStore::open(&t.path).await.unwrap();
