@@ -101,10 +101,14 @@ pub(crate) fn read_header(conn: &Connection) -> Result<Header, CoreError> {
 }
 
 /// Refuses a header this troupekit must not touch: a foreign
-/// `application_id`, an unversioned file that already has tables, or a
-/// version above `latest`. Output: `Ok` when migrating is safe.
+/// `application_id`, a versioned file without the troupekit id, an
+/// unversioned file that already has tables, or a version above `latest`.
+/// Output: `Ok` when migrating is safe.
 pub(crate) fn check_header(header: Header, latest: u32) -> Result<(), CoreError> {
     if header.application_id != 0 && header.application_id != APPLICATION_ID {
+        return Err(CoreError::Store("not a troupekit store".into()));
+    }
+    if header.user_version > 0 && header.application_id != APPLICATION_ID {
         return Err(CoreError::Store("not a troupekit store".into()));
     }
     if header.user_version == 0 && header.has_tables {
@@ -231,6 +235,20 @@ mod tests {
         assert_eq!(err, CoreError::Store("not a troupekit store".into()));
         assert_eq!(tables(&conn), ["other"]);
         assert_eq!(read_header(&conn).unwrap().user_version, 0);
+    }
+
+    #[test]
+    fn versioned_database_without_the_id_is_refused() {
+        let mut conn = memory();
+        conn.execute_batch("CREATE TABLE other (x INTEGER)")
+            .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        let err = migrate(&mut conn, STEPS).unwrap_err();
+        assert_eq!(err, CoreError::Store("not a troupekit store".into()));
+        assert_eq!(tables(&conn), ["other"]);
+        let header = read_header(&conn).unwrap();
+        assert_eq!(header.user_version, 1);
+        assert_eq!(header.application_id, 0);
     }
 
     #[test]
