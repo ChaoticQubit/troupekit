@@ -92,6 +92,7 @@ fn ndcg_of_a_perfect_ranking_is_one() {
 }
 
 #[test]
+#[ignore = "needs tests/fixtures/ndcg/embeddings.json: cargo run -p troupekit-context --features onnx --example embed_fixture"]
 fn fixture_matches_corpus_and_chunk_config() {
     let fixture = fixture();
     assert_eq!(fixture["model"], "intfloat/multilingual-e5-small");
@@ -121,6 +122,7 @@ fn fixture_matches_corpus_and_chunk_config() {
 }
 
 #[tokio::test]
+#[ignore = "needs tests/fixtures/ndcg/embeddings.json: cargo run -p troupekit-context --features onnx --example embed_fixture"]
 async fn hybrid_beats_keyword_and_vector_on_ndcg_at_10() {
     let fixture = fixture();
     let labels = labels();
