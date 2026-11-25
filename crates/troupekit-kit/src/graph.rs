@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use toml::Value as Toml;
 use troupekit_agent::{AgentIo, InMemoryLedger, Limits, MemorySource, PersonaLoader, SimpleIo};
+use troupekit_core::clock::Clock;
 use troupekit_core::event::Usage;
 use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
@@ -23,7 +24,7 @@ use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, To
 const MAX_NODES: usize = 64;
 const MAX_GRAPH_RETRIES: u32 = 50;
 const DEFAULT_GRAPH_RETRIES: u32 = 3;
-const MAX_RETRY_WAIT_MS: i64 = 300_000;
+const RETRY_WAIT_CHUNK_MS: i64 = 300_000;
 const INPUT: &str = "input";
 const END: &str = "end";
 
@@ -563,10 +564,7 @@ impl BuiltGraph {
             match outcome {
                 GraphOutcome::Continue => {}
                 GraphOutcome::RetryAt { at_ms, .. } => {
-                    let now = inner.io.agent.clock().now_ms();
-                    let wait = at_ms.saturating_sub(now).clamp(0, MAX_RETRY_WAIT_MS);
-                    let wait = u64::try_from(wait).expect("clamped to a non-negative range");
-                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                    wait_until(inner.io.agent.clock(), at_ms, RETRY_WAIT_CHUNK_MS).await;
                 }
                 GraphOutcome::Waiting(reason) => {
                     return Err(KitError::Paused {
@@ -644,6 +642,20 @@ impl Tool for StepTool {
     }
 }
 
+async fn wait_until(clock: &dyn Clock, at_ms: i64, chunk_ms: i64) {
+    assert!(chunk_ms > 0, "a wait chunk lasts some time");
+    let first = at_ms.saturating_sub(clock.now_ms());
+    let rounds = first.max(0) / chunk_ms + 2;
+    for _ in 0..rounds {
+        let left = at_ms.saturating_sub(clock.now_ms());
+        if left <= 0 {
+            return;
+        }
+        let ms = u64::try_from(left.min(chunk_ms)).expect("left is positive");
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+}
+
 fn step_name(id: &str) -> String {
     format!("step__{id}")
 }
@@ -682,5 +694,22 @@ fn share(registry: &mut ToolRegistry, tool: Arc<dyn Tool>) -> Result<(), String>
             "tool `{name}` is registered twice with different specs"
         )),
         None => registry.register(tool).map_err(|e| e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_until;
+    use troupekit_core::clock::{Clock, SystemClock};
+
+    #[tokio::test]
+    async fn retry_wait_reaches_a_deadline_past_one_chunk() {
+        let clock = SystemClock;
+        let at = clock.now_ms() + 25;
+        wait_until(&clock, at, 10).await;
+        assert!(clock.now_ms() >= at);
+        let before = clock.now_ms();
+        wait_until(&clock, before - 1_000, 10).await;
+        assert!(clock.now_ms() - before < 10);
     }
 }
