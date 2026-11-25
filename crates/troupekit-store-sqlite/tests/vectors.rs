@@ -420,6 +420,34 @@ async fn filter_values_are_bound_not_spliced() {
     assert_eq!(ids(&hits), ["tenant_a"]);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_never_mixes_two_versions_of_a_chunk() {
+    let t = temp();
+    let reader = SqliteStore::open(&t.path).await.unwrap();
+    let writer = SqliteStore::open(&t.path).await.unwrap();
+    let read = docs(&reader).await;
+    let write = docs(&writer).await;
+    let mut one = vec![0.0; DIMS];
+    one[0] = 1.0;
+    let mut two = vec![0.0; DIMS];
+    two[1] = 1.0;
+    write.upsert(vec![rec("x", one.clone(), "one", &[])]).await.unwrap();
+    let flips = async {
+        for i in 0..300 {
+            let (vector, text) = if i % 2 == 0 { (two.clone(), "two") } else { (one.clone(), "one") };
+            write.upsert(vec![rec("x", vector, text, &[])]).await.unwrap();
+        }
+    };
+    let searches = async {
+        for _ in 0..300 {
+            for hit in read.search(&one, 1, &filter(&[])).await.unwrap() {
+                assert_eq!(hit.text == "one", hit.score > 0.5, "text {} came with score {}", hit.text, hit.score);
+            }
+        }
+    };
+    tokio::join!(flips, searches);
+}
+
 #[tokio::test]
 async fn same_store_handles_share_one_index() {
     let t = temp();

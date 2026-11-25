@@ -10,6 +10,7 @@ use troupekit_index::{new_index, HnswParams, IndexError, IndexKind, PageChange, 
 const NAME_BYTES_MAX: usize = 64;
 const ID_BYTES_MAX: usize = 256;
 const ERROR_BYTES_MAX: usize = 1024;
+const SNAPSHOT_TRIES: usize = 4;
 const HASH_BYTES_MAX: usize = 256;
 const MAX_TEXT_BYTES_DEFAULT: usize = 1024 * 1024;
 const MAX_META_PAIRS_DEFAULT: usize = 64;
@@ -576,42 +577,57 @@ impl VectorStore for SqliteVectors {
         let pairs: Vec<(String, String)> = filter.0.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         self.store
             .call(move |conn| {
-                refresh(conn, &state)?;
-                let tx = conn.transaction().map_err(db)?;
-                let allowed = if pairs.is_empty() { None } else { Some(allowed_keys(&tx, &state.name, &pairs)?) };
-                if allowed.as_ref().is_some_and(HashSet::is_empty) {
-                    return Ok(Vec::new());
-                }
-                let neighbors = {
+                for _ in 0..SNAPSHOT_TRIES {
+                    let tx = conn.transaction().map_err(db)?;
+                    let generation = read_generation(&tx, &state.name)?;
                     let cached = read_cached(&state);
-                    let allow_fn = |id: u64| allowed.as_ref().is_none_or(|set| set.contains(&id));
-                    let allow: Option<&dyn Fn(u64) -> bool> = if allowed.is_some() { Some(&allow_fn) } else { None };
-                    cached.index.search(&query, k, allow).map_err(index_err)?
-                };
-                let mut stmt = tx
-                    .prepare_cached("SELECT id, text, meta_json FROM chunk WHERE key = ?1 AND index_name = ?2")
-                    .map_err(db)?;
-                let mut hits = Vec::with_capacity(neighbors.len());
-                for neighbor in &neighbors {
-                    let key = i64::try_from(neighbor.id).map_err(|_| CoreError::Store("index id out of range".into()))?;
-                    let row: Option<(String, String, String)> = stmt
-                        .query_row(params![key, state.name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                        .optional()
-                        .map_err(db)?;
-                    let Some((id, text, meta_json)) = row else {
+                    if state.cached.is_poisoned() || cached.stale || cached.generation != generation {
+                        drop(cached);
+                        drop(tx);
+                        refresh(conn, &state)?;
                         continue;
-                    };
-                    let meta: BTreeMap<String, String> =
-                        serde_json::from_str(&meta_json).map_err(|e| CoreError::Store(format!("corrupt store: chunk meta: {e}")))?;
-                    hits.push(Scored { id, score: neighbor.score, text, meta });
+                    }
+                    return search_snapshot(&tx, &state, &cached, &query, k, &pairs);
                 }
-                drop(stmt);
-                tx.commit().map_err(db)?;
-                assert!(hits.len() <= k, "search returned more than k hits");
-                Ok(hits)
+                Err(CoreError::Store(format!("index changed under {SNAPSHOT_TRIES} searches in a row; try again")))
             })
             .await
     }
+}
+
+/// Searches the cached index and reads the hits inside one read
+/// transaction whose generation matches the cache, so a hit's score and
+/// its text come from the same committed version. Input: the open
+/// transaction, the state, its matching cache, query, k and filter pairs.
+fn search_snapshot(tx: &rusqlite::Transaction<'_>, state: &IndexState, cached: &Cached, query: &[f32], k: usize, pairs: &[(String, String)]) -> Result<Vec<Scored>, CoreError> {
+    let allowed = if pairs.is_empty() { None } else { Some(allowed_keys(tx, &state.name, pairs)?) };
+    if allowed.as_ref().is_some_and(HashSet::is_empty) {
+        return Ok(Vec::new());
+    }
+    let neighbors = {
+        let allow_fn = |id: u64| allowed.as_ref().is_none_or(|set| set.contains(&id));
+        let allow: Option<&dyn Fn(u64) -> bool> = if allowed.is_some() { Some(&allow_fn) } else { None };
+        cached.index.search(query, k, allow).map_err(index_err)?
+    };
+    let mut stmt = tx
+        .prepare_cached("SELECT id, text, meta_json FROM chunk WHERE key = ?1 AND index_name = ?2")
+        .map_err(db)?;
+    let mut hits = Vec::with_capacity(neighbors.len());
+    for neighbor in &neighbors {
+        let key = i64::try_from(neighbor.id).map_err(|_| CoreError::Store("index id out of range".into()))?;
+        let row: Option<(String, String, String)> = stmt
+            .query_row(params![key, state.name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .optional()
+            .map_err(db)?;
+        let Some((id, text, meta_json)) = row else {
+            continue;
+        };
+        let meta: BTreeMap<String, String> =
+            serde_json::from_str(&meta_json).map_err(|e| CoreError::Store(format!("corrupt store: chunk meta: {e}")))?;
+        hits.push(Scored { id, score: neighbor.score, text, meta });
+    }
+    assert!(hits.len() <= k, "search returned more than k hits");
+    Ok(hits)
 }
 
 #[async_trait]
