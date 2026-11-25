@@ -7,6 +7,7 @@ use troupekit_context::chunk::ChunkConfig;
 use troupekit_context::embed::Embedder;
 use troupekit_context::ingest::{document_records, Document, Origin};
 use troupekit_context::load::{walk, LoadSettings};
+use troupekit_context::text::stable_hash;
 use troupekit_context::ContextError;
 use troupekit_core::clock::{Clock, SystemClock};
 use troupekit_store_sqlite::SqliteVectors;
@@ -18,7 +19,7 @@ const CHUNK_OVERLAP_TOKENS_DEFAULT: usize = 20;
 /// Settings for `ingest_dir`. Defaults: scope `docs`, chunks of 200
 /// tokens with 20 of overlap, the safe folder walk of `LoadSettings` and
 /// `Origin::External`, so folder text is fenced as untrusted in prompts.
-/// Built with `Default` and the `with_*` setters.
+/// A changed origin or chunk config re-ingests every file on the next run.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestSettings {
@@ -137,8 +138,9 @@ pub async fn ingest_dir(vectors: &SqliteVectors, embedder: &dyn Embedder, dir: &
     };
     let at_ms = SystemClock.now_ms();
     for file in walked.files {
+        let ingest_hash = ingest_hash(&file.content_hash, settings);
         let previous = vectors.source_hash(&settings.scope, &file.source).await?;
-        if previous.as_deref() == Some(file.content_hash.as_str()) {
+        if previous.as_deref() == Some(ingest_hash.as_str()) {
             report.skipped += 1;
             continue;
         }
@@ -152,7 +154,7 @@ pub async fn ingest_dir(vectors: &SqliteVectors, embedder: &dyn Embedder, dir: &
         };
         let outcome = match document_records(embedder, &doc, &settings.chunk).await {
             Ok(records) => vectors
-                .replace_source(&settings.scope, &file.source, records, &file.content_hash)
+                .replace_source(&settings.scope, &file.source, records, &ingest_hash)
                 .await
                 .map_err(ContextError::from),
             Err(e) => Err(e),
@@ -176,4 +178,16 @@ pub async fn ingest_dir(vectors: &SqliteVectors, embedder: &dyn Embedder, dir: &
     let handled = report.added + report.replaced + report.skipped + report.failed.len();
     assert!(handled <= settings.load.max_files(), "more files handled than the walk allows");
     Ok(report)
+}
+
+/// Hash stored per source: the file's content hash together with the
+/// origin and chunk config its chunks were made with, so a settings
+/// change no longer matches and the file is ingested again.
+/// Input: the content hash and the settings. Output: 16 hex chars.
+fn ingest_hash(content_hash: &str, settings: &IngestSettings) -> String {
+    let max = settings.chunk.max_tokens.to_string();
+    let overlap = settings.chunk.overlap_tokens.to_string();
+    let hash = format!("{:016x}", stable_hash(&[content_hash, settings.origin.as_str(), &max, &overlap]));
+    assert_eq!(hash.len(), 16, "ingest hash is 16 hex chars");
+    hash
 }

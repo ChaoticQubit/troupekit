@@ -178,6 +178,27 @@ async fn replace_source_keys_match_ingest_meta() {
 }
 
 #[tokio::test]
+async fn changed_origin_or_chunk_settings_reingest_unchanged_files() {
+    let k = kit().await;
+    k.write("a.md", &long_text(60));
+    let embedder = Counting::new();
+    let internal = small_chunks().with_origin(Origin::Internal);
+    assert_eq!(ingest_dir(&k.vectors, &embedder, &k.folder(), &internal).await.unwrap().added, 1);
+    assert_eq!(ingest_dir(&k.vectors, &embedder, &k.folder(), &internal).await.unwrap().skipped, 1);
+    let external = small_chunks();
+    let report = ingest_dir(&k.vectors, &embedder, &k.folder(), &external).await.unwrap();
+    assert_eq!((report.replaced, report.skipped), (1, 0), "an origin change re-ingests");
+    let hits = k.vectors.search(&[1.0; DIMS], 1_000, &Filter::default()).await.unwrap();
+    assert!(hits.iter().all(|h| h.meta.get(META_ORIGIN).map(String::as_str) == Some("external")));
+    let small = hits.len();
+    let bigger = external.clone().with_chunk(ChunkConfig { max_tokens: 40, overlap_tokens: 4 });
+    let report = ingest_dir(&k.vectors, &embedder, &k.folder(), &bigger).await.unwrap();
+    assert_eq!((report.replaced, report.skipped), (1, 0), "a chunk change re-ingests");
+    assert!(k.vectors.len().await.unwrap() < small);
+    assert_eq!(ingest_dir(&k.vectors, &embedder, &k.folder(), &bigger).await.unwrap().skipped, 1);
+}
+
+#[tokio::test]
 async fn walk_cap_error_writes_nothing() {
     let k = kit().await;
     k.write("a.txt", "one");
