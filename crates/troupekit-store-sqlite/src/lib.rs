@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use troupekit_core::clock::{Clock, SystemClock};
 use troupekit_core::error::CoreError;
+#[cfg(any(feature = "sqlcipher", feature = "sqlcipher-system"))]
+use troupekit_core::secret::Secret;
 
 /// The schema version this troupekit writes and reads up to.
 /// It equals the number of migration steps. A file at a higher version is
@@ -57,6 +59,8 @@ pub struct SqliteStoreBuilder {
     clock: Arc<dyn Clock>,
     limits: Limits,
     busy_timeout_ms: u32,
+    #[cfg(any(feature = "sqlcipher", feature = "sqlcipher-system"))]
+    key: Option<Secret>,
 }
 
 impl std::fmt::Debug for SqliteStoreBuilder {
@@ -111,6 +115,15 @@ impl SqliteStoreBuilder {
     /// Input: any value, 0 fails at once. Output: the builder. Default 5 000.
     pub fn busy_timeout_ms(mut self, ms: u32) -> Self {
         self.busy_timeout_ms = ms;
+        self
+    }
+
+    /// Opens the file encrypted with SQLCipher under `key`. The key is sent
+    /// first on the connection and never appears in `Debug` or an error.
+    /// Input: the key. Output: the builder. Default: no key, plain file.
+    #[cfg(any(feature = "sqlcipher", feature = "sqlcipher-system"))]
+    pub fn key(mut self, key: Secret) -> Self {
+        self.key = Some(key);
         self
     }
 
@@ -181,6 +194,18 @@ fn open_connection(settings: &SqliteStoreBuilder) -> Result<Connection, CoreErro
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let mut conn = Connection::open_with_flags(&settings.path, flags)
         .map_err(|e| CoreError::Store(format!("cannot open store: {e}")))?;
+    #[cfg(any(feature = "sqlcipher", feature = "sqlcipher-system"))]
+    if let Some(key) = &settings.key {
+        conn.pragma_update(None, "key", key.expose())
+            .map_err(|_| wrong_key())?;
+    }
+    conn.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map_err(|e| match e.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::NotADatabase) => wrong_key(),
+        _ => db(e),
+    })?;
     conn.busy_timeout(Duration::from_millis(u64::from(settings.busy_timeout_ms)))
         .map_err(db)?;
     schema::check_header(schema::read_header(&conn)?, SCHEMA_VERSION)?;
@@ -206,6 +231,10 @@ fn open_connection(settings: &SqliteStoreBuilder) -> Result<Connection, CoreErro
     assert_eq!(version, SCHEMA_VERSION);
     assert_eq!(schema::read_header(&conn)?.user_version, SCHEMA_VERSION);
     Ok(conn)
+}
+
+fn wrong_key() -> CoreError {
+    CoreError::Store("cannot open store: wrong key or not a database".into())
 }
 
 /// Maps a rusqlite error to `CoreError::Store`. The text names what failed
@@ -262,6 +291,8 @@ impl SqliteStore {
                 history_steps_max: HISTORY_STEPS_MAX_DEFAULT,
             },
             busy_timeout_ms: BUSY_TIMEOUT_MS_DEFAULT,
+            #[cfg(any(feature = "sqlcipher", feature = "sqlcipher-system"))]
+            key: None,
         }
     }
 
