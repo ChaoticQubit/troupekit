@@ -103,3 +103,44 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
     dot / (na * nb)
 }
+
+/// A claimed job: the run to step, the lease token that proves the claim
+/// and how many times the job was claimed since it last completed or was
+/// rescheduled. A token from an expired, re-claimed lease is stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lease {
+    pub run_id: RunId,
+    pub token: u64,
+    pub attempts: u32,
+}
+
+/// Where one run's job stands. `Pending` waits for `due_ms`; `Leased` is
+/// held until `until_ms`, with `next_due_ms` from an enqueue during the
+/// lease; `Done` and `Failed` end it until the next enqueue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobState {
+    Pending {
+        due_ms: i64,
+    },
+    Leased {
+        token: u64,
+        until_ms: i64,
+        next_due_ms: Option<i64>,
+    },
+    Done,
+    Failed {
+        error: String,
+    },
+}
+
+/// Jobs keyed by run, at most one live job per run. `claim_due` leases due
+/// jobs and expired leases, earliest first; `complete`, `fail` and
+/// `reschedule` end a lease and return `CoreError::Conflict` for a stale one.
+#[async_trait]
+pub trait JobQueue: Send + Sync {
+    async fn enqueue(&self, run_id: RunId, due_ms: i64) -> Result<(), CoreError>;
+    async fn claim_due(&self, limit: usize, lease_ms: i64) -> Result<Vec<Lease>, CoreError>;
+    async fn complete(&self, lease: &Lease) -> Result<(), CoreError>;
+    async fn fail(&self, lease: &Lease, error: &str) -> Result<(), CoreError>;
+    async fn reschedule(&self, lease: &Lease, due_ms: i64) -> Result<(), CoreError>;
+}

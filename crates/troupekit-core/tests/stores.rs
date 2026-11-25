@@ -61,3 +61,12 @@ fn cosine_basics() {
     assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
     assert_eq!(cosine(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
 }
+
+#[test]
+fn queue_types_live_in_core() {
+    let run = RunId::new();
+    let lease = troupekit_core::store::Lease { run_id: run, token: 1, attempts: 0 };
+    let pending = troupekit_core::store::JobState::Pending { due_ms: 5 };
+    assert_eq!(lease.run_id, run);
+    assert_eq!(pending, JobState::Pending { due_ms: 5 });
+}
