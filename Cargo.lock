@@ -2752,9 +2752,11 @@ dependencies = [
  "tempfile",
  "tokio",
  "troupekit-agent",
+ "troupekit-context",
  "troupekit-core",
  "troupekit-graph",
  "troupekit-host",
+ "troupekit-providers",
  "troupekit-store-sqlite",
  "troupekit-tools",
 ]
@@ -2777,6 +2779,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "troupekit-cli"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "troupekit",
+ "troupekit-providers",
+]
+
+[[package]]
 name = "troupekit-context"
 version = "0.1.0"
 dependencies = [
@@ -2784,9 +2795,12 @@ dependencies = [
  "fastembed",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "troupekit-core",
+ "troupekit-store-sqlite",
+ "troupekit-tools",
 ]
 
 [[package]]
@@ -2836,6 +2850,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "troupekit-index"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "troupekit-providers"
 version = "0.1.0"
 dependencies = [
@@ -2846,6 +2867,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "troupekit-context",
  "troupekit-core",
 ]
 
@@ -2859,6 +2881,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "troupekit-core",
+ "troupekit-index",
 ]
 
 [[package]]

@@ -17,10 +17,12 @@ troupekit-agent = { path = "../troupekit-agent", version = "0.1.0", default-feat
 troupekit-graph = { path = "../troupekit-graph", version = "0.1.0", default-features = false }
 troupekit-host = { path = "../troupekit-host", version = "0.1.0", default-features = false }
 troupekit-store-sqlite = { path = "../troupekit-store-sqlite", version = "0.1.0", optional = true }
+troupekit-context = { path = "../troupekit-context", version = "0.1.0", optional = true }
 
 [features]
 default = ["sqlite", "reqwest"]
 sqlite = ["dep:troupekit-store-sqlite"]
+knowledge = ["sqlite", "dep:troupekit-context"]
 reqwest = ["troupekit-agent/reqwest", "troupekit-graph/reqwest", "troupekit-host/reqwest"]
 sqlcipher = ["sqlite", "troupekit-store-sqlite/sqlcipher"]
 sqlcipher-system = ["sqlite", "troupekit-store-sqlite/sqlcipher-system"]
@@ -39,3 +41,4 @@ serde_json.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }
 troupekit-tools = { path = "../troupekit-tools", version = "0.1.0", default-features = false }
+troupekit-providers = { path = "../troupekit-providers", version = "0.1.0" }
