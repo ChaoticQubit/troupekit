@@ -309,10 +309,6 @@ impl SqliteStore {
         self.inner.limits
     }
 
-    pub(crate) fn now_ms(&self) -> i64 {
-        self.inner.clock.now_ms()
-    }
-
     /// Runs `f` with the locked connection on the blocking pool. A panic in
     /// `f` reaches the caller; a transaction guard open in `f` rolls back as
     /// it unwinds. A poisoned lock is taken and any open transaction is

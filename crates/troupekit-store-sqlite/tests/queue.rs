@@ -275,3 +275,30 @@ async fn corrupt_job_row_is_a_store_error() {
         "{err:?}"
     );
 }
+
+#[tokio::test]
+async fn lease_counts_from_after_the_write_lock_wait() {
+    let t = Temp::new();
+    let q = t.open().await;
+    let run = RunId::new();
+    q.enqueue(run, 0).await.unwrap();
+    let holder = rusqlite::Connection::open(&t.path).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let claimer = q.clone();
+    let claim = tokio::spawn(async move { claimer.claim_due(1, 500).await });
+    tokio::task::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_millis(200)))
+        .await
+        .unwrap();
+    t.clock.advance(5_000);
+    holder.execute_batch("COMMIT").unwrap();
+    let leases = claim.await.unwrap().unwrap();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(
+        job(&q, run).await,
+        Some(JobState::Leased {
+            token: leases[0].token,
+            until_ms: 6_500,
+            next_due_ms: None
+        })
+    );
+}

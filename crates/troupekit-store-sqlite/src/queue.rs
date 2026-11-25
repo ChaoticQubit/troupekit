@@ -298,12 +298,14 @@ impl JobQueue for SqliteStore {
 
     async fn claim_due(&self, limit: usize, lease_ms: i64) -> Result<Vec<Lease>, CoreError> {
         assert!(lease_ms > 0, "a lease lasts some time");
-        let now = self.now_ms();
-        let until_ms = now.checked_add(lease_ms).ok_or_else(|| {
-            CoreError::Store(format!("lease of {lease_ms} ms overflows the clock"))
-        })?;
+        let clock = self.inner.clock.clone();
         self.call(move |conn| {
             let tx = immediate(conn)?;
+            let now = clock.now_ms();
+            let until_ms = now.checked_add(lease_ms).ok_or_else(|| {
+                CoreError::Store(format!("lease of {lease_ms} ms overflows the clock"))
+            })?;
+            assert!(until_ms > now, "a lease ends after it starts");
             let runs = due_runs(&tx, now, limit)?;
             let mut leases = Vec::with_capacity(runs.len());
             for run in &runs {
