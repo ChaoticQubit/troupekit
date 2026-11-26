@@ -205,18 +205,31 @@ pub fn expand_tool(t: &ToolFn) -> Vec<Piece> {
     }));
     let mut outer = Vec::new();
     let mut inner = Vec::new();
-    if t.params
-        .iter()
-        .any(|p| p.ident.strip_prefix("r#").unwrap_or(&p.ident) == plain)
-    {
-        inner.push(code("#[allow(dead_code)] fn"));
-        inner.push(ident.clone());
-        inner.push(code("() {}"));
-    }
     for (i, param) in t.params.iter().enumerate() {
         outer.push(code(&format!("__troupekit_a{i}:")));
         outer.extend(param.ty.iter().map(|tok| Piece::Orig(tok.span())));
         outer.push(code(","));
+    }
+    let forwarded: Vec<String> = (0..t.params.len())
+        .map(|i| format!("__troupekit_a{i}"))
+        .collect();
+    inner.push(code("#[allow(dead_code)]"));
+    inner.push(code(if t.is_async { "async fn" } else { "fn" }));
+    inner.push(ident.clone());
+    inner.push(Piece::Group(Delim::Paren, outer.clone()));
+    if !t.ret.is_empty() {
+        inner.push(code("->"));
+        inner.extend(t.ret.iter().map(|tok| Piece::Orig(tok.span())));
+    }
+    let mut forward = vec![
+        ident.clone(),
+        code(&format!("::invoke({})", forwarded.join(", "))),
+    ];
+    if t.is_async {
+        forward.push(code(".await"));
+    }
+    inner.push(Piece::Group(Delim::Brace, forward));
+    for (i, param) in t.params.iter().enumerate() {
         inner.push(code(if param.is_mut { "let mut" } else { "let" }));
         inner.push(Piece::Orig(param.ident_span));
         inner.push(code(":"));
@@ -790,18 +803,22 @@ mod tests {
         for part in [
             "#[doc = \"Adds two numbers.\"]",
             "pub struct add ;",
-            "impl add {pub async fn invoke (__troupekit_a0: i64 , __troupekit_a1: Option < u8 > , __troupekit_a2: ToolContext ,) -> i64 {let a : i64 = __troupekit_a0; let o : Option < u8 > = __troupekit_a1; let ctx : ToolContext = __troupekit_a2; {a}}}",
+            "impl add {pub async fn invoke (__troupekit_a0: i64 , __troupekit_a1: Option < u8 > , __troupekit_a2: ToolContext ,) -> i64 {#[allow(dead_code)] = __troupekit_a0; let o : Option < u8 > = __troupekit_a1; let ctx : ToolContext = __troupekit_a2; {a}}}",
             "struct __troupekit_args_add {a : i64 , #[serde(default)] o : Option < u8 > ,}",
             "#[serde(crate = \"::troupekit::__private::serde\", deny_unknown_fields)]",
             "let __troupekit_args: __troupekit_args_add =",
             "Self::invoke(__troupekit_args.a, __troupekit_args.o, ::core::clone::Clone::clone(__troupekit_ctx)).await",
             "spec::<__troupekit_args_add>(\"add\", \"Adds two numbers.\")",
+            "{#[allow(dead_code)] async fn add (__troupekit_a0: i64 , __troupekit_a1: Option < u8 > , __troupekit_a2: ToolContext ,) -> i64 {add ::invoke(__troupekit_a0, __troupekit_a1, __troupekit_a2) .await} let a",
         ] {
             assert!(out.contains(part), "missing {part:?} in {out}");
         }
         let clash = lex("/// Q.\nfn query(query: String) -> String { query }");
         let out = render(&expand_tool(&parse_tool(&[], &clash).unwrap()), &clash);
-        assert!(out.contains("#[allow(dead_code)] fn query () {}"), "{out}");
+        assert!(
+            out.contains("{#[allow(dead_code)] fn query (__troupekit_a0: String ,) -> String {query ::invoke(__troupekit_a0)} let query"),
+            "{out}"
+        );
         let sync = lex("/// S.\nfn s(ctx: &ToolContext) {}");
         let out = render(&expand_tool(&parse_tool(&[], &sync).unwrap()), &sync);
         assert!(out.contains("Self::invoke(__troupekit_ctx))"), "{out}");

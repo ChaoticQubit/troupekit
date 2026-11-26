@@ -174,6 +174,37 @@ fn countdown(n: u32) -> u32 {
     }
 }
 
+/// Counts down to zero by name.
+#[troupekit::tool]
+fn descend(n: u32) -> u32 {
+    if n == 0 {
+        0
+    } else {
+        1 + descend(n - 1)
+    }
+}
+
+/// Counts down to zero by name, asynchronously.
+#[troupekit::tool]
+async fn descend_later(n: u32) -> u32 {
+    if n == 0 {
+        0
+    } else {
+        Box::pin(descend_later(n - 1)).await + 1
+    }
+}
+
+#[tokio::test]
+async fn tool_bodies_call_the_tool_by_name() {
+    assert_eq!(descend::invoke(3), 3);
+    assert_eq!(descend_later::invoke(3).await, 3);
+    let out = descend
+        .call(json!({"n": 4}), &ToolContext::default())
+        .await
+        .unwrap();
+    assert_eq!(out, ToolOutput::text("4"));
+}
+
 #[tokio::test]
 async fn tool_bodies_keep_self_access() {
     assert_eq!(countdown::invoke(3), 3);
