@@ -1,8 +1,10 @@
 use crate::error::WorkflowError;
+use crate::flow_check::{self, FlowFile};
 use crate::workflow::{Ask, NodeKind, Workflow};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use troupekit_agent::dsl::Call;
+use troupekit_agent::persona::toml_error;
 
 /// Checkpoint format of a graph run that uses a 0.5 flow feature or 0.5
 /// run state. Holds the format 1 keys plus the new private keys. A run
@@ -149,15 +151,59 @@ pub struct Flow {
     reducers: BTreeMap<String, Reducer>,
     untracked: Vec<String>,
     budget_split: BudgetSplit,
+    nested: bool,
 }
 
 impl Flow {
     /// Parses and validates flow TOML `text` read from `file`, the
-    /// superset of workflow TOML. Returns the first problem found.
-    /// Not built yet: every call returns a `WorkflowError`.
+    /// superset of workflow TOML. A file with no flow key goes through
+    /// `Workflow::parse` first, so it gives an equal flow or the same error
+    /// unless only a flow feature (a nested fan-out) makes it valid.
     pub fn parse(file: &str, text: &str) -> Result<Flow, WorkflowError> {
-        let _ = text;
-        Err(WorkflowError::new(file, "", "flows are not built yet"))
+        let raw: FlowFile = match toml::from_str(text) {
+            Ok(raw) => raw,
+            Err(e) => {
+                let p = toml_error(file, text, &e);
+                let flow = WorkflowError::new(&p.file, &p.field, p.message);
+                return Err(match Workflow::parse(file, text) {
+                    Err(w) if w.field == flow.field => w,
+                    _ => flow,
+                });
+            }
+        };
+        if !raw.is_workflow_file() {
+            return flow_check::check(file, raw);
+        }
+        match Workflow::parse(file, text) {
+            Ok(workflow) => Ok(Flow::from(workflow)),
+            Err(e) => flow_check::check(file, raw).map_err(|_| e),
+        }
+    }
+
+    /// Builds a flow from validated parts; only the flow checker calls it.
+    /// `kinds` holds one kind per outline node.
+    /// Returns the flow.
+    pub(crate) fn from_parts(
+        workflow: Workflow,
+        kinds: BTreeMap<String, FlowKind>,
+        reducers: BTreeMap<String, Reducer>,
+        untracked: Vec<String>,
+        budget_split: BudgetSplit,
+        nested: bool,
+    ) -> Flow {
+        assert_eq!(kinds.len(), workflow.nodes.len(), "one kind per node");
+        assert!(
+            workflow.nodes.iter().all(|n| kinds.contains_key(&n.id)),
+            "every node has a kind"
+        );
+        Flow {
+            workflow,
+            kinds,
+            reducers,
+            untracked,
+            budget_split,
+            nested,
+        }
     }
 
     /// Returns the outline workflow: same name, start, caps, state, node
@@ -167,21 +213,27 @@ impl Flow {
         &self.workflow
     }
 
-    /// Returns the flow kind of node `node`, or `None` for an unknown id.
+    /// Returns the flow kind of node `node`.
+    /// The kind holds every 0.5 option of the node.
+    /// `None` for an unknown id.
     pub fn kind(&self, node: &str) -> Option<&FlowKind> {
         self.kinds.get(node)
     }
 
-    /// Returns the reducer declared for state key `key`, if any.
+    /// Returns the reducer declared for state key `key`.
+    /// Writes of several branches to that key combine through it.
+    /// `None` when the key has no reducer.
     pub fn reducer(&self, key: &str) -> Option<Reducer> {
         self.reducers.get(key).copied()
     }
 
     /// Returns true when the flow uses no 0.5 feature: every kind is a
-    /// 0.1 kind at its defaults, and no reducer or untracked key exists.
-    /// The budget split is a run setting and does not count.
+    /// 0.1 kind at its defaults, no fan-out is nested and no reducer or
+    /// untracked key exists. The budget split is a run setting and does
+    /// not count.
     pub fn is_v1(&self) -> bool {
-        self.reducers.is_empty()
+        !self.nested
+            && self.reducers.is_empty()
             && self.untracked.is_empty()
             && self.workflow.nodes.len() == self.kinds.len()
             && self
@@ -192,23 +244,45 @@ impl Flow {
     }
 
     /// Returns the flow's name.
+    /// It is the outline workflow's name.
+    /// Events of a run carry it.
     pub fn name(&self) -> &str {
         &self.workflow.name
     }
 
     /// Returns the id of the start node.
+    /// A run's first branch enters it.
+    /// It is a node of the outline.
     pub fn start(&self) -> &str {
         &self.workflow.start
     }
 
     /// Returns the cap on steps of one run.
+    /// A run that reaches it fails.
+    /// Defaults to 200.
     pub fn max_steps(&self) -> u32 {
         self.workflow.max_steps
     }
 
-    /// Returns the cap on retries of a failed node.
+    /// Returns the cap on transient retries in a row.
+    /// A run past it fails as retryable.
+    /// Defaults to 5.
     pub fn max_retries(&self) -> u32 {
         self.workflow.max_retries
+    }
+
+    /// Returns the state keys that are never checkpointed.
+    /// Each is nullable and reads `null` after a resume.
+    /// Empty when the flow has none.
+    pub fn untracked(&self) -> &[String] {
+        &self.untracked
+    }
+
+    /// Returns how concurrent agent branches share the run budget.
+    /// Written `[budget] split`.
+    /// Defaults to `BudgetSplit::Even`.
+    pub fn budget_split(&self) -> BudgetSplit {
+        self.budget_split
     }
 }
 
@@ -233,6 +307,7 @@ impl From<Workflow> for Flow {
             reducers: BTreeMap::new(),
             untracked: Vec::new(),
             budget_split: BudgetSplit::default(),
+            nested: false,
         }
     }
 }
@@ -284,11 +359,5 @@ to = "done"
         assert_eq!(flow.kind("missing"), None);
         let back: Flow = serde_json::from_value(serde_json::to_value(&flow).unwrap()).unwrap();
         assert_eq!(back, flow);
-    }
-
-    #[test]
-    fn flow_parse_is_not_built_yet() {
-        let err = Flow::parse("f.toml", LINEAR).unwrap_err();
-        assert_eq!(err.file, "f.toml");
     }
 }
