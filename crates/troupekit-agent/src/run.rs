@@ -118,6 +118,8 @@ pub struct AgentRun {
     usage: Usage,
     seq: u64,
     steps: u64,
+    #[serde(default)]
+    retries: u32,
 }
 
 impl AgentRun {
@@ -172,6 +174,7 @@ impl AgentRun {
             usage: Usage::default(),
             seq: 0,
             steps: 0,
+            retries: 0,
         })
     }
 
@@ -204,6 +207,13 @@ impl AgentRun {
             step: self.steps,
             state: serde_json::to_value(self).expect("run state serializes"),
         }
+    }
+
+    /// Returns how many steps of this run ended in `Retry`, over its whole
+    /// life: the count is saved in every checkpoint, so a host's retry cap
+    /// holds across resumes. Checkpoints from before the field load as 0.
+    pub fn retries(&self) -> u32 {
+        self.retries
     }
 
     /// Returns the run's id.
@@ -315,7 +325,8 @@ impl AgentRun {
                     error: error.clone(),
                 },
             ),
-            StepOutcome::Continue | StepOutcome::Retry { .. } => {}
+            StepOutcome::Retry { .. } => self.retries = self.retries.saturating_add(1),
+            StepOutcome::Continue => {}
         }
         outcome
     }

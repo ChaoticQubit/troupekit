@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use troupekit::{Agent, KitError, Progress, Storage};
-use troupekit_core::error::CoreError;
+use troupekit_core::error::{CoreError, ProviderError, ProviderErrorKind};
 use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::store::{Checkpoint, CheckpointStore};
@@ -145,4 +145,66 @@ async fn resume_for_saves_after_every_step() {
 fn defaults_are_the_safe_values() {
     assert_eq!(troupekit::MAX_STEPS_PER_WINDOW, 10_000);
     assert_eq!(troupekit::MAX_PERSONA_BYTES, 1024 * 1024);
+}
+
+#[tokio::test]
+async fn retry_cap_holds_across_resume_for_windows() {
+    let model = Arc::new(FnModel::new("fake/m", |_req| {
+        Err(
+            ProviderError::new(ProviderErrorKind::RateLimited, "slow down")
+                .with_retry_after(20_000),
+        )
+    }));
+    let built = Agent::new("limited")
+        .instructions("Answer.")
+        .model("fake/m")
+        .model_client(model.clone())
+        .retries(2)
+        .checkpoints(Storage::custom(Arc::new(InMemCheckpoints::default())))
+        .build()
+        .await
+        .unwrap();
+    let run_id = built.start("hello").await.unwrap();
+    let window = Duration::from_secs(1);
+    for _ in 0..2 {
+        let progress = built.resume_for(run_id, window).await.unwrap();
+        assert_eq!(progress, Progress::Pending { run_id });
+    }
+    let err = built.resume_for(run_id, window).await.unwrap_err();
+    assert!(
+        matches!(err, KitError::Retries { attempts: 2, .. }),
+        "{err:?}"
+    );
+    assert_eq!(model.calls(), 3);
+}
+
+#[tokio::test]
+async fn resume_keeps_retries_counted_by_resume_for() {
+    let model = Arc::new(FnModel::new("fake/m", |_req| {
+        Err(
+            ProviderError::new(ProviderErrorKind::RateLimited, "slow down")
+                .with_retry_after(20_000),
+        )
+    }));
+    let built = Agent::new("limited")
+        .instructions("Answer.")
+        .model("fake/m")
+        .model_client(model.clone())
+        .retries(1)
+        .checkpoints(Storage::custom(Arc::new(InMemCheckpoints::default())))
+        .build()
+        .await
+        .unwrap();
+    let run_id = built.start("hello").await.unwrap();
+    let progress = built
+        .resume_for(run_id, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(progress, Progress::Pending { run_id });
+    let err = built.resume(run_id).await.unwrap_err();
+    assert!(
+        matches!(err, KitError::Retries { attempts: 1, .. }),
+        "{err:?}"
+    );
+    assert_eq!(model.calls(), 2);
 }

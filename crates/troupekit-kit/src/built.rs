@@ -258,7 +258,6 @@ impl BuiltAgent {
             }
             _ => {}
         }
-        let mut attempts = 0u32;
         loop {
             match drive(run, io, store).await? {
                 StepOutcome::Done(output) => return Ok(outcome(run, output)),
@@ -266,6 +265,8 @@ impl BuiltAgent {
                     error,
                     retry_after_ms,
                 } => {
+                    assert!(run.retries() > 0);
+                    let attempts = run.retries() - 1;
                     if attempts >= self.inner.retries {
                         return Err(KitError::Retries {
                             run_id: run.run_id(),
@@ -274,7 +275,6 @@ impl BuiltAgent {
                         });
                     }
                     tokio::time::sleep(retry_delay(attempts, retry_after_ms)).await;
-                    attempts += 1;
                 }
                 StepOutcome::Paused(reason) => {
                     return Err(KitError::Paused {
@@ -292,7 +292,7 @@ impl BuiltAgent {
                     unreachable!("drive returns only a final, paused or retry outcome")
                 }
             }
-            assert!(attempts <= self.inner.retries);
+            assert!(run.retries() <= self.inner.retries);
         }
     }
 }

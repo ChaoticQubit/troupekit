@@ -64,7 +64,6 @@ impl BuiltAgent {
             _ => {}
         }
         let io: &dyn AgentIo = &self.inner.io;
-        let mut attempts = 0u32;
         let mut steps = 0u32;
         while steps < MAX_STEPS_PER_WINDOW && !spent(Duration::ZERO) {
             let step = run.step(io).await;
@@ -77,6 +76,8 @@ impl BuiltAgent {
                     error,
                     retry_after_ms,
                 } => {
+                    assert!(run.retries() > 0);
+                    let attempts = run.retries() - 1;
                     if attempts >= self.inner.retries {
                         return Err(KitError::Retries {
                             run_id,
@@ -89,12 +90,11 @@ impl BuiltAgent {
                         return Ok(Progress::Pending { run_id });
                     }
                     tokio::time::sleep(wait).await;
-                    attempts += 1;
                 }
                 StepOutcome::Paused(reason) => return Err(KitError::Paused { run_id, reason }),
                 StepOutcome::Failed(reason) => return Err(KitError::Failed { run_id, reason }),
             }
-            assert!(attempts <= self.inner.retries);
+            assert!(run.retries() <= self.inner.retries);
         }
         assert!(steps <= MAX_STEPS_PER_WINDOW);
         Ok(Progress::Pending { run_id })
