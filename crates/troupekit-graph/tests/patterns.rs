@@ -449,7 +449,30 @@ const HIERARCHY: &str = "name = 'report'\n[crew]\nprocess = 'hierarchical'\n\
     [[crew.tasks]]\nid = 'research'\nagent = 'researcher'\n\
     description = 'Collect facts about {input}.'\nexpected_output = 'A list of facts.'\n\
     [[crew.tasks]]\nid = 'fact_check'\nagent = 'checker'\ndescription = 'Check the facts.'\n\
+    context = ['research']\n\
     [[crew.tasks]]\nid = 'write'\nagent = 'writer'\ndescription = 'Write the report.'\n";
+
+#[test]
+fn hierarchical_manager_prompt_keeps_task_ids_and_context() {
+    let table = compile(FILE, HIERARCHY).unwrap();
+    let prompt = node(&table, "manager")["prompt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        prompt.contains("\n2. fact_check [checker]: Check the facts."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Uses the results of: research."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("\n3. write [writer]: Write the report."),
+        "{prompt}"
+    );
+    assert_eq!(prompt.matches("Uses the results of").count(), 1, "{prompt}");
+}
 
 #[test]
 fn hierarchical_crew_uses_builtin_manager_with_members_as_delegates() {
@@ -605,5 +628,89 @@ fn loop_and_after_steps_wait_for_the_pattern_ir() {
         "name = 'p'\n[[steps]]\nid = 'a'\nagent = 'x'\nafter = ['b']\ntrigger = 'all'\n",
         "steps[0].after",
         "not built yet",
+    );
+}
+
+#[test]
+fn skipped_task_output_cannot_be_read() {
+    let gated = |extra: &str, next: &str| {
+        crew(&[
+            &task("draft", &format!("when = 'go'\n{extra}")),
+            &task("publish", next),
+        ])
+        .replacen(
+            "[[crew.tasks]]",
+            "[crew.state]\ngo = 'bool'\n[[crew.tasks]]",
+            1,
+        )
+    };
+    refused(
+        &gated("", "context = ['draft']"),
+        "crew.tasks[1].context[0]",
+        "`draft` can be skipped by `when`",
+    );
+    refused(
+        &gated("human_input = true", ""),
+        "crew.tasks[0].human_input",
+        "`when` can skip",
+    );
+    let last = crew(&[
+        &task("a", ""),
+        &task("b", "when = 'go'\nhuman_input = true"),
+    ])
+    .replacen(
+        "[[crew.tasks]]",
+        "[crew.state]\ngo = 'bool'\n[[crew.tasks]]",
+        1,
+    );
+    assert!(
+        compile(FILE, &last).is_ok(),
+        "nobody reads the last task's feedback"
+    );
+    assert!(compile(FILE, REPORT).is_ok());
+}
+
+#[test]
+fn step_after_a_skipped_step_reads_only_written_keys() {
+    let text = "name = 'p'\n[state]\ngo = 'bool'\n\
+                [[steps]]\nid = 'a'\nagent = 'x'\n\
+                [[steps]]\nid = 'b'\nagent = 'y'\nwhen = 'go'\n\
+                [[steps]]\nid = 'c'\nagent = 'z'\n";
+    let table = compile(FILE, text).unwrap();
+    assert_eq!(strs(&node(&table, "b")["reads"]), ["input", "a"]);
+    assert_eq!(strs(&node(&table, "c")["reads"]), ["input", "a"]);
+}
+
+#[test]
+fn last_agent_step_writes_output_before_feedback() {
+    let text = "name = 'p'\n[[steps]]\nid = 'draft'\nagent = 'writer'\n\
+                [[steps]]\nid = 'ok'\n\
+                feedback = { prompt = 'Done?', routes = { yes = 'end', no = 'draft' } }\n";
+    let table = compile(FILE, text).unwrap();
+    assert_eq!(node(&table, "draft")["writes"].as_str(), Some("output"));
+    assert_eq!(strs(&node(&table, "ok")["reads"]), ["input", "output"]);
+    assert!(table["state"].get("draft").is_none());
+    let piped = compile(FILE, PIPELINE).unwrap();
+    assert_eq!(node(&piped, "draft")["writes"].as_str(), Some("draft"));
+    assert_eq!(node(&piped, "publish")["writes"].as_str(), Some("output"));
+}
+
+#[test]
+fn feedback_route_cannot_skip_a_writer() {
+    let text = "name = 'p'\n\
+                [[steps]]\nid = 'choose'\n\
+                feedback = { prompt = 'Review?', routes = { full = 'review', direct = 'publish' } }\n\
+                [[steps]]\nid = 'review'\nagent = 'x'\n\
+                [[steps]]\nid = 'publish'\nagent = 'y'\n";
+    refused(
+        text,
+        "steps[0].feedback.routes.direct",
+        "jumps past step `review`",
+    );
+    let fixed = text.replace("direct = 'publish'", "direct = 'end'");
+    assert!(compile(FILE, &fixed).is_ok());
+    assert!(
+        compile(FILE, PIPELINE).is_ok(),
+        "routing back or to the next step stays valid"
     );
 }

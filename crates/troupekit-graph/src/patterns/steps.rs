@@ -52,8 +52,8 @@ enum Kind<'a> {
 /// Compiles steps pattern `text` read from `file` into a flow table:
 /// `agent` steps run in order, `parallel` fans out to several agents and
 /// joins, `when` skips a step on a bool key, `feedback` asks a human and
-/// routes on the answer. Returns the table or the first problem, naming
-/// the `steps[i].*` field.
+/// routes back, to the next step or to `end`. Returns the table or the
+/// first problem, naming the `steps[i].*` field.
 pub fn compile(file: &str, text: &str) -> Result<Table, WorkflowError> {
     let raw: StepsFile = toml::from_str(text).map_err(|e| from_toml(file, text, &e))?;
     let steps = &raw.steps;
@@ -198,6 +198,15 @@ fn check_feedback<'a>(
             }
             _ => {}
         }
+        let at = steps.iter().position(|o| o.id == *target);
+        if at.is_some_and(|j| j > i + 1) {
+            let next = &steps[i + 1].id;
+            let m = format!(
+                "`{target}` jumps past step `{next}`, whose keys later steps read; \
+                 route back, to the next step or to `end`"
+            );
+            return err(fld, m);
+        }
     }
     Ok(Kind::Feedback(f))
 }
@@ -217,8 +226,9 @@ fn target_entry(steps: &[Step], target: &str) -> String {
 }
 
 /// Builds the flow table. Each step reads `input` and the keys the step
-/// before it wrote; an agent step writes a key named after it, the last
-/// agent step writes `output`.
+/// before it wrote; a `when` step can be skipped, so it hands on the keys
+/// it read instead of its own. An agent step writes a key named after it;
+/// the last agent step in the list writes `output`.
 fn build(file: &str, raw: &StepsFile, kinds: &[Kind<'_>]) -> Result<Table, WorkflowError> {
     let steps = &raw.steps;
     let mut t = FlowTable::new(file, &raw.name, &entry(&steps[0]));
@@ -227,6 +237,7 @@ fn build(file: &str, raw: &StepsFile, kinds: &[Kind<'_>]) -> Result<Table, Workf
     }
     let mut pending: Vec<(String, Option<String>)> = Vec::new();
     let mut prev_keys: Vec<String> = Vec::new();
+    let last_agent = kinds.iter().rposition(|k| matches!(k, Kind::Agent(_)));
     for (i, (s, kind)) in steps.iter().zip(kinds).enumerate() {
         let field = format!("steps[{i}]");
         let mut reads = vec!["input".to_string()];
@@ -252,7 +263,7 @@ fn build(file: &str, raw: &StepsFile, kinds: &[Kind<'_>]) -> Result<Table, Workf
         };
         prev_keys = match kind {
             Kind::Agent(persona) => {
-                let key = if i + 1 == steps.len() {
+                let key = if Some(i) == last_agent {
                     "output".to_string()
                 } else {
                     s.id.clone()
@@ -266,7 +277,11 @@ fn build(file: &str, raw: &StepsFile, kinds: &[Kind<'_>]) -> Result<Table, Workf
                     pending.push((format!("when_{}", s.id), Some("false".into())));
                 }
                 pending.push((s.id.clone(), None));
-                vec![key]
+                if s.when.is_some() {
+                    prev_keys
+                } else {
+                    vec![key]
+                }
             }
             Kind::Parallel(agents) => {
                 let source = fan_source.expect("set for parallel steps");

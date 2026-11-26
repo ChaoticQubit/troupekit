@@ -107,6 +107,10 @@ fn check_task(
                     format!("`{name}` is not an earlier task; context reads only earlier tasks"),
                 )
             }
+            Some(p) if tasks[p].when.is_some() => {
+                let m = format!("`{name}` can be skipped by `when`, so it cannot be read");
+                return err(&f, m);
+            }
             Some(_) if t.context[..c].contains(name) => {
                 return err(&f, format!("`{name}` repeats"))
             }
@@ -117,6 +121,10 @@ fn check_task(
         if !state.contains_key(w) {
             return err("when", format!("`{w}` is not declared in [crew.state]"));
         }
+    }
+    if t.when.is_some() && t.human_input && i + 1 < tasks.len() {
+        let m = "the next task reads this feedback, but `when` can skip it".to_string();
+        return err("human_input", m);
     }
     assert!(t.context.len() <= i, "context names distinct earlier tasks");
     Ok(())
@@ -377,11 +385,16 @@ fn hierarchical(file: &str, name: &str, crew: &CrewRaw) -> Result<Table, Workflo
             agents.push(task.agent.clone());
         }
         prompt.push_str(&format!(
-            "\n{}. [{}] {}",
+            "\n{}. {} [{}]: {}",
             i + 1,
+            task.id,
             task.agent,
             task_prompt(task)
         ));
+        if !task.context.is_empty() {
+            let uses = task.context.join(", ");
+            prompt.push_str(&format!(" Uses the results of: {uses}."));
+        }
     }
     let mut t = FlowTable::new(file, name, MANAGER_ID);
     for (key, ty) in &crew.state {
