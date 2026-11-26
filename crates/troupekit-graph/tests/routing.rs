@@ -223,20 +223,6 @@ async fn node_override_never_mutates_the_loaded_persona() {
     assert_eq!((after.model.as_str(), after.output), ("fake/m", None));
 }
 
-#[tokio::test]
-async fn goto_and_override_flows_still_refuse_unbuilt_options() {
-    let io = io(&[]);
-    let text = writer_flow("").replace("[state]\n", "[budget]\nsplit = 'shared'\n[state]\n");
-    let flow = Flow::parse("test/r.toml", &text).unwrap();
-    let err = GraphRun::start(flow, Map::new(), Limits::default(), &io)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&err, GraphError::Setup(m) if m.contains("shared budget split")),
-        "{err}"
-    );
-}
-
 const HELPER: &str = "name = 'helper'\ndisplay_name = 'H'\nrole = 'Helps.'\ngoal = 'Answer.'\ninstructions = 'Help.'\nmodel = 'fake/h'\n";
 
 fn leader_model() -> Arc<FnModel> {

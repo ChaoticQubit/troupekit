@@ -135,6 +135,8 @@ enum At {
         run: Box<AgentRun>,
         call_cap: Option<u64>,
         run_cap: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        share: Option<u64>,
     },
     Human {
         data: Map<String, Value>,
@@ -311,6 +313,8 @@ pub struct GraphRun {
     failure: Option<Failure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flow: Option<Box<Flow>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    split: Option<BudgetSplit>,
     #[serde(skip)]
     marks: Option<Marks>,
     #[serde(skip)]
@@ -450,6 +454,7 @@ impl GraphRun {
             reserve: None,
             registries: NodeTools::default(),
             scratch: Map::new(),
+            split: None,
         })
     }
 
@@ -764,6 +769,11 @@ impl GraphRun {
             return Err(GraphError::Resume("the run is finished".into()));
         }
         self.limits = limits;
+        if self.even() {
+            self.top_up(true).map_err(GraphError::Resume)?;
+            self.queue();
+            return Ok(());
+        }
         let spent = self.usage().cost_usd_micros;
         let base = self.limits.clone();
         for b in &mut self.branches {
@@ -774,6 +784,7 @@ impl GraphRun {
                 run,
                 call_cap,
                 run_cap,
+                ..
             } = &mut b.at
             else {
                 unreachable!("budget pauses happen in agent branches");
@@ -782,6 +793,86 @@ impl GraphRun {
             run.resume(node_limits(&base, spent - own, *call_cap, *run_cap))?;
         }
         self.queue();
+        Ok(())
+    }
+
+    /// Sets how concurrent agent branches share the remaining run budget,
+    /// over the flow's `[budget] split`. `BudgetSplit::Shared` restores the
+    /// 0.1 split, also on a v1 workflow run. Returns the run.
+    pub fn with_budget_split(mut self, split: BudgetSplit) -> GraphRun {
+        self.split = Some(split);
+        self
+    }
+
+    fn even(&self) -> bool {
+        let split = self.split.or(self.flow.as_ref().map(|f| f.budget_split()));
+        self.limits.run.is_some() && split.unwrap_or_default() == BudgetSplit::Even
+    }
+
+    fn unspent(&self, skip_paused: bool) -> u64 {
+        self.branches
+            .iter()
+            .map(|b| match &b.at {
+                At::Agent { run, share: Some(s), .. } if !(skip_paused && b.budget_paused().is_some()) => {
+                    s.saturating_sub(run.usage().cost_usd_micros)
+                }
+                At::Flow { run } => run.limits.run.map_or(0, |s| s.saturating_sub(run.usage().cost_usd_micros)),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn free(&self, skip_paused: bool) -> u64 {
+        let cap = self.limits.run.expect("an even split has a run cap");
+        cap.saturating_sub(self.usage().cost_usd_micros)
+            .saturating_sub(self.unspent(skip_paused))
+    }
+
+    fn share(&self, entering: &mut usize) -> Option<u64> {
+        if !self.even() {
+            return None;
+        }
+        assert!(*entering > 0, "every spending branch that enters was counted");
+        let n = u64::try_from(*entering).expect("branch count fits in u64");
+        *entering -= 1;
+        Some(self.free(false) / n)
+    }
+
+    fn spends(&self, node: &str) -> bool {
+        matches!(self.node(node).kind, NodeKind::Agent { .. })
+            || matches!(self.flow_kind(node), Some(FlowKind::Flow { .. }))
+    }
+
+    fn top_up(&mut self, raised: bool) -> Result<(), String> {
+        let paused: Vec<usize> = (0..self.branches.len())
+            .filter(|&i| match self.branches[i].budget_paused() {
+                Some(PauseReason::Budget { limit }) => raised || limit == "run",
+                _ => false,
+            })
+            .collect();
+        if paused.is_empty() {
+            return Ok(());
+        }
+        let free = self.free(true);
+        let each = free / u64::try_from(paused.len()).expect("branch count fits in u64");
+        let base = self.limits.clone();
+        let mut granted = 0u64;
+        for i in paused {
+            let At::Agent { run, call_cap, run_cap, share } = &mut self.branches[i].at else {
+                unreachable!("budget pauses happen in agent branches");
+            };
+            let grant = run.usage().cost_usd_micros.saturating_add(each);
+            let grant = run_cap.map_or(grant, |c| c.min(grant));
+            let old = share.unwrap_or(0);
+            granted = granted.saturating_add(grant.saturating_sub(run.usage().cost_usd_micros));
+            *share = Some(grant);
+            if raised || grant > old {
+                let mut limits = node_limits(&base, 0, *call_cap, *run_cap);
+                limits.run = Some(grant);
+                run.resume(limits).map_err(|e| e.to_string())?;
+            }
+        }
+        assert!(granted <= free, "paused branches never get more than the free budget");
         Ok(())
     }
 
@@ -1678,6 +1769,9 @@ impl GraphRun {
             }
             self.branches = next;
             let window = self.openings();
+            let mut entering = (0..self.branches.len())
+                .filter(|&i| window[i] && self.branches[i].at == At::Enter && self.spends(&self.branches[i].node))
+                .count();
             for i in 0..self.branches.len() {
                 if self.branches[i].at != At::Enter {
                     continue;
@@ -1698,7 +1792,13 @@ impl GraphRun {
                     let mut input = reads(&self.workflow, &self.state, &node.reads, item.as_deref()).map_err(fail)?;
                     input.retain(|_, v| !v.is_null());
                     let child = io.flow(&name).await.map_err(|e| fail(e.to_string()))?;
-                    let limits = node_limits(&self.limits, self.usage().cost_usd_micros, None, None);
+                    let limits = match self.share(&mut entering) {
+                        Some(s) => Limits {
+                            run: Some(s),
+                            ..self.limits.clone()
+                        },
+                        None => node_limits(&self.limits, self.usage().cost_usd_micros, None, None),
+                    };
                     let mut child = GraphRun::start_child(child, input, limits, io).await.map_err(|e| fail(e.to_string()))?;
                     child.run_id = RunId::derived(self.run_id, &format!("{}:{}:{i}", node.id, self.steps));
                     self.branches[i].at = At::Flow { run: Box::new(child) };
@@ -1755,12 +1855,18 @@ impl GraphRun {
                         };
                         let (call_cap, run_cap) =
                             (p.budget.call_usd_micros, p.budget.run_usd_micros);
-                        let limits = node_limits(
+                        let share = self
+                            .share(&mut entering)
+                            .map(|s| run_cap.map_or(s, |c| c.min(s)));
+                        let mut limits = node_limits(
                             &self.limits,
                             self.usage().cost_usd_micros,
                             call_cap,
                             run_cap,
                         );
+                        if share.is_some() {
+                            limits.run = share;
+                        }
                         let input = vec![agent_input(prompt.as_deref(), data)];
                         let run = match &tools {
                             None => AgentRun::new(&p, input, limits, io.agent()).await,
@@ -1777,6 +1883,7 @@ impl GraphRun {
                             run: Box::new(run),
                             call_cap,
                             run_cap,
+                            share,
                         };
                     }
                 }
@@ -1788,6 +1895,9 @@ impl GraphRun {
                 changed = self.close_any();
             }
             if !changed {
+                if self.even() {
+                    self.top_up(false)?;
+                }
                 return Ok(false);
             }
         }
@@ -2015,9 +2125,6 @@ fn untracked_misuse(flow: &Flow) -> Option<String> {
 }
 
 fn unsupported(flow: &Flow) -> Option<String> {
-    if flow.budget_split() == BudgetSplit::Shared {
-        return Some("a shared budget split".into());
-    }
     let node = flow.workflow().nodes.iter().find(|n| match flow.kind(&n.id) {
         Some(FlowKind::Map { .. } | FlowKind::Switch { .. } | FlowKind::Flow { .. }) => false,
         kind => kind.map(run_plain) != Some(FlowKind::from_v1(&n.kind)),
