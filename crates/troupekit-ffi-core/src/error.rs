@@ -82,6 +82,7 @@ impl From<troupekit_kit::KitError> for FfiError {
             K::Failed { run_id, .. } => (ErrorCode::Failed, Some(run_id.to_string())),
             K::Paused { run_id, .. } => (ErrorCode::Paused, Some(run_id.to_string())),
             K::Retries { run_id, .. } => (ErrorCode::Retries, Some(run_id.to_string())),
+            K::Cancelled { run_id } => (ErrorCode::Cancelled, Some(run_id.to_string())),
             #[allow(unreachable_patterns)]
             _ => (ErrorCode::Internal, None),
         };

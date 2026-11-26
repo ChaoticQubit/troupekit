@@ -72,6 +72,7 @@ fn kit_errors(run_id: RunId) -> Vec<(KitError, ErrorCode)> {
             },
             ErrorCode::Paused,
         ),
+        (KitError::Cancelled { run_id }, ErrorCode::Cancelled),
         (
             KitError::Retries {
                 run_id,
@@ -100,7 +101,10 @@ fn every_kit_error_has_its_code() {
         let message = kit.to_string();
         let carries_run = matches!(
             kit,
-            KitError::Failed { .. } | KitError::Paused { .. } | KitError::Retries { .. }
+            KitError::Failed { .. }
+                | KitError::Paused { .. }
+                | KitError::Retries { .. }
+                | KitError::Cancelled { .. }
         );
         let err = FfiError::from(kit);
         assert_eq!(err.code, code, "{message}");

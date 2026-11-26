@@ -19,6 +19,7 @@ use troupekit_tools::{Tool, ToolRegistry, Toolkit};
 
 mod from_toml;
 mod start;
+mod stream;
 
 pub use from_toml::MAX_PERSONA_BYTES;
 
