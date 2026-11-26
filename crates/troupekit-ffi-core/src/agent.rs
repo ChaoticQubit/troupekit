@@ -142,8 +142,8 @@ impl AgentBuilder {
     /// Adds a host tool the model may call.
     /// Name and schema are checked at build; two tools may not share a name.
     /// Output: the same builder, for chaining.
-    pub fn tool(self: &Arc<Self>, _tool: Arc<dyn HostTool>) -> Arc<Self> {
-        self.update(|_| Err(FfiError::unsupported("AgentBuilder::tool")))
+    pub fn tool(self: &Arc<Self>, tool: Arc<dyn HostTool>) -> Arc<Self> {
+        self.update(|agent| Ok(agent.tool_arc(crate::host::wrap_tool(tool)?)))
     }
 
     /// Adds an eval call such as `max_words(80)`, run on every answer.

@@ -2,6 +2,8 @@ mod agent;
 mod error;
 mod graph;
 mod host;
+#[cfg(test)]
+mod host_tests;
 mod records;
 mod runtime;
 mod stream;

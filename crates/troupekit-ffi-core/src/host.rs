@@ -1,11 +1,22 @@
+use crate::error::{ErrorCode, FfiError};
 use crate::records::{
     FfiEvent, HostError, HostHeader, HostHttpRequest, HostModelCaps, HostReply, HostRequest,
 };
+use async_trait::async_trait;
+use serde_json::Value;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
+use troupekit_core::tool::ToolSpec;
+use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput};
+
+pub(crate) const MAX_TOOL_NAME_BYTES: usize = 64;
+pub(crate) const MAX_TOOL_DESCRIPTION_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Receives every event of a stream as it happens, as the callback form
-/// of `RunStream::next`. Called on a troupekit worker thread, never the
-/// caller's; it must return quickly and must not block on the run.
+/// of `RunStream::next`. Called on one thread per stream,
+/// `troupekit-listener`, never the caller's; a slow listener only
+/// slows its own delivery, and the buffer drops text deltas meanwhile.
 pub trait EventListener: Send + Sync {
     /// Handles one `event`, in `seq` order within its run id.
     /// Input: the event. Output: none; a panic here is caught and
@@ -117,4 +128,80 @@ impl HttpSink {
     /// Input: the bytes, in order. Output: none; it blocks while the
     /// reader is behind, and bytes past the reply cap end the body.
     pub fn chunk(&self, _bytes: Vec<u8>) {}
+}
+
+/// Checks host tool `host` and wraps it as a kit tool: name 1 to 64
+/// bytes of `[a-z0-9_]`, description at most 16 KiB, schema a JSON
+/// object. Output: the tool, or `InvalidArgument` naming the bad part.
+pub(crate) fn wrap_tool(host: Arc<dyn HostTool>) -> Result<Arc<dyn Tool>, FfiError> {
+    let name = host.name();
+    let name_ok = !name.is_empty()
+        && name.len() <= MAX_TOOL_NAME_BYTES
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if !name_ok {
+        return Err(FfiError::new(
+            ErrorCode::InvalidArgument,
+            "host tool name must be 1 to 64 bytes of [a-z0-9_]",
+        ));
+    }
+    let description = host.description();
+    if description.len() > MAX_TOOL_DESCRIPTION_BYTES {
+        return Err(FfiError::new(
+            ErrorCode::InvalidArgument,
+            format!("host tool `{name}` description is over 16 KiB"),
+        ));
+    }
+    let schema_text = host.schema_json();
+    crate::runtime::check_input("host tool schema", &schema_text)?;
+    let schema = match serde_json::from_str::<Value>(&schema_text) {
+        Ok(schema @ Value::Object(_)) => schema,
+        _ => {
+            return Err(FfiError::new(
+                ErrorCode::InvalidArgument,
+                format!("host tool `{name}` schema must be a JSON object"),
+            ))
+        }
+    };
+    assert!(schema.is_object());
+    let spec = ToolSpec {
+        name,
+        description,
+        schema,
+        hosted: None,
+    };
+    Ok(Arc::new(HostToolAdapter { host, spec }))
+}
+
+struct HostToolAdapter {
+    host: Arc<dyn HostTool>,
+    spec: ToolSpec,
+}
+
+#[async_trait]
+impl Tool for HostToolAdapter {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+
+    async fn call(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let host = self.host.clone();
+        let args_json = args.to_string();
+        let called = tokio::task::spawn_blocking(move || {
+            catch_unwind(AssertUnwindSafe(|| host.call(args_json)))
+        })
+        .await;
+        let panicked = || ToolOutput::error(format!("host tool `{}` panicked", self.spec.name));
+        let output = match called {
+            Ok(Ok(Ok(text))) => ToolOutput::text(text),
+            Ok(Ok(Err(error))) => ToolOutput::error(error.message),
+            Ok(Err(_)) | Err(_) => panicked(),
+        };
+        if output.content.len() > MAX_TOOL_OUTPUT_BYTES {
+            return Ok(ToolOutput::error("tool output over 1 MiB"));
+        }
+        assert!(output.content.len() <= MAX_TOOL_OUTPUT_BYTES);
+        Ok(output)
+    }
 }
