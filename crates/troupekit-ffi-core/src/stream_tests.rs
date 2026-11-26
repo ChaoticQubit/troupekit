@@ -273,3 +273,25 @@ fn mirror_covers_every_event_body() {
         assert_eq!((event.seq, event.at_ms), (7, 9));
     }
 }
+
+#[derive(Default)]
+struct PanicsOnce {
+    calls: Mutex<u32>,
+}
+
+impl EventListener for PanicsOnce {
+    fn on_event(&self, _event: FfiEvent) {
+        *self.calls.lock().unwrap() += 1;
+        panic!("host listener bug");
+    }
+}
+
+#[tokio::test]
+async fn listener_panic_stops_delivery_not_the_run() {
+    let listener = Arc::new(PanicsOnce::default());
+    let stream = stream_of(3, Duration::ZERO).await;
+    stream.set_listener(listener.clone()).unwrap();
+    let result = stream.result().await.unwrap();
+    assert_eq!(result.text, "aaa");
+    assert_eq!(*listener.calls.lock().unwrap(), 1);
+}

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use troupekit_ffi_core::{AgentBuilder, ErrorCode, HostError, HostTool};
 
+const OBJECT: &str = r#"{"type":"object"}"#;
+
 struct Shaped {
     name: String,
     description: String,
@@ -46,7 +48,13 @@ async fn build_with(tool: Arc<dyn HostTool>) -> Result<(), troupekit_ffi_core::F
 
 #[tokio::test]
 async fn host_tool_bad_schema_refused() {
-    for schema in ["not json", "[1, 2]", "\"text\""] {
+    for schema in [
+        "not json",
+        "[1, 2]",
+        "\"text\"",
+        "{}",
+        r#"{"type":"string"}"#,
+    ] {
         let err = build_with(shaped("echo", "Echoes.", schema))
             .await
             .unwrap_err();
@@ -59,11 +67,13 @@ async fn host_tool_bad_schema_refused() {
 async fn host_tool_bad_name_refused() {
     let long = "a".repeat(65);
     for name in ["", "Echo", "echo-it", "échо", long.as_str()] {
-        let err = build_with(shaped(name, "Echoes.", "{}")).await.unwrap_err();
+        let err = build_with(shaped(name, "Echoes.", OBJECT))
+            .await
+            .unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument, "{name}");
         assert!(err.message.contains("name"), "{err}");
     }
-    build_with(shaped(&"a".repeat(64), "Echoes.", "{}"))
+    build_with(shaped(&"a".repeat(64), "Echoes.", OBJECT))
         .await
         .unwrap();
 }
@@ -71,7 +81,7 @@ async fn host_tool_bad_name_refused() {
 #[tokio::test]
 async fn host_tool_long_description_refused() {
     let long = "d".repeat(16 * 1024 + 1);
-    let err = build_with(shaped("echo", &long, "{}")).await.unwrap_err();
+    let err = build_with(shaped("echo", &long, OBJECT)).await.unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
     assert!(err.message.contains("description"), "{err}");
 }
@@ -82,10 +92,37 @@ async fn two_host_tools_with_one_name_are_refused() {
         .instructions("Add numbers.".into())
         .model("openai/gpt-6-luna".into())
         .api_key("k".into())
-        .tool(shaped("echo", "Echoes.", "{}"))
-        .tool(shaped("echo", "Echoes again.", "{}"))
+        .tool(shaped("echo", "Echoes.", OBJECT))
+        .tool(shaped("echo", "Echoes again.", OBJECT))
         .build()
         .await
         .unwrap_err();
     assert_ne!(err.code, ErrorCode::Unsupported);
+}
+
+struct Panicky;
+
+impl HostTool for Panicky {
+    fn name(&self) -> String {
+        panic!("adapter bug")
+    }
+
+    fn description(&self) -> String {
+        String::new()
+    }
+
+    fn schema_json(&self) -> String {
+        OBJECT.into()
+    }
+
+    fn call(&self, _args_json: String) -> Result<String, HostError> {
+        Ok(String::new())
+    }
+}
+
+#[tokio::test]
+async fn host_tool_panic_when_added_is_panic_code() {
+    let err = build_with(Arc::new(Panicky)).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Panic);
+    assert!(err.message.contains("host tool"), "{err}");
 }

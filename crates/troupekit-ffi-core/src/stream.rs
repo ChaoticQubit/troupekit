@@ -85,7 +85,8 @@ impl RunStream {
 
     /// Sends every remaining event to `listener` on its own thread,
     /// `troupekit-listener`, instead of `next`. The run goes on if the host
-    /// drops the stream. Output: `Ok`, or `InvalidArgument` after `next`.
+    /// drops the stream or the listener panics, which stops delivery only.
+    /// Output: `Ok`, or `InvalidArgument` after `next`.
     pub fn set_listener(&self, listener: Arc<dyn EventListener>) -> Result<(), FfiError> {
         self.enter(Mode::Listening)?;
         let handle = runtime::handle()?;
@@ -93,10 +94,11 @@ impl RunStream {
         let started = std::thread::Builder::new()
             .name("troupekit-listener".into())
             .spawn(move || {
+                let mut live = true;
                 while let Some(event) = handle.block_on(inner.next()) {
-                    let event = mirror(event);
-                    if catch_unwind(AssertUnwindSafe(|| listener.on_event(event))).is_err() {
-                        break;
+                    if live {
+                        let event = mirror(event);
+                        live = catch_unwind(AssertUnwindSafe(|| listener.on_event(event))).is_ok();
                     }
                 }
             });

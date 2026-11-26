@@ -143,7 +143,8 @@ impl AgentBuilder {
     /// Name and schema are checked at build; two tools may not share a name.
     /// Output: the same builder, for chaining.
     pub fn tool(self: &Arc<Self>, tool: Arc<dyn HostTool>) -> Arc<Self> {
-        self.update(|agent| Ok(agent.tool_arc(crate::host::wrap_tool(tool)?)))
+        let wrapped = crate::host::guarded("tool", || crate::host::wrap_tool(tool));
+        self.update(|agent| Ok(agent.tool_arc(wrapped?)))
     }
 
     /// Adds an eval call such as `max_words(80)`, run on every answer.

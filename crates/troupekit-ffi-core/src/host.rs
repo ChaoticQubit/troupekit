@@ -130,9 +130,26 @@ impl HttpSink {
     pub fn chunk(&self, _bytes: Vec<u8>) {}
 }
 
+/// Runs `call`, a read of host code, and turns a panic in it into a
+/// `Panic` error naming `what`, so no host panic crosses the boundary.
+/// Output: what `call` returns, or that error.
+pub(crate) fn guarded<T>(
+    what: &str,
+    call: impl FnOnce() -> Result<T, FfiError>,
+) -> Result<T, FfiError> {
+    match catch_unwind(AssertUnwindSafe(call)) {
+        Ok(result) => result,
+        Err(_) => Err(FfiError::new(
+            ErrorCode::Panic,
+            format!("host {what} panicked"),
+        )),
+    }
+}
+
 /// Checks host tool `host` and wraps it as a kit tool: name 1 to 64
 /// bytes of `[a-z0-9_]`, description at most 16 KiB, schema a JSON
-/// object. Output: the tool, or `InvalidArgument` naming the bad part.
+/// object schema with `"type": "object"` that compiles. Output: the
+/// tool, or `InvalidArgument` naming the bad part.
 pub(crate) fn wrap_tool(host: Arc<dyn HostTool>) -> Result<Arc<dyn Tool>, FfiError> {
     let name = host.name();
     let name_ok = !name.is_empty()
@@ -164,6 +181,12 @@ pub(crate) fn wrap_tool(host: Arc<dyn HostTool>) -> Result<Arc<dyn Tool>, FfiErr
             ))
         }
     };
+    if let Err(why) = troupekit_tools::compile_schema(&schema) {
+        return Err(FfiError::new(
+            ErrorCode::InvalidArgument,
+            format!("host tool `{name}` schema: {why}"),
+        ));
+    }
     assert!(schema.is_object());
     let spec = ToolSpec {
         name,
