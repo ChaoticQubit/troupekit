@@ -303,24 +303,20 @@ impl AgentBuilder {
         self.clone()
     }
 
-    /// Adds the law file at `path`, a `.bend` file checked at build.
-    /// The path must not contain `..`.
+    /// Refuses a law file: no run enforces explicit laws yet, so `build`
+    /// returns `Unsupported`. An over-cap path is `InvalidArgument` and a
+    /// path with `..` is `Config`, both checked first.
     /// Output: the same builder, for chaining.
     pub fn laws(self: &Arc<Self>, path: String) -> Arc<Self> {
-        self.update(|agent| {
-            check_input("laws", &path)?;
-            Ok(agent.laws(path))
-        })
+        self.update(|_| Err(refuse_law("laws", &path, true)))
     }
 
-    /// Adds one law as text, checked at build.
-    /// Laws guard tool calls and answers.
+    /// Refuses a law given as text: no run enforces explicit laws yet,
+    /// so `build` returns `Unsupported`. Over-cap text is
+    /// `InvalidArgument`, checked first.
     /// Output: the same builder, for chaining.
     pub fn law(self: &Arc<Self>, text: String) -> Arc<Self> {
-        self.update(|agent| {
-            check_input("law", &text)?;
-            Ok(agent.law(text))
-        })
+        self.update(|_| Err(refuse_law("law", &text, false)))
     }
 
     /// Turns the built-in laws on or off.
@@ -507,6 +503,28 @@ pub(crate) fn parse_run_id(text: &str) -> Result<RunId, FfiError> {
             "run_id is not a run id returned by start or a stream",
         )),
     }
+}
+
+/// Builds the error for an explicit law, which no run enforces yet.
+/// Input: the setter name, its text or path, and whether it is a path.
+/// Output: the input check error if one fails, else `Unsupported`.
+pub(crate) fn refuse_law(what: &str, text: &str, is_path: bool) -> FfiError {
+    if let Err(err) = check_input(what, text) {
+        return err;
+    }
+    let parent = std::path::Path::new(text)
+        .components()
+        .any(|c| c == std::path::Component::ParentDir);
+    if is_path && parent {
+        return FfiError::new(
+            ErrorCode::Config,
+            format!("law file `{text}` must not contain `..`"),
+        );
+    }
+    FfiError::new(
+        ErrorCode::Unsupported,
+        format!("{what}: explicit laws are not enforced by runs yet"),
+    )
 }
 
 #[cfg(feature = "sqlite")]
