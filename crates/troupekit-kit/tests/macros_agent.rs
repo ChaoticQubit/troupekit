@@ -197,7 +197,7 @@ async fn macro_handoffs_key_reaches_builder() {
         .build()
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("repeats"), "{err}");
+    assert!(err.to_string().contains("two team agents are named"), "{err}");
 }
 
 /// Send each request to the right desk.
