@@ -302,6 +302,103 @@ jobs:
           path: target/drift
           if-no-files-found: error
 
+  kotlin-jvm:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c
+        with:
+          gradle-version: 8.14.8
+      - name: gradle wrapper
+        shell: bash
+        working-directory: bindings/kotlin
+        run: |
+          set -euo pipefail
+          if [ ! -f gradlew ]; then
+            gradle wrapper --gradle-version 8.14.8 --distribution-type bin
+          fi
+          test -x gradlew
+      - name: build the host library and the Kotlin bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p troupekit-ffi --release --locked
+          lib="$(ls target/release/libtroupekit_ffi.so target/release/libtroupekit_ffi.dylib 2>/dev/null | head -n 1)"
+          test -n "$lib"
+          kotlin=bindings/kotlin/troupekit/src/main/kotlin/dev/troupekit/troupekit_ffi.kt
+          if [ ! -f "$kotlin" ]; then
+            cargo run -p troupekit-ffi --features bindgen --release --locked --bin uniffi-bindgen -- \
+              generate --library "$lib" --language kotlin --out-dir target/kotlin-bindings
+            mkdir -p "$(dirname "$kotlin")"
+            cp target/kotlin-bindings/dev/troupekit/troupekit_ffi.kt "$kotlin"
+          fi
+      - name: JVM contract runner
+        shell: bash
+        working-directory: bindings/kotlin
+        run: |
+          set -euo pipefail
+          flags=""
+          if [ ! -f gradle/verification-metadata.xml ]; then
+            flags="--write-verification-metadata sha256"
+          fi
+          ./gradlew --no-daemon $flags :troupekit:testDebugUnitTest
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always() && matrix.runner == 'ubuntu-latest'
+        with:
+          name: kotlin-gradle-files
+          path: |
+            bindings/kotlin/gradlew
+            bindings/kotlin/gradlew.bat
+            bindings/kotlin/gradle/
+            bindings/kotlin/troupekit/build/reports/tests/
+          if-no-files-found: warn
+
+  android-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c
+        with:
+          gradle-version: 8.14.8
+      - name: gradle wrapper
+        shell: bash
+        working-directory: bindings/kotlin
+        run: |
+          set -euo pipefail
+          if [ ! -f gradlew ]; then
+            gradle wrapper --gradle-version 8.14.8 --distribution-type bin
+          fi
+          test -x gradlew
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: build the AAR with the emulator ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-linux-android x86_64-linux-android
+          ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" sh scripts/build-aar.sh --emulator
+      - uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 34
+          arch: x86_64
+          working-directory: bindings/kotlin
+          script: ./gradlew --no-daemon :troupekit:connectedDebugAndroidTest
+
   wheels:
     name: wheel ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
