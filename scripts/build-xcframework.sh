@@ -17,6 +17,9 @@ out="bindings/swift/TroupekitFFI.xcframework"
 sources="bindings/swift/Sources/Troupekit"
 work="target/xcframework"
 lib="libtroupekit_ffi.a"
+export IPHONEOS_DEPLOYMENT_TARGET=16.0
+export MACOSX_DEPLOYMENT_TARGET=13.0
+grep -q '\.iOS(\.v16), \.macOS(\.v13)' Package.swift
 
 for target in $targets; do
   cargo build -p troupekit-ffi --release --locked --target "$target"
