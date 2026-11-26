@@ -677,8 +677,46 @@ fn step_after_a_skipped_step_reads_only_written_keys() {
                 [[steps]]\nid = 'b'\nagent = 'y'\nwhen = 'go'\n\
                 [[steps]]\nid = 'c'\nagent = 'z'\n";
     let table = compile(FILE, text).unwrap();
+    assert_eq!(node(&table, "a")["writes"].as_str(), Some("a"));
     assert_eq!(strs(&node(&table, "b")["reads"]), ["input", "a"]);
+    assert_eq!(node(&table, "b")["writes"].as_str(), Some("a"));
     assert_eq!(strs(&node(&table, "c")["reads"]), ["input", "a"]);
+    assert!(table["state"].get("b").is_none());
+    let edges = edge_list(&table);
+    assert!(
+        edges.contains(&("b", "c", None)),
+        "go = true: b runs, its result replaces a's"
+    );
+    assert!(
+        edges.contains(&("when_b", "c", Some("false"))),
+        "go = false: c reads a's result"
+    );
+    let chain = "name = 'p'\n[state]\ngo = 'bool'\nmore = 'bool'\n\
+                 [[steps]]\nid = 'a'\nagent = 'x'\n\
+                 [[steps]]\nid = 'b'\nagent = 'y'\nwhen = 'go'\n\
+                 [[steps]]\nid = 'c'\nagent = 'z'\nwhen = 'more'\n";
+    let table = compile(FILE, chain).unwrap();
+    for id in ["a", "b", "c"] {
+        assert_eq!(node(&table, id)["writes"].as_str(), Some("output"), "{id}");
+    }
+    assert_eq!(strs(&node(&table, "c")["reads"]), ["input", "output"]);
+    let first = "name = 'p'\n[state]\ngo = 'bool'\n\
+                 [[steps]]\nid = 'a'\nagent = 'x'\nwhen = 'go'\n\
+                 [[steps]]\nid = 'b'\nagent = 'y'\n";
+    refused(
+        first,
+        "steps[0].when",
+        "needs an agent step right before it",
+    );
+    let after_parallel = "name = 'p'\n[state]\ngo = 'bool'\n\
+                          [[steps]]\nid = 'a'\nagent = 'x'\n\
+                          [[steps]]\nid = 'r'\nparallel = ['y', 'z']\n\
+                          [[steps]]\nid = 'b'\nagent = 'w'\nwhen = 'go'\n";
+    refused(
+        after_parallel,
+        "steps[2].when",
+        "needs an agent step right before it",
+    );
 }
 
 #[test]

@@ -101,6 +101,15 @@ fn check_step<'a>(
             return Err(err("when", format!("`{w}` is not declared in [state]")));
         }
     }
+    let after_agent = i > 0 && steps[i - 1].agent.is_some();
+    if s.when.is_some() && s.agent.is_some() && !after_agent {
+        return Err(err(
+            "when",
+            "needs an agent step right before it, whose result the next step \
+             reads when this step is skipped"
+                .into(),
+        ));
+    }
     let kind = match (&s.agent, &s.parallel, &s.feedback) {
         (Some(a), None, None) => {
             check_persona(file, &field("agent"), a)?;
@@ -226,9 +235,9 @@ fn target_entry(steps: &[Step], target: &str) -> String {
 }
 
 /// Builds the flow table. Each step reads `input` and the keys the step
-/// before it wrote; a `when` step can be skipped, so it hands on the keys
-/// it read instead of its own. An agent step writes a key named after it;
-/// the last agent step in the list writes `output`.
+/// before it wrote. An agent step and the `when` agent steps right after
+/// it share one key, so the next step reads the latest result on every
+/// path; the key is named after the first step, or `output` for the last.
 fn build(file: &str, raw: &StepsFile, kinds: &[Kind<'_>]) -> Result<Table, WorkflowError> {
     let steps = &raw.steps;
     let mut t = FlowTable::new(file, &raw.name, &entry(&steps[0]));
@@ -237,7 +246,7 @@ fn build(file: &str, raw: &StepsFile, kinds: &[Kind<'_>]) -> Result<Table, Workf
     }
     let mut pending: Vec<(String, Option<String>)> = Vec::new();
     let mut prev_keys: Vec<String> = Vec::new();
-    let last_agent = kinds.iter().rposition(|k| matches!(k, Kind::Agent(_)));
+    let keys = agent_keys(steps, kinds);
     for (i, (s, kind)) in steps.iter().zip(kinds).enumerate() {
         let field = format!("steps[{i}]");
         let mut reads = vec!["input".to_string()];
@@ -263,12 +272,8 @@ fn build(file: &str, raw: &StepsFile, kinds: &[Kind<'_>]) -> Result<Table, Workf
         };
         prev_keys = match kind {
             Kind::Agent(persona) => {
-                let key = if Some(i) == last_agent {
-                    "output".to_string()
-                } else {
-                    s.id.clone()
-                };
-                if key != "output" {
+                let key = keys[i].clone().expect("every agent step has a key");
+                if key != "output" && key == s.id {
                     t.state(&field, &key, Value::String("string?".into()))?;
                 }
                 let node = agent(&s.id, persona, s.prompt.as_deref(), &reads, Some(&key));
@@ -277,11 +282,7 @@ fn build(file: &str, raw: &StepsFile, kinds: &[Kind<'_>]) -> Result<Table, Workf
                     pending.push((format!("when_{}", s.id), Some("false".into())));
                 }
                 pending.push((s.id.clone(), None));
-                if s.when.is_some() {
-                    prev_keys
-                } else {
-                    vec![key]
-                }
+                vec![key]
             }
             Kind::Parallel(agents) => {
                 let source = fan_source.expect("set for parallel steps");
@@ -293,6 +294,40 @@ fn build(file: &str, raw: &StepsFile, kinds: &[Kind<'_>]) -> Result<Table, Workf
     t.end("steps")?;
     connect(&mut t, &mut pending, END);
     Ok(t.finish())
+}
+
+/// Returns the key each agent step writes, `None` for other steps. A
+/// `when` agent step writes the key of the agent step before it; the group
+/// holding the last agent step writes `output`, any other group the id of
+/// its first step.
+fn agent_keys(steps: &[Step], kinds: &[Kind<'_>]) -> Vec<Option<String>> {
+    let is_agent = |k: &Kind<'_>| matches!(k, Kind::Agent(_));
+    let last_agent = kinds.iter().rposition(is_agent);
+    let mut keys: Vec<Option<String>> = vec![None; steps.len()];
+    let mut i = 0;
+    while i < steps.len() {
+        if !is_agent(&kinds[i]) {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 1;
+        while end < steps.len() && is_agent(&kinds[end]) && steps[end].when.is_some() {
+            end += 1;
+        }
+        let group = i..end;
+        let key = if last_agent.is_some_and(|l| group.contains(&l)) {
+            "output".to_string()
+        } else {
+            steps[i].id.clone()
+        };
+        for slot in &mut keys[group] {
+            *slot = Some(key.clone());
+        }
+        i = end;
+    }
+    assert_eq!(keys.len(), steps.len());
+    assert!(last_agent.is_none_or(|l| keys[l].as_deref() == Some("output")));
+    keys
 }
 
 fn connect(t: &mut FlowTable, pending: &mut Vec<(String, Option<String>)>, to: &str) {
