@@ -4,6 +4,7 @@
 //! one repair round, layered budgets and core events.
 
 pub mod budget;
+pub mod delegate;
 pub mod dsl;
 pub mod error;
 pub mod eval;
@@ -16,6 +17,7 @@ pub mod schema;
 pub use io::{AgentIo, EventSink, ModelHandle, SimpleIo, VecSink};
 pub use run::{drive, AgentRun, PendingCall, RunState, StepOutcome, RUN_FORMAT};
 
+pub use delegate::{AgentTool, DelegateSettings, DelegationTools};
 pub use budget::{InMemoryLedger, Limits, PeriodLimit, UsageLedger};
 pub use dsl::{parse_call, Call};
 pub use error::{AgentError, PersonaError};
