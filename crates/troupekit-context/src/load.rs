@@ -259,9 +259,8 @@ fn load_file(root: &Path, path: &Path, ext: &str, settings: &LoadSettings) -> Re
     if !checked.is_file() {
         return Err(fail("not a regular file".into()));
     }
-    let file = fs::File::open(path).map_err(|e| fail(e.to_string()))?;
-    let opened = file.metadata().map_err(|e| fail(e.to_string()))?;
-    if !opened.is_file() || !same_file(&checked, &opened) {
+    let (file, opened) = open_regular(path).map_err(fail)?;
+    if !same_file(&checked, &opened) {
         return Err(fail("changed between check and open".into()));
     }
     let size = opened.len();
@@ -284,6 +283,49 @@ fn load_file(root: &Path, path: &Path, ext: &str, settings: &LoadSettings) -> Re
     let content_hash = format!("{:016x}", stable_hash(&[&text]));
     assert_eq!(content_hash.len(), 16, "hash is 16 hex chars");
     Ok(LoadedFile { source, text, content_hash })
+}
+
+/// `O_NONBLOCK` of the targets std builds for, since this crate has no
+/// `libc` edge: 4 on the BSD family, 0o4000 on Linux and Android. On any
+/// other target it is 0, and a FIFO swapped in after the check can block.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+const O_NONBLOCK: i32 = 0x0004;
+/// `O_NONBLOCK` on Linux and Android for every architecture except the
+/// MIPS, SPARC, Alpha and PA-RISC families, which number it differently.
+/// Opening a FIFO with it returns at once instead of waiting for a writer.
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "arm", target_arch = "aarch64", target_arch = "riscv64", target_arch = "powerpc", target_arch = "powerpc64", target_arch = "s390x", target_arch = "loongarch64")
+))]
+const O_NONBLOCK: i32 = 0o4000;
+/// No known `O_NONBLOCK` value for this target, so open stays blocking.
+/// The opened handle is still checked to be a regular file before reading.
+/// Listed in the eng-log as a known gap.
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")),
+    not(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "arm", target_arch = "aarch64", target_arch = "riscv64", target_arch = "powerpc", target_arch = "powerpc64", target_arch = "s390x", target_arch = "loongarch64")
+    ))
+))]
+const O_NONBLOCK: i32 = 0;
+
+/// Opens `path` for reading without waiting on a FIFO, then checks that
+/// the opened handle is a regular file before anything reads from it.
+/// Input: the path. Output: the file and its handle metadata, or the
+/// reason as text: "not a regular file" for a FIFO, device or socket.
+fn open_regular(path: &Path) -> Result<(fs::File, fs::Metadata), String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, O_NONBLOCK);
+    let file = options.open(path).map_err(|e| e.to_string())?;
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if !opened.is_file() {
+        return Err("not a regular file".into());
+    }
+    Ok((file, opened))
 }
 
 /// Tells whether two metadata records name the same file: same device
@@ -349,6 +391,22 @@ fn invalid(root: &Path, path: &Path, why: &str) -> ContextError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn open_regular_refuses_a_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("swapped.txt");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(open_regular(&fifo).map(|_| ())).unwrap());
+        let result = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("open blocked on a FIFO");
+        assert!(matches!(result, Err(ref why) if why.contains("not a regular file")), "{result:?}");
+        let file = dir.path().join("plain.txt");
+        fs::write(&file, "text").unwrap();
+        let (_, opened) = open_regular(&file).unwrap();
+        assert_eq!(opened.len(), 4);
+    }
 
     #[test]
     fn front_matter_needs_a_closing_line() {
