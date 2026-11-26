@@ -8,6 +8,7 @@ mod category;
 mod error;
 mod json;
 mod record;
+mod redact;
 mod sink;
 mod span;
 mod spec;
@@ -17,6 +18,7 @@ mod value;
 
 pub use category::{Trace, TraceSet};
 pub use error::TraceError;
+pub use redact::url_for_trace;
 pub use sink::TraceSink;
 pub use span::Span;
 pub use spec::TraceSpec;

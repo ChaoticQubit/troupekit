@@ -1,5 +1,6 @@
 use crate::category::Trace;
 use crate::json::{push_f64, push_i64, push_key, push_str, push_u64};
+use crate::redact::{self, Clean, Policy, FIELDS_MAX};
 use crate::span::Open;
 use crate::tracer::{Ctx, Inner, Shared};
 use crate::value::Value;
@@ -156,43 +157,53 @@ pub(crate) fn footer(shared: &Shared) -> String {
 }
 
 fn push_fields(out: &mut String, inner: &Inner, fields: impl Iterator<Item = (String, Value)>) {
-    let mut first = true;
+    let policy = Policy {
+        secrets: &inner.scrub,
+        content: inner.content,
+    };
+    let mut written = 0usize;
+    let mut dropped = 0u64;
     for (key, value) in fields {
-        if first {
-            out.push_str(",\"fields\":{");
+        if written == FIELDS_MAX {
+            dropped += 1;
+            continue;
         }
-        push_key(out, &scrub(inner, &key), first);
-        push_value(out, inner, value);
-        first = false;
+        out.push_str(if written == 0 { ",\"fields\":{" } else { "," });
+        push_str(out, &redact::name(&key, policy.secrets));
+        out.push(':');
+        let (clean, was_cut) = redact::value(&key, value, &policy);
+        push_clean(out, clean);
+        if was_cut {
+            inner.shared.truncated.fetch_add(1, Ordering::Relaxed);
+        }
+        written += 1;
     }
-    if !first {
+    if written > 0 {
         out.push('}');
     }
+    assert!(written <= FIELDS_MAX);
+    inner.shared.dropped.fetch_add(dropped, Ordering::Relaxed);
 }
 
-fn push_value(out: &mut String, inner: &Inner, value: Value) {
-    match value {
-        Value::Str(text) => push_str(out, &scrub(inner, &text)),
-        Value::Int(n) => push_i64(out, n),
-        Value::UInt(n) => push_u64(out, n),
-        Value::Float(n) => push_f64(out, n),
-        Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
-        Value::Content(text) if inner.content => push_str(out, &scrub(inner, &text)),
-        Value::Content(text) => {
+fn push_clean(out: &mut String, clean: Clean) {
+    match clean {
+        Clean::Str(text) => push_str(out, &text),
+        Clean::Int(n) => push_i64(out, n),
+        Clean::UInt(n) => push_u64(out, n),
+        Clean::Float(n) => push_f64(out, n),
+        Clean::Bool(b) => out.push_str(if b { "true" } else { "false" }),
+        Clean::Withheld(bytes) => {
             out.push_str("{\"bytes\":");
-            push_u64(out, text.len() as u64);
+            push_u64(out, bytes);
             out.push('}');
         }
     }
 }
 
 fn scrub(inner: &Inner, text: &str) -> String {
-    let mut out = text.to_owned();
-    for secret in &inner.scrub {
-        assert!(!secret.is_empty());
-        if out.contains(secret.as_str()) {
-            out = out.replace(secret.as_str(), "[redacted]");
-        }
+    let (clean, was_cut) = redact::cut(redact::scrub(text, &inner.scrub));
+    if was_cut {
+        inner.shared.truncated.fetch_add(1, Ordering::Relaxed);
     }
-    out
+    clean
 }
