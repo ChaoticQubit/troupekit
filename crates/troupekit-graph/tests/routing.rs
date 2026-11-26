@@ -226,13 +226,13 @@ async fn node_override_never_mutates_the_loaded_persona() {
 #[tokio::test]
 async fn goto_and_override_flows_still_refuse_unbuilt_options() {
     let io = io(&[]);
-    let text = writer_flow("").replace("name = 'ov'\n", "name = 'ov'\nuntracked = ['out']\n");
+    let text = writer_flow("").replace("[state]\n", "[budget]\nsplit = 'shared'\n[state]\n");
     let flow = Flow::parse("test/r.toml", &text).unwrap();
     let err = GraphRun::start(flow, Map::new(), Limits::default(), &io)
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, GraphError::Setup(m) if m.contains("untracked state")),
+        matches!(&err, GraphError::Setup(m) if m.contains("shared budget split")),
         "{err}"
     );
 }
