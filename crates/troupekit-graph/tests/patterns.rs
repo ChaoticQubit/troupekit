@@ -458,3 +458,88 @@ fn context_naming_a_later_task_is_refused() {
     );
     refused(&crew(&[&task("output", "")]), "crew.tasks[0].id", "must be 1 to 64");
 }
+
+const PIPELINE: &str = "name = 'pipeline'\n\
+    [[steps]]\nid = 'draft'\nagent = 'writer'\n\
+    [[steps]]\nid = 'review'\nparallel = ['grammar', 'facts']\n\
+    [[steps]]\nid = 'ok'\nfeedback = { prompt = 'Publish?', routes = { yes = 'publish', no = 'draft' } }\n\
+    [[steps]]\nid = 'publish'\nagent = 'publisher'\n";
+
+#[test]
+fn sequence_and_parallel_shortcuts_compile() {
+    let table = compile(FILE, PIPELINE).unwrap();
+    assert_eq!(table, golden("steps_pipeline.toml"));
+    let plain = "name = 'p'\n[[steps]]\nid = 'a'\nagent = 'x'\nprompt = 'Go.'\n\
+                 [[steps]]\nid = 'b'\nagent = 'y'\n";
+    let table = compile(FILE, plain).unwrap();
+    assert_eq!(edge_list(&table), [("a", "b", None), ("b", "end", None)]);
+    assert_eq!(node(&table, "a")["prompt"].as_str(), Some("Go."));
+    assert_eq!(strs(&node(&table, "b")["reads"]), ["input", "a"]);
+    refused(
+        "name = 'p'\n[[steps]]\nid = 'a'\nparallel = ['x', 'y']\n",
+        "steps[0].parallel",
+        "nothing to fan out from",
+    );
+    refused(
+        "name = 'p'\n[[steps]]\nid = 'a'\nagent = 'x'\nparallel = ['x', 'y']\n",
+        "steps[0]",
+        "exactly one of agent, parallel, loop or feedback",
+    );
+}
+
+#[test]
+fn when_on_a_step_compiles_to_switch() {
+    let text = "name = 'p'\n[state]\napproved = 'bool'\n\
+                [[steps]]\nid = 'a'\nagent = 'x'\n\
+                [[steps]]\nid = 'b'\nagent = 'y'\nwhen = 'approved'\n\
+                [[steps]]\nid = 'c'\nagent = 'z'\n";
+    let table = compile(FILE, text).unwrap();
+    assert_eq!(node(&table, "when_b")["on"].as_str(), Some("approved"));
+    let edges = edge_list(&table);
+    assert!(edges.contains(&("a", "when_b", None)));
+    assert!(edges.contains(&("when_b", "b", Some("true"))));
+    assert!(edges.contains(&("when_b", "c", Some("false"))));
+    assert!(edges.contains(&("b", "c", None)));
+    refused(
+        &text.replace("approved = 'bool'\n", ""),
+        "steps[1].when",
+        "not declared in [state]",
+    );
+}
+
+#[test]
+fn feedback_step_routes_on_the_answer() {
+    let table = compile(FILE, PIPELINE).unwrap();
+    let ask = node(&table, "ok");
+    assert_eq!(ask["kind"].as_str(), Some("human"));
+    assert_eq!(ask["ask"].as_str(), Some("question"));
+    assert_eq!(table["state"]["ok"].as_str(), Some("enum(no, yes)"));
+    let edges = edge_list(&table);
+    assert!(edges.contains(&("route_ok", "publish", Some("yes"))));
+    assert!(edges.contains(&("route_ok", "draft", Some("no"))));
+    assert!(!edges.iter().any(|e| e.0 == "route_ok" && e.2.is_none()));
+    refused(
+        &PIPELINE.replace("no = 'draft'", "no = 'nowhere'"),
+        "steps[2].feedback.routes.no",
+        "not a step or `end`",
+    );
+    refused(
+        &PIPELINE.replace("no = 'draft'", "no = 'review'"),
+        "steps[2].feedback.routes.no",
+        "parallel step",
+    );
+}
+
+#[test]
+fn loop_and_after_steps_wait_for_the_pattern_ir() {
+    refused(
+        "name = 'p'\n[[steps]]\nid = 'a'\nloop = { agent = 'x', until = 'done', max_iterations = 3 }\n",
+        "steps[0].loop",
+        "not built yet",
+    );
+    refused(
+        "name = 'p'\n[[steps]]\nid = 'a'\nagent = 'x'\nafter = ['b']\ntrigger = 'all'\n",
+        "steps[0].after",
+        "not built yet",
+    );
+}
