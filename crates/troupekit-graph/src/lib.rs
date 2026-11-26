@@ -5,13 +5,17 @@
 
 pub mod condition;
 pub mod error;
+pub mod flow;
+mod flow_check;
 pub mod io;
+pub mod patterns;
 pub mod run;
 pub mod testing;
 pub mod workflow;
 
 pub use condition::{ConditionFn, Conditions};
 pub use error::{GraphError, WorkflowError};
+pub use flow::{BudgetSplit, Flow, FlowKind, JoinMode, Reducer, GRAPH_FORMAT_FLOW};
 pub use io::{GraphIo, SimpleGraphIo};
 pub use run::{GraphOutcome, GraphRun, GraphStatus, HumanAsk, Stop, GRAPH_FORMAT};
 pub use workflow::{Ask, Edge, Node, NodeKind, Workflow};

@@ -43,6 +43,129 @@ pub trait CheckpointStore: Send + Sync {
         }
         Ok(0)
     }
+
+    /// Durably keeps the write of one finished branch of step `step` of
+    /// `run_id`. Returns true when the write is durable. The default keeps
+    /// whole steps only and returns false, so the engine knows the branch
+    /// will run again after a crash.
+    async fn save_branch(&self, run_id: RunId, step: u64, write: BranchWrite) -> Result<bool, CoreError> {
+        let _ = (run_id, step, write);
+        Ok(false)
+    }
+
+    /// Returns the kept branch writes of step `step` of `run_id`, lowest
+    /// branch index first. The default keeps none and returns an empty
+    /// list, so a resumed run runs every branch of the step again.
+    async fn branch_writes(&self, run_id: RunId, step: u64) -> Result<Vec<BranchWrite>, CoreError> {
+        let _ = (run_id, step);
+        Ok(Vec::new())
+    }
+
+    /// Records that `link.child` was forked from `link.parent`.
+    /// Returns true when the link is kept. The default keeps no lineage
+    /// and returns false.
+    async fn link_fork(&self, link: ForkLink) -> Result<bool, CoreError> {
+        let _ = link;
+        Ok(false)
+    }
+
+    /// Returns the kept fork links whose parent is `parent`.
+    /// Children of children are not listed; walk them one level at a time.
+    /// The default keeps none and returns an empty list.
+    async fn forks(&self, parent: RunId) -> Result<Vec<ForkLink>, CoreError> {
+        let _ = parent;
+        Ok(Vec::new())
+    }
+}
+
+/// The result of one finished parallel branch within one step: the branch
+/// index, the node it worked on and its serialized post-work state.
+/// A store that keeps branch writes lets a resumed run apply finished
+/// branches instead of running them again.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchWrite {
+    branch: u32,
+    node: String,
+    write: Value,
+}
+
+impl BranchWrite {
+    /// Builds the write of branch index `branch` that worked on `node`
+    /// with post-work state `write`.
+    /// Returns the write.
+    pub fn new(branch: u32, node: impl Into<String>, write: Value) -> Self {
+        Self {
+            branch,
+            node: node.into(),
+            write,
+        }
+    }
+
+    /// Returns the branch index within its step.
+    /// Indices follow the run's branch order at the start of the step.
+    /// A resumed run applies the write to the branch at this index.
+    pub fn branch(&self) -> u32 {
+        self.branch
+    }
+
+    /// Returns the id of the node the branch worked on.
+    /// A resumed run refuses the write when the branch at its index sits
+    /// at another node.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
+    /// Returns the branch's serialized post-work state.
+    /// Its shape belongs to the engine that wrote it.
+    /// The store keeps it as opaque JSON.
+    pub fn write(&self) -> &Value {
+        &self.write
+    }
+}
+
+/// A lineage link: run `child` was forked from step `parent_step` of run
+/// `parent`. The child holds a copy of that checkpoint, so pruning the
+/// parent never breaks the child.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkLink {
+    child: RunId,
+    parent: RunId,
+    parent_step: u64,
+}
+
+impl ForkLink {
+    /// Builds the link from run `child` to step `parent_step` of `parent`.
+    /// Returns the link.
+    pub fn new(child: RunId, parent: RunId, parent_step: u64) -> Self {
+        Self {
+            child,
+            parent,
+            parent_step,
+        }
+    }
+
+    /// Returns the forked run.
+    /// It starts at step 0 with a copy of the parent checkpoint.
+    /// Its id differs from the parent's.
+    pub fn child(&self) -> RunId {
+        self.child
+    }
+
+    /// Returns the run the fork was taken from.
+    /// That run's checkpoints are never written by the fork.
+    /// Lineage walks from child to parent.
+    pub fn parent(&self) -> RunId {
+        self.parent
+    }
+
+    /// Returns the parent step the fork copied.
+    /// It names one checkpoint of the parent run.
+    /// The fork's own steps restart at 0.
+    pub fn parent_step(&self) -> u64 {
+        self.parent_step
+    }
 }
 
 /// Append-only message logs keyed by name.
@@ -181,4 +304,41 @@ pub trait JobQueue: Send + Sync {
 pub trait UsageLedger: Send + Sync {
     async fn period_total(&self, key: &str) -> Result<u64, CoreError>;
     async fn record(&self, key: &str, usage: Usage) -> Result<(), CoreError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct LatestOnly(Mutex<Option<Checkpoint>>);
+
+    #[async_trait]
+    impl CheckpointStore for LatestOnly {
+        async fn save(&self, cp: Checkpoint) -> Result<(), CoreError> {
+            *self.0.lock().unwrap() = Some(cp);
+            Ok(())
+        }
+
+        async fn latest(&self, run_id: RunId) -> Result<Option<Checkpoint>, CoreError> {
+            Ok(self.0.lock().unwrap().clone().filter(|cp| cp.run_id == run_id))
+        }
+    }
+
+    #[tokio::test]
+    async fn store_without_branch_writes_reports_not_durable() {
+        let store = LatestOnly::default();
+        let run = RunId::new();
+        let write = BranchWrite::new(1, "left", serde_json::json!({"at": "leave"}));
+        assert_eq!(write.branch(), 1);
+        assert_eq!(write.node(), "left");
+        assert!(!store.save_branch(run, 3, write).await.unwrap());
+        assert!(store.branch_writes(run, 3).await.unwrap().is_empty());
+        let parent = RunId::new();
+        let link = ForkLink::new(run, parent, 7);
+        assert_eq!((link.child(), link.parent(), link.parent_step()), (run, parent, 7));
+        assert!(!store.link_fork(link).await.unwrap());
+        assert!(store.forks(parent).await.unwrap().is_empty());
+    }
 }

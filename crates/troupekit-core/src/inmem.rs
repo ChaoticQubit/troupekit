@@ -3,29 +3,143 @@ use crate::ids::RunId;
 use crate::message::Message;
 use crate::store::*;
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tokio::sync::Mutex;
 
 /// In-memory `CheckpointStore` for tests and examples.
-/// Keeps only the latest checkpoint per run and enforces the same
-/// next-step rule as durable stores.
+/// `default()` keeps only the latest checkpoint per run and no branch writes
+/// or fork links; `with_history()` keeps every step, branch writes and fork
+/// links. Both enforce the same next-step rule as durable stores.
 #[derive(Default)]
-pub struct InMemCheckpoints(Mutex<HashMap<RunId, Checkpoint>>);
+pub struct InMemCheckpoints {
+    keep_history: bool,
+    inner: Mutex<CheckpointMaps>,
+}
+
+/// Everything one `InMemCheckpoints` holds, behind one lock so a save and
+/// the branch writes it drops change together. Branch writes are keyed by
+/// step then branch index; `forks` lists links by child id, as SQLite does.
+#[derive(Default)]
+struct CheckpointMaps {
+    runs: HashMap<RunId, Vec<Checkpoint>>,
+    writes: HashMap<RunId, BTreeMap<(u64, u32), BranchWrite>>,
+    links: Vec<ForkLink>,
+}
+
+impl InMemCheckpoints {
+    /// Builds a store that keeps every saved step of every run, the branch
+    /// writes of the step in flight and fork links, like a durable store.
+    /// Memory grows with the steps saved; `prune` or the run's step cap bound it.
+    /// Returns the empty store.
+    pub fn with_history() -> Self {
+        Self { keep_history: true, inner: Mutex::default() }
+    }
+}
+
+/// Returns the step a run with checkpoints `kept` accepts next:
+/// 0 for a run with none, else one above the latest kept step.
+/// The caller holds the store lock, so the answer stays true while it acts.
+fn next_step(kept: Option<&Vec<Checkpoint>>) -> u64 {
+    kept.and_then(|list| list.last()).map_or(0, |cp| cp.step + 1)
+}
 
 #[async_trait]
 impl CheckpointStore for InMemCheckpoints {
     async fn save(&self, cp: Checkpoint) -> Result<(), CoreError> {
-        let mut map = self.0.lock().await;
-        let expected = map.get(&cp.run_id).map_or(0, |c| c.step + 1);
+        let mut maps = self.inner.lock().await;
+        let expected = next_step(maps.runs.get(&cp.run_id));
         if cp.step != expected {
             return Err(CoreError::Conflict { expected, actual: cp.step });
         }
-        map.insert(cp.run_id, cp);
+        let (run_id, step) = (cp.run_id, cp.step);
+        let kept = maps.runs.entry(run_id).or_default();
+        if !self.keep_history {
+            kept.clear();
+        }
+        kept.push(cp);
+        assert!(kept.windows(2).all(|w| w[0].step + 1 == w[1].step));
+        if let Some(writes) = maps.writes.get_mut(&run_id) {
+            writes.retain(|&(write_step, _), _| write_step > step);
+        }
         Ok(())
     }
 
     async fn latest(&self, run_id: RunId) -> Result<Option<Checkpoint>, CoreError> {
-        Ok(self.0.lock().await.get(&run_id).cloned())
+        Ok(self.inner.lock().await.runs.get(&run_id).and_then(|list| list.last()).cloned())
+    }
+
+    async fn history(&self, run_id: RunId) -> Result<Vec<Checkpoint>, CoreError> {
+        Ok(self.inner.lock().await.runs.get(&run_id).cloned().unwrap_or_default())
+    }
+
+    async fn prune(&self, run_id: RunId, keep_last: u64) -> Result<u64, CoreError> {
+        if keep_last == 0 {
+            return Err(CoreError::Store("prune keep_last must be at least 1".into()));
+        }
+        let mut maps = self.inner.lock().await;
+        let Some(kept) = maps.runs.get_mut(&run_id) else {
+            return Ok(0);
+        };
+        let len = kept.len() as u64;
+        let deleted = len.saturating_sub(keep_last);
+        kept.drain(..deleted as usize);
+        assert!(!kept.is_empty(), "prune never deletes the latest step");
+        Ok(deleted)
+    }
+
+    async fn save_branch(&self, run_id: RunId, step: u64, write: BranchWrite) -> Result<bool, CoreError> {
+        if !self.keep_history {
+            return Ok(false);
+        }
+        let mut maps = self.inner.lock().await;
+        let first_open = next_step(maps.runs.get(&run_id));
+        if step < first_open {
+            return Err(CoreError::Conflict { expected: first_open, actual: step });
+        }
+        let writes = maps.writes.entry(run_id).or_default();
+        match writes.get(&(step, write.branch())) {
+            Some(kept) if *kept == write => Ok(true),
+            Some(_) => Err(CoreError::Conflict { expected: step, actual: step }),
+            None => {
+                writes.insert((step, write.branch()), write);
+                Ok(true)
+            }
+        }
+    }
+
+    async fn branch_writes(&self, run_id: RunId, step: u64) -> Result<Vec<BranchWrite>, CoreError> {
+        let maps = self.inner.lock().await;
+        let Some(writes) = maps.writes.get(&run_id) else {
+            return Ok(Vec::new());
+        };
+        let out: Vec<BranchWrite> = writes.range((step, 0)..=(step, u32::MAX)).map(|(_, w)| w.clone()).collect();
+        assert!(out.windows(2).all(|w| w[0].branch() < w[1].branch()));
+        Ok(out)
+    }
+
+    async fn link_fork(&self, link: ForkLink) -> Result<bool, CoreError> {
+        if !self.keep_history {
+            return Ok(false);
+        }
+        if link.child() == link.parent() {
+            return Err(CoreError::Store("a run cannot be forked from itself".into()));
+        }
+        let mut maps = self.inner.lock().await;
+        match maps.links.iter().find(|kept| kept.child() == link.child()) {
+            Some(kept) if *kept == link => Ok(true),
+            Some(kept) => Err(CoreError::Conflict { expected: kept.parent_step(), actual: link.parent_step() }),
+            None => {
+                maps.links.push(link);
+                Ok(true)
+            }
+        }
+    }
+
+    async fn forks(&self, parent: RunId) -> Result<Vec<ForkLink>, CoreError> {
+        let maps = self.inner.lock().await;
+        let mut out: Vec<ForkLink> = maps.links.iter().filter(|link| link.parent() == parent).cloned().collect();
+        out.sort_by_key(|link| link.child());
+        Ok(out)
     }
 }
 

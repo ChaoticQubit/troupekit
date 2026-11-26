@@ -6,7 +6,9 @@ use troupekit_core::error::CoreError;
 use troupekit_core::event::Usage;
 use troupekit_core::ids::RunId;
 use troupekit_core::message::Message;
-use troupekit_core::store::{BlobStore, Checkpoint, CheckpointStore, MemoryLog, UsageLedger};
+use troupekit_core::store::{
+    BlobStore, BranchWrite, Checkpoint, CheckpointStore, ForkLink, MemoryLog, UsageLedger,
+};
 
 /// Starts the write transaction every check-then-write uses. `IMMEDIATE`
 /// takes the write lock at once, so two handles never both pass a check.
@@ -85,6 +87,38 @@ fn max_step(tx: &Transaction<'_>, run: &str) -> Result<Option<u64>, CoreError> {
     max.map(|m| from_sql_int("step", m)).transpose()
 }
 
+/// Counts the branch writes of `run` at or below `step`.
+/// Input: the open transaction, the run and the step. Output: the count;
+/// `save` asserts it is zero after dropping the writes its step settled.
+fn branch_writes_up_to(tx: &Transaction<'_>, run: &str, step: i64) -> Result<i64, CoreError> {
+    tx.query_row(
+        "SELECT COUNT(*) FROM branch_write WHERE run_id = ?1 AND step <= ?2",
+        params![run, step],
+        |row| row.get(0),
+    )
+    .map_err(db)
+}
+
+/// Parses a run id stored as text by this store.
+/// Input: the text and the column it came from, for the message.
+/// Output: the id, or `CoreError::Store("corrupt store: ...")`.
+fn parse_run_id(text: String, column: &str) -> Result<RunId, CoreError> {
+    serde_json::from_value(Value::String(text))
+        .map_err(|_| corrupt(format!("{column} is not a run id")))
+}
+
+/// Refuses a list longer than `max` rows, read with `LIMIT max + 1`.
+/// Input: the rows read, the cap and what they are. Output: `Ok` when
+/// the list fits, `CoreError::Store` naming `max_history_steps` otherwise.
+fn check_rows<T>(rows: &[T], max: u64, what: &str) -> Result<(), CoreError> {
+    if rows.len() as u64 > max {
+        return Err(CoreError::Store(format!(
+            "{what} has more than max_history_steps {max} rows"
+        )));
+    }
+    Ok(())
+}
+
 fn row_checkpoint(run_id: RunId, step: i64, bytes: &[u8]) -> Result<Checkpoint, CoreError> {
     Ok(Checkpoint {
         run_id,
@@ -128,6 +162,12 @@ impl CheckpointStore for SqliteStore {
                 .map_err(db)?;
             assert_eq!(inserted, 1);
             assert_eq!(max_step(&tx, &run)?, Some(actual));
+            tx.execute(
+                "DELETE FROM branch_write WHERE run_id = ?1 AND step <= ?2",
+                params![run, step],
+            )
+            .map_err(db)?;
+            assert_eq!(branch_writes_up_to(&tx, &run, step)?, 0);
             tx.commit().map_err(db)
         })
         .await
@@ -205,15 +245,176 @@ impl CheckpointStore for SqliteStore {
             };
             let cutoff = (max + 1).saturating_sub(keep_last);
             assert!(cutoff <= max, "prune never reaches the latest step");
+            let cutoff = to_sql_int("step", cutoff)?;
             let deleted = tx
                 .execute(
                     "DELETE FROM checkpoint WHERE run_id = ?1 AND step < ?2",
-                    params![run, to_sql_int("step", cutoff)?],
+                    params![run, cutoff],
                 )
                 .map_err(db)?;
+            tx.execute(
+                "DELETE FROM branch_write WHERE run_id = ?1 AND step < ?2",
+                params![run, cutoff],
+            )
+            .map_err(db)?;
             assert_eq!(max_step(&tx, &run)?, Some(max));
             tx.commit().map_err(db)?;
             Ok(deleted as u64)
+        })
+        .await
+    }
+
+    async fn save_branch(&self, run_id: RunId, step: u64, write: BranchWrite) -> Result<bool, CoreError> {
+        let step_sql = to_sql_int("step", step)?;
+        check_depth(write.write(), "branch write")?;
+        let bytes = serde_json::to_vec(write.write())
+            .map_err(|e| CoreError::Store(format!("cannot encode branch write: {e}")))?;
+        let max = self.limits().branch_write_bytes();
+        let size = bytes.len() as u64 + write.node().len() as u64;
+        if size > max {
+            return Err(CoreError::Store(format!(
+                "branch write is {size} bytes, above max_branch_write_bytes {max}"
+            )));
+        }
+        let run = run_id.to_string();
+        let branch = i64::from(write.branch());
+        let node = write.node().to_string();
+        self.call(move |conn| {
+            let tx = immediate(conn)?;
+            if let Some(latest) = max_step(&tx, &run)? {
+                if step <= latest {
+                    let expected = latest
+                        .checked_add(1)
+                        .ok_or_else(|| corrupt("step at u64::MAX".into()))?;
+                    return Err(CoreError::Conflict { expected, actual: step });
+                }
+            }
+            let kept: Option<(String, Vec<u8>)> = tx
+                .query_row(
+                    "SELECT node, write_json FROM branch_write \
+                     WHERE run_id = ?1 AND step = ?2 AND branch = ?3",
+                    params![run, step_sql, branch],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(db)?;
+            match kept {
+                Some((kept_node, kept_bytes)) if kept_node == node && kept_bytes == bytes => Ok(true),
+                Some(_) => Err(CoreError::Conflict { expected: step, actual: step }),
+                None => {
+                    let inserted = tx
+                        .execute(
+                            "INSERT INTO branch_write (run_id, step, branch, node, write_json) \
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params![run, step_sql, branch, node, bytes],
+                        )
+                        .map_err(db)?;
+                    assert_eq!(inserted, 1);
+                    tx.commit().map_err(db)?;
+                    Ok(true)
+                }
+            }
+        })
+        .await
+    }
+
+    async fn branch_writes(&self, run_id: RunId, step: u64) -> Result<Vec<BranchWrite>, CoreError> {
+        let step = to_sql_int("step", step)?;
+        let run = run_id.to_string();
+        let max = self.limits().history_steps_max;
+        self.call(move |conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT branch, node, write_json FROM branch_write \
+                     WHERE run_id = ?1 AND step = ?2 ORDER BY branch LIMIT ?3",
+                )
+                .map_err(db)?;
+            let limit = to_sql_int("limit", max.saturating_add(1))?;
+            let rows = stmt
+                .query_map(params![run, step, limit], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
+                })
+                .map_err(db)?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (branch, node, bytes) = row.map_err(db)?;
+                let branch = u32::try_from(branch)
+                    .map_err(|_| corrupt(format!("branch index {branch}")))?;
+                let write: Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| corrupt(format!("branch write is not JSON: {e}")))?;
+                out.push(BranchWrite::new(branch, node, write));
+                check_rows(&out, max, "step")?;
+            }
+            assert!(out.windows(2).all(|w| w[0].branch() < w[1].branch()));
+            Ok(out)
+        })
+        .await
+    }
+
+    async fn link_fork(&self, link: ForkLink) -> Result<bool, CoreError> {
+        if link.child() == link.parent() {
+            return Err(CoreError::Store("a run cannot be forked from itself".into()));
+        }
+        let parent_step = to_sql_int("parent_step", link.parent_step())?;
+        let child = link.child().to_string();
+        let parent = link.parent().to_string();
+        self.call(move |conn| {
+            let tx = immediate(conn)?;
+            let kept: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT parent, parent_step FROM run_fork WHERE child = ?1",
+                    [&child],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(db)?;
+            match kept {
+                Some((kept_parent, kept_step)) if kept_parent == parent && kept_step == parent_step => Ok(true),
+                Some((_, kept_step)) => Err(CoreError::Conflict {
+                    expected: from_sql_int("parent_step", kept_step)?,
+                    actual: link.parent_step(),
+                }),
+                None => {
+                    let inserted = tx
+                        .execute(
+                            "INSERT INTO run_fork (child, parent, parent_step) VALUES (?1, ?2, ?3)",
+                            params![child, parent, parent_step],
+                        )
+                        .map_err(db)?;
+                    assert_eq!(inserted, 1);
+                    tx.commit().map_err(db)?;
+                    Ok(true)
+                }
+            }
+        })
+        .await
+    }
+
+    async fn forks(&self, parent: RunId) -> Result<Vec<ForkLink>, CoreError> {
+        let parent_text = parent.to_string();
+        let max = self.limits().history_steps_max;
+        self.call(move |conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT child, parent_step FROM run_fork WHERE parent = ?1 \
+                     ORDER BY child LIMIT ?2",
+                )
+                .map_err(db)?;
+            let limit = to_sql_int("limit", max.saturating_add(1))?;
+            let rows = stmt
+                .query_map(params![parent_text, limit], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(db)?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (child, step) = row.map_err(db)?;
+                let child = parse_run_id(child, "run_fork child")?;
+                out.push(ForkLink::new(child, parent, from_sql_int("parent_step", step)?));
+                check_rows(&out, max, "fork list")?;
+            }
+            assert!(out.windows(2).all(|w| w[0].child() < w[1].child()));
+            Ok(out)
         })
         .await
     }

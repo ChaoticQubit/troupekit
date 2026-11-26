@@ -117,10 +117,30 @@ CREATE TABLE ingest_source (
 ) STRICT, WITHOUT ROWID;
 ";
 
+const STEP_3: &str = "
+CREATE TABLE branch_write (
+  run_id TEXT NOT NULL,
+  step INTEGER NOT NULL CHECK (step >= 0),
+  branch INTEGER NOT NULL CHECK (branch BETWEEN 0 AND 4294967295),
+  node TEXT NOT NULL,
+  write_json BLOB NOT NULL,
+  PRIMARY KEY (run_id, step, branch)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE run_fork (
+  child TEXT NOT NULL PRIMARY KEY,
+  parent TEXT NOT NULL,
+  parent_step INTEGER NOT NULL CHECK (parent_step >= 0),
+  CHECK (child <> parent)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX run_fork_parent ON run_fork (parent, child);
+";
+
 /// Ordered migration scripts. Step `n` takes a file from version `n - 1`
 /// to `n`. A released step is never edited; a schema change is a new step
 /// appended at the end.
-pub(crate) const STEPS: &[&str] = &[STEP_1, STEP_2];
+pub(crate) const STEPS: &[&str] = &[STEP_1, STEP_2, STEP_3];
 
 /// What the header of a store file says before any migration.
 /// Read by `read_header` on any connection, keyed or not.
@@ -235,6 +255,7 @@ mod tests {
             tables(&conn),
             [
                 "blob_entry",
+                "branch_write",
                 "checkpoint",
                 "chunk",
                 "chunk_fts",
@@ -248,6 +269,7 @@ mod tests {
                 "job",
                 "lease_token",
                 "memory_entry",
+                "run_fork",
                 "sqlite_sequence",
                 "usage_total",
                 "vector_index"
