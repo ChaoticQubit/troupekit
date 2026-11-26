@@ -1,7 +1,10 @@
 mod agent;
+mod agent_history;
 mod built;
 mod error;
+mod flow;
 mod graph;
+mod history;
 #[cfg(feature = "knowledge")]
 pub mod knowledge;
 mod laws;
@@ -9,7 +12,9 @@ mod laws;
 mod memory;
 mod model;
 mod output;
+mod patterns;
 mod storage;
+mod team_agent;
 mod tool;
 
 #[doc(hidden)]
