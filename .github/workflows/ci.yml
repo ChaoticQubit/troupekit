@@ -331,7 +331,12 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p troupekit-ffi --release --locked
-          lib="$(ls target/release/libtroupekit_ffi.so target/release/libtroupekit_ffi.dylib 2>/dev/null | head -n 1)"
+          lib=""
+          for candidate in target/release/libtroupekit_ffi.so target/release/libtroupekit_ffi.dylib; do
+            if [ -f "$candidate" ]; then
+              lib="$candidate"
+            fi
+          done
           test -n "$lib"
           kotlin=bindings/kotlin/troupekit/src/main/kotlin/dev/troupekit/troupekit_ffi.kt
           if [ ! -f "$kotlin" ]; then
