@@ -21,9 +21,9 @@ const PRICE: Price = Price {
 };
 
 #[derive(Default)]
-struct Store {
+pub(crate) struct Store {
     cps: Mutex<Vec<Checkpoint>>,
-    writes: Mutex<BTreeMap<(RunId, u64, u32), BranchWrite>>,
+    pub(crate) writes: Mutex<BTreeMap<(RunId, u64, u32), BranchWrite>>,
     whole_steps_only: bool,
     fail_writes: AtomicBool,
 }
@@ -36,7 +36,7 @@ impl Store {
         }
     }
 
-    fn has(&self, run: RunId, step: u64, branch: u32) -> bool {
+    pub(crate) fn has(&self, run: RunId, step: u64, branch: u32) -> bool {
         self.writes
             .lock()
             .unwrap()

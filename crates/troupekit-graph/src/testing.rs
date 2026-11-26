@@ -120,6 +120,37 @@ impl GatedTool {
         })
     }
 
+    /// Builds tool `name` whose calls wait on one gate per value of the
+    /// argument `key`, named `"{name}/{value}"` (a string value bare, any
+    /// other as JSON), so a test opens map items one by one. Answers with
+    /// `reply(args)`; calls and finish order are kept under the gate name.
+    pub fn tool_per_item(
+        &self,
+        name: &str,
+        key: &str,
+        reply: impl Fn(Value) -> ToolOutput + Send + Sync + 'static,
+    ) -> Arc<dyn Tool> {
+        let (gates, reply, prefix, key) = (
+            self.clone(),
+            Arc::new(reply),
+            name.to_string(),
+            key.to_string(),
+        );
+        FnTool::new(name, move |args, ctx| {
+            let (gates, reply) = (gates.clone(), reply.clone());
+            let gate = match &args[key.as_str()] {
+                Value::String(v) => format!("{prefix}/{v}"),
+                other => format!("{prefix}/{other}"),
+            };
+            async move {
+                gates.enter(&gate, ctx.idempotency_key);
+                gates.wait(&gate).await;
+                gates.leave(&gate);
+                Ok(reply(args))
+            }
+        })
+    }
+
     /// Opens gate `name`: every waiting and later call of that tool goes on.
     /// Opening an open gate changes nothing.
     /// Wakes the waiting calls.

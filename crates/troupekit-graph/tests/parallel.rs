@@ -214,3 +214,236 @@ async fn flow_with_a_reducer_writes_format_2_and_restores() {
     forged.state["format"] = json!(1);
     assert!(GraphRun::from_checkpoint(&forged).is_err());
 }
+
+fn map_flow(map_extra: &str, reducer: Option<&str>) -> String {
+    let reducers = reducer
+        .map(|r| format!("[reducers]\nout = '{r}'\n"))
+        .unwrap_or_default();
+    format!(
+        "name = 'm'\nstart = 'm'\n[state]\nxs = 'list'\nx = 'string'\ny = 'string'\nout = 'list'\n{reducers}[[nodes]]\nid = 'm'\nkind = 'map'\nover = 'xs'\nitem = 'x'\nbody = 'w'\nwrites = 'out'\n{map_extra}\n[[nodes]]\nid = 'w'\nkind = 'tool'\ntool = 'w'\nreads = ['x']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'm'\nto = 'e'\n"
+    )
+}
+
+fn map_io(gates: &GatedTool) -> SimpleGraphIo {
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(gates.tool_per_item("w", "x", |args| {
+            ToolOutput::text(args["x"].as_str().unwrap().to_uppercase())
+        }))
+        .unwrap();
+    SimpleGraphIo::new(Arc::new(SimpleIo::new(tools)), PersonaLoader::new(vec![]))
+}
+
+fn map_input(items: &[&str], out: Option<Value>) -> Map<String, Value> {
+    let mut input = Map::new();
+    input.insert("xs".into(), json!(items));
+    if let Some(out) = out {
+        input.insert("out".into(), out);
+    }
+    input
+}
+
+async fn map_run(text: &str, input: Map<String, Value>, io: &SimpleGraphIo) -> GraphRun {
+    let flow = Flow::parse("test/m.toml", text).unwrap();
+    GraphRun::start(flow, input, Limits::default(), io)
+        .await
+        .unwrap()
+}
+
+async fn drive_plain(run: &mut GraphRun, io: &SimpleGraphIo) -> GraphOutcome {
+    for _ in 0..40 {
+        let out = run.step(io).await;
+        if out != GraphOutcome::Continue {
+            return out;
+        }
+    }
+    panic!("run did not settle in 40 steps");
+}
+
+async fn open_in_order(gates: &GatedTool, order: &[&str]) {
+    for (done, v) in order.iter().enumerate() {
+        let gate = format!("w/{v}");
+        while gates.in_flight(&gate) == 0 {
+            tokio::task::yield_now().await;
+        }
+        gates.open(&gate);
+        while gates.finished().len() < done + 1 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn map_runs_one_branch_per_item_in_item_order() {
+    let gates = GatedTool::new();
+    let io = map_io(&gates);
+    let mut run = map_run(&map_flow("", None), map_input(&["a", "b", "c"], None), &io).await;
+    let (out, ()) = tokio::join!(drive_plain(&mut run, &io), async {
+        while gates.calls("w/a").len() + gates.calls("w/b").len() + gates.calls("w/c").len() < 3 {
+            tokio::task::yield_now().await;
+        }
+        open_in_order(&gates, &["c", "b", "a"]).await;
+    });
+    let GraphOutcome::Done(state) = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(gates.finished(), vec!["w/c", "w/b", "w/a"]);
+    assert_eq!(state["out"], json!(["A", "B", "C"]));
+}
+
+#[tokio::test]
+async fn map_concurrency_cap_holds() {
+    let gates = GatedTool::new();
+    let io = map_io(&gates);
+    let items = ["a", "b", "c", "d", "e"];
+    let mut run = map_run(
+        &map_flow("concurrency = 2", None),
+        map_input(&items, None),
+        &io,
+    )
+    .await;
+    let opener = async {
+        for (done, v) in items.iter().enumerate() {
+            let gate = format!("w/{v}");
+            while gates.in_flight(&gate) == 0 {
+                tokio::task::yield_now().await;
+            }
+            let live: usize = items
+                .iter()
+                .map(|i| gates.in_flight(&format!("w/{i}")))
+                .sum();
+            assert!(live <= 2, "{live} items in flight over a cap of 2");
+            gates.open(&gate);
+            while gates.finished().len() < done + 1 {
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    let (out, ()) = tokio::join!(drive_plain(&mut run, &io), opener);
+    let GraphOutcome::Done(state) = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(state["out"], json!(["A", "B", "C", "D", "E"]));
+    assert_eq!(
+        gates.max_in_flight(),
+        2,
+        "the cap is used and never exceeded"
+    );
+    assert_eq!(gates.finished().len(), 5);
+}
+
+#[tokio::test]
+async fn map_items_are_durable_one_by_one() {
+    use crate::pending::Store;
+    use troupekit_core::store::CheckpointStore;
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let io = map_io(&gates);
+    let mut run = map_run(&map_flow("", None), map_input(&["a", "b", "c"], None), &io).await;
+    let id = run.run_id();
+    store.save(run.checkpoint()).await.unwrap();
+    gates.open("w/a");
+    let a_kept = async {
+        while !store.has(id, 1, 0) {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::select! {
+        biased;
+        out = run.step_durable(&io, &store) => panic!("the step must not finish while b and c wait: {out:?}"),
+        () = a_kept => {}
+    }
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    gates.open("w/b");
+    gates.open("w/c");
+    let out = loop {
+        let out = run.step_durable(&io, &store).await.unwrap();
+        store.save(run.checkpoint()).await.unwrap();
+        if out != GraphOutcome::Continue {
+            break out;
+        }
+    };
+    let GraphOutcome::Done(state) = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(state["out"], json!(["A", "B", "C"]));
+    assert_eq!(
+        gates.calls("w/a").len(),
+        1,
+        "a finished item never runs again"
+    );
+    assert_eq!(gates.calls("w/b").len(), 2);
+    assert_eq!(gates.calls("w/b")[0], gates.calls("w/b")[1]);
+}
+
+#[tokio::test]
+async fn map_over_more_than_max_items_fails_cleanly() {
+    let gates = GatedTool::new();
+    let io = map_io(&gates);
+    let mut run = map_run(
+        &map_flow("max_items = 2", None),
+        map_input(&["a", "b", "c"], None),
+        &io,
+    )
+    .await;
+    let GraphOutcome::Failed(e) = run.step(&io).await else {
+        panic!("a list over the cap fails the run");
+    };
+    assert!(
+        e.contains("node `m`") && e.contains("3 items") && e.contains("cap of 2"),
+        "{e}"
+    );
+    assert!(gates.finished().is_empty() && gates.calls("w/a").is_empty());
+}
+
+#[tokio::test]
+async fn map_over_empty_list_writes_empty_result() {
+    let gates = GatedTool::new();
+    let io = map_io(&gates);
+    let mut run = map_run(&map_flow("", None), map_input(&[], None), &io).await;
+    let GraphOutcome::Done(state) = drive_plain(&mut run, &io).await else {
+        panic!("an empty map finishes");
+    };
+    assert_eq!(state["out"], json!([]));
+}
+
+#[tokio::test]
+async fn map_with_reducer_reduces_in_item_order() {
+    let gates = GatedTool::new();
+    let io = map_io(&gates);
+    let input = map_input(&["a", "b", "c"], Some(json!(["z"])));
+    let mut run = map_run(&map_flow("", Some("append")), input, &io).await;
+    let (out, ()) = tokio::join!(drive_plain(&mut run, &io), async {
+        while gates.calls("w/a").len() + gates.calls("w/b").len() + gates.calls("w/c").len() < 3 {
+            tokio::task::yield_now().await;
+        }
+        open_in_order(&gates, &["b", "c", "a"]).await;
+    });
+    let GraphOutcome::Done(state) = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(state["out"], json!(["z", "A", "B", "C"]));
+}
+
+#[tokio::test]
+async fn item_key_is_branch_local() {
+    let gates = GatedTool::new();
+    for v in ["a", "b"] {
+        gates.open(&format!("w/{v}"));
+    }
+    let io = map_io(&gates);
+    let mut run = map_run(&map_flow("", None), map_input(&["a", "b"], None), &io).await;
+    let first = run.step(&io).await;
+    assert_eq!(first, GraphOutcome::Done(run.state().clone()));
+    let state = run.state();
+    assert_eq!(state["out"], json!(["A", "B"]));
+    assert!(
+        !state.contains_key("x"),
+        "the item key never reaches shared state"
+    );
+    assert!(
+        !state.contains_key("y"),
+        "the body's result never reaches shared state"
+    );
+    assert_eq!(gates.calls("w/a").len(), 1);
+    assert_eq!(gates.calls("w/b").len(), 1);
+}

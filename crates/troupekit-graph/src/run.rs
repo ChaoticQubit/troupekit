@@ -149,6 +149,22 @@ struct Branch {
     at: At,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     call: Option<CallKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    item: Option<Box<Item>>,
+}
+
+/// The branch-local part of one map item branch: its map node, item index,
+/// the item key and value the body reads, and the body's result once it
+/// left the body. Never written to shared state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Item {
+    map: String,
+    index: usize,
+    key: String,
+    value: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
 }
 
 impl Branch {
@@ -157,7 +173,12 @@ impl Branch {
             node: node.to_string(),
             at: At::Enter,
             call: None,
+            item: None,
         }
+    }
+
+    fn of_map(&self, map: &str) -> bool {
+        self.item.as_ref().is_some_and(|it| it.map == map)
     }
 
     fn budget_paused(&self) -> Option<&PauseReason> {
@@ -281,8 +302,21 @@ impl GraphRun {
         limits: Limits,
         io: &dyn GraphIo,
     ) -> Result<GraphRun, GraphError> {
+        GraphRun::setup(workflow, None, input, limits, io).await
+    }
+
+    async fn setup(
+        workflow: Workflow,
+        flow: Option<&Flow>,
+        input: Map<String, Value>,
+        limits: Limits,
+        io: &dyn GraphIo,
+    ) -> Result<GraphRun, GraphError> {
         let setup = |id: &str, m: String| GraphError::Setup(format!("node `{id}`: {m}"));
         for n in &workflow.nodes {
+            if flow.is_some_and(|f| matches!(f.kind(&n.id), Some(FlowKind::Map { .. }))) {
+                continue;
+            }
             match &n.kind {
                 NodeKind::Agent { persona, .. } => {
                     let p = io
@@ -360,7 +394,7 @@ impl GraphRun {
                 flow.name()
             )));
         }
-        let mut run = GraphRun::new(flow.workflow().clone(), input, limits, io).await?;
+        let mut run = GraphRun::setup(flow.workflow().clone(), Some(&flow), input, limits, io).await?;
         if !flow.is_v1() {
             run.format = GRAPH_FORMAT_FLOW;
             run.flow = Some(Box::new(flow));
@@ -935,11 +969,144 @@ impl GraphRun {
     }
 
     fn can_work(&self, b: &Branch) -> bool {
-        match &b.at {
+        let works = match &b.at {
             At::Agent { .. } => b.budget_paused().is_none(),
             At::Enter => matches!(self.node(&b.node).kind, NodeKind::Tool { .. }),
             At::Human { .. } | At::Joined | At::Left => false,
+        };
+        works && self.in_window(b)
+    }
+
+    fn flow_kind(&self, id: &str) -> Option<&FlowKind> {
+        self.flow.as_ref()?.kind(id)
+    }
+
+    fn in_window(&self, b: &Branch) -> bool {
+        let Some(it) = &b.item else {
+            return true;
+        };
+        let Some(FlowKind::Map { concurrency, .. }) = self.flow_kind(&it.map) else {
+            unreachable!("item branches belong to map nodes");
+        };
+        let ahead = self
+            .branches
+            .iter()
+            .filter(|o| o.of_map(&it.map) && o.at != At::Left)
+            .filter(|o| o.item.as_ref().is_some_and(|x| x.index < it.index))
+            .count();
+        ahead < *concurrency as usize
+    }
+
+    fn expand_map(&mut self, i: usize) -> Result<(), String> {
+        let id = self.branches[i].node.clone();
+        let Some(FlowKind::Map {
+            over,
+            item,
+            body,
+            max_items,
+            ..
+        }) = self.flow_kind(&id).cloned()
+        else {
+            unreachable!("only map nodes expand");
+        };
+        let fail = |m: String| format!("node `{id}`: {m}");
+        let list = match self.state.get(&over) {
+            Some(Value::Array(list)) => list.clone(),
+            Some(Value::Null) | None => return Err(fail(format!("reads `{over}`, which is not set"))),
+            Some(other) => return Err(fail(format!("`{over}` is not a list: {other}"))),
+        };
+        if list.len() > max_items as usize {
+            return Err(fail(format!(
+                "{} items in `{over}` are over the cap of {max_items}",
+                list.len()
+            )));
         }
+        if list.is_empty() {
+            let node = self.node(&id).clone();
+            self.write_map(&node, Vec::new())?;
+            self.branches[i].at = At::Left;
+            return Ok(());
+        }
+        let items: Vec<Branch> = list
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| Branch {
+                node: body.clone(),
+                at: At::Enter,
+                call: None,
+                item: Some(Box::new(Item {
+                    map: id.clone(),
+                    index,
+                    key: item.clone(),
+                    value,
+                    result: None,
+                })),
+            })
+            .collect();
+        self.branches.splice(i..=i, items);
+        Ok(())
+    }
+
+    fn write_map(&mut self, node: &Node, results: Vec<(usize, Value)>) -> Result<(), String> {
+        let key = node.writes.clone().expect("map nodes write");
+        let value = match self.reducer(&key) {
+            Some(_) if results.is_empty() => return Ok(()),
+            Some(reducer) => reducer
+                .reduce(self.state.get(&key), &results)
+                .map_err(|m| format!("node `{}`: reducing `{key}`: {m}", node.id))?,
+            None => Value::Array(results.into_iter().map(|(_, v)| v).collect()),
+        };
+        let errs = self.workflow.check_value(&key, &value);
+        if !errs.is_empty() {
+            return Err(format!(
+                "node `{}`: result does not match `{key}`: {}",
+                node.id,
+                errs.join("; ")
+            ));
+        }
+        self.state.insert(key, value);
+        Ok(())
+    }
+
+    fn collect_maps(&mut self) -> Result<bool, String> {
+        let ready = self
+            .branches
+            .iter()
+            .filter_map(|b| b.item.as_ref().map(|it| it.map.clone()))
+            .find(|map| self.branches.iter().filter(|b| b.of_map(map)).all(|b| b.at == At::Left));
+        let Some(map) = ready else {
+            return Ok(false);
+        };
+        let first = self
+            .branches
+            .iter()
+            .position(|b| b.of_map(&map))
+            .expect("a ready map has item branches");
+        let mut results: Vec<(usize, Value)> = self
+            .branches
+            .iter()
+            .filter_map(|b| b.item.as_ref().filter(|it| it.map == map))
+            .map(|it| (it.index, it.result.clone().expect("a finished item holds its result")))
+            .collect();
+        results.sort_by_key(|(index, _)| *index);
+        assert!(
+            results.iter().enumerate().all(|(n, (index, _))| n == *index),
+            "a map collects every item exactly once"
+        );
+        let node = self.node(&map).clone();
+        self.write_map(&node, results)?;
+        self.branches.retain(|b| !b.of_map(&map));
+        let at = first.min(self.branches.len());
+        self.branches.insert(
+            at,
+            Branch {
+                node: map,
+                at: At::Left,
+                call: None,
+                item: None,
+            },
+        );
+        Ok(true)
     }
 
     async fn run_branches(
@@ -979,7 +1146,7 @@ impl GraphRun {
                         (At::Enter, NodeKind::Tool { tool }) => {
                             let key = b.call.unwrap_or(CallKey { step, index: i });
                             let ctx = ToolContext::for_call(run_id, key.step, key.index);
-                            let result = call_tool(io, em, wf, node, tool, state, ctx).await;
+                            let result = call_tool(io, em, wf, node, tool, state, b.item.as_deref(), ctx).await;
                             let finished = result.as_ref().ok().map(|output| Finished::Tool {
                                 output: output.clone(),
                             });
@@ -1017,6 +1184,19 @@ impl GraphRun {
         let Some(key) = &node.writes else {
             return Ok(());
         };
+        if self.branches[branch].item.is_some() {
+            let errs = self.workflow.check_value(key, &value);
+            if !errs.is_empty() {
+                return Err(format!(
+                    "node `{}`: output does not match `{key}`: {}",
+                    node.id,
+                    errs.join("; ")
+                ));
+            }
+            let item = self.branches[branch].item.as_mut().expect("checked above");
+            item.result = Some(value);
+            return Ok(());
+        }
         if self.reducer(key).is_some() {
             reduced.push(Reduced {
                 key: key.clone(),
@@ -1075,7 +1255,7 @@ impl GraphRun {
             let mut changed = false;
             let mut next = Vec::with_capacity(self.branches.len());
             for b in std::mem::take(&mut self.branches) {
-                if b.at != At::Left {
+                if b.at != At::Left || b.item.is_some() {
                     next.push(b);
                     continue;
                 }
@@ -1091,6 +1271,12 @@ impl GraphRun {
                 }
                 let node = self.node(&self.branches[i].node).clone();
                 let fail = |m: String| format!("node `{}`: {m}", node.id);
+                if matches!(self.flow_kind(&node.id), Some(FlowKind::Map { .. })) {
+                    self.expand_map(i)?;
+                    changed = true;
+                    break;
+                }
+                let item = self.branches[i].item.clone();
                 match &node.kind {
                     NodeKind::Tool { .. } => continue,
                     NodeKind::End => {
@@ -1112,11 +1298,14 @@ impl GraphRun {
                         self.branches[i] = Branch::enter(&edge.to);
                     }
                     NodeKind::Human { .. } => {
-                        let data = reads(&self.workflow, &self.state, &node.reads).map_err(fail)?;
+                        let data = reads(&self.workflow, &self.state, &node.reads, item.as_deref()).map_err(fail)?;
                         self.branches[i].at = At::Human { data };
                     }
                     NodeKind::Agent { persona, prompt } => {
-                        let data = reads(&self.workflow, &self.state, &node.reads).map_err(fail)?;
+                        if !self.in_window(&self.branches[i]) {
+                            continue;
+                        }
+                        let data = reads(&self.workflow, &self.state, &node.reads, item.as_deref()).map_err(fail)?;
                         let p = io.persona(persona).await.map_err(|e| fail(e.to_string()))?;
                         let (call_cap, run_cap) =
                             (p.budget.call_usd_micros, p.budget.run_usd_micros);
@@ -1140,6 +1329,7 @@ impl GraphRun {
                 changed = true;
             }
             changed |= self.close_joins();
+            changed |= self.collect_maps()?;
             if !changed {
                 return Ok(false);
             }
@@ -1174,6 +1364,7 @@ impl GraphRun {
                 node: join,
                 at: At::Left,
                 call: None,
+                item: None,
             },
         );
         true
@@ -1203,11 +1394,10 @@ fn unsupported(flow: &Flow) -> Option<String> {
     if !flow.untracked().is_empty() {
         return Some("untracked state".into());
     }
-    let node = flow
-        .workflow()
-        .nodes
-        .iter()
-        .find(|n| flow.kind(&n.id) != Some(&FlowKind::from_v1(&n.kind)))?;
+    let node = flow.workflow().nodes.iter().find(|n| match flow.kind(&n.id) {
+        Some(FlowKind::Map { .. }) => false,
+        kind => kind != Some(&FlowKind::from_v1(&n.kind)),
+    })?;
     Some(format!("node `{}` of a 0.5 kind or option", node.id))
 }
 
@@ -1229,9 +1419,10 @@ fn reads(
     workflow: &Workflow,
     state: &Map<String, Value>,
     keys: &[String],
+    item: Option<&Item>,
 ) -> Result<Map<String, Value>, String> {
     keys.iter()
-        .map(|k| match state.get(k) {
+        .map(|k| match item.filter(|it| &it.key == k).map(|it| &it.value).or_else(|| state.get(k)) {
             Some(v) => Ok((k.clone(), v.clone())),
             None if nullable(workflow, k) => Ok((k.clone(), Value::Null)),
             None => Err(format!("reads `{k}`, which is not set")),
@@ -1263,9 +1454,10 @@ async fn call_tool(
     node: &Node,
     tool: &str,
     state: &Map<String, Value>,
+    item: Option<&Item>,
     ctx: ToolContext,
 ) -> Result<Value, ToolFailure> {
-    let args = reads(workflow, state, &node.reads).map_err(|message| ToolFailure {
+    let args = reads(workflow, state, &node.reads, item).map_err(|message| ToolFailure {
         message,
         transient: false,
     })?;
