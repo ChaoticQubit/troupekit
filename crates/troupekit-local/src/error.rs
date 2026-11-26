@@ -1,5 +1,5 @@
 /// Every failure of an on-device model: load, tokenize, decode, context
-/// size, grammar, unsupported operations and the model cache.
+/// size, grammar, unsupported operations, the model cache and catalog.
 /// Messages name the cause and never hold prompt or reply text.
 /// `LocalChat` maps these to `ProviderErrorKind::Server` with this text.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -19,4 +19,6 @@ pub enum LocalError {
     Unsupported(&'static str),
     #[error("local model cache: {0}")]
     Cache(String),
+    #[error("local model catalog: {0}")]
+    Catalog(String),
 }
