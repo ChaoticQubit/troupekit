@@ -745,6 +745,27 @@ final class ContractTests: XCTestCase {
         }
     }
 
+    func test_host_request_debug_hides_key() {
+        let headers = [
+            HostHeader(name: "Authorization", value: "Bearer \(secret)", sensitive: false),
+            HostHeader(name: "x-trace", value: "sk-flagged-secret", sensitive: true),
+            HostHeader(name: "content-type", value: "application/json", sensitive: false),
+        ]
+        let request = HostHttpRequest(
+            method: "POST", url: "https://api.stub.test/v1/chat/completions",
+            headers: headers, body: Data())
+        let texts = [
+            String(describing: request), String(reflecting: request), "\(request)",
+            String(describing: headers[0]), String(reflecting: headers[1]),
+        ]
+        for text in texts {
+            XCTAssertFalse(text.contains(secret), text)
+            XCTAssertFalse(text.contains("sk-flagged-secret"), text)
+        }
+        XCTAssertTrue(texts[0].contains("application/json"), texts[0])
+        XCTAssertTrue(texts[1].contains("application/json"), texts[1])
+    }
+
     func testEveryCaseIsImplemented() throws {
         let text = try String(contentsOf: casesFile(), encoding: .utf8)
         let names = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }

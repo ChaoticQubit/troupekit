@@ -816,6 +816,27 @@ def test_concurrent_runs_on_one_handle():
     assert len(model.requests) == CONCURRENT_RUNS
 
 
+def test_host_request_debug_hides_key():
+    """The text forms of a host header never show a credential value.
+
+    Input: an `authorization` header, a header the host marked sensitive and
+    a `content-type` header. Output: `repr` and `str` of each, and of the
+    list, hide both secrets and keep `application/json`.
+    """
+    headers = [
+        troupekit.HostHeader("Authorization", f"Bearer {SECRET}"),
+        troupekit.HostHeader("x-trace", "sk-flagged-secret", sensitive=True),
+        troupekit.HostHeader("content-type", "application/json"),
+    ]
+    texts = [repr(headers), str(headers[0]), repr(headers[1]), str(headers[1])]
+    for text in texts:
+        assert SECRET not in text, text
+        assert "sk-flagged-secret" not in text, text
+    assert "application/json" in texts[0]
+    assert headers[1].sensitive is True
+    assert headers[2].sensitive is False
+
+
 def test_every_case_is_implemented():
     """Every contract case name has a test in this runner.
 

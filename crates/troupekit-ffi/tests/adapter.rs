@@ -1,5 +1,5 @@
 use std::path::Path;
-use troupekit_ffi::{ErrorCode, TroupekitError};
+use troupekit_ffi::{ErrorCode, HostHeader, HostHttpRequest, TroupekitError};
 use troupekit_ffi_core as neutral;
 
 const RENAMES: &[(&str, &str)] = &[
@@ -147,4 +147,48 @@ fn renamed(name: &str) -> &str {
         .iter()
         .find(|(from, _)| *from == name)
         .map_or(name, |(_, to)| to)
+}
+
+/// The text forms Swift and Kotlin print for a request never show the key.
+/// Input: a request with an `authorization` and a `content-type` header.
+/// Output: passes when `Debug` and `Display` hide the key and keep the rest.
+#[test]
+fn host_request_text_hides_key() {
+    let headers = vec![
+        HostHeader {
+            name: "Authorization".to_owned(),
+            value: "Bearer sk-contract-secret".to_owned(),
+            sensitive: false,
+        },
+        HostHeader {
+            name: "x-trace".to_owned(),
+            value: "sk-flagged-secret".to_owned(),
+            sensitive: true,
+        },
+        HostHeader {
+            name: "content-type".to_owned(),
+            value: "application/json".to_owned(),
+            sensitive: false,
+        },
+    ];
+    let request = HostHttpRequest {
+        method: "POST".to_owned(),
+        url: "https://api.stub.test/v1/chat/completions".to_owned(),
+        headers: headers.clone(),
+        body: Vec::new(),
+    };
+    let texts = [
+        format!("{request:?}"),
+        format!("{request}"),
+        format!("{:?}", headers[0]),
+        format!("{}", headers[1]),
+    ];
+    for text in &texts {
+        assert!(!text.contains("sk-contract-secret"), "{text}");
+        assert!(!text.contains("sk-flagged-secret"), "{text}");
+    }
+    assert!(texts[0].contains("application/json"), "{}", texts[0]);
+    assert!(texts[1].contains("application/json"), "{}", texts[1]);
+    let flagged = neutral::HostHeader::from(headers[1].clone());
+    assert!(flagged.sensitive);
 }

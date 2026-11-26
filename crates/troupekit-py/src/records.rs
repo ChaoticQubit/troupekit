@@ -413,19 +413,37 @@ impl From<HostReply> for neutral::HostReply {
 
 /// One HTTP header, mirrored from `HostHeader`.
 /// Used in both directions: request headers out, reply headers back.
-/// Names and values are passed through unchanged.
+/// `sensitive` marks a credential; `repr` and `str` show it as `[redacted]`.
 #[pyclass(frozen, get_all, from_py_object, module = "troupekit")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HostHeader {
     pub name: String,
     pub value: String,
+    pub sensitive: bool,
 }
 
 #[pymethods]
 impl HostHeader {
     #[new]
-    fn new(name: String, value: String) -> Self {
-        HostHeader { name, value }
+    #[pyo3(signature = (name, value, sensitive = false))]
+    fn new(name: String, value: String, sensitive: bool) -> Self {
+        HostHeader {
+            name,
+            value,
+            sensitive,
+        }
+    }
+
+    /// The neutral layer's redacting text of this header.
+    /// Input: none. Output: the text; a credential value is `[redacted]`.
+    fn __repr__(&self) -> String {
+        format!("{:?}", neutral::HostHeader::from(self.clone()))
+    }
+
+    /// Same text as `repr`, so `print(header)` never shows the key.
+    /// Input: none. Output: the redacted text.
+    fn __str__(&self) -> String {
+        self.__repr__()
     }
 }
 
@@ -434,21 +452,28 @@ impl From<neutral::HostHeader> for HostHeader {
         HostHeader {
             name: value.name,
             value: value.value,
+            sensitive: value.sensitive,
         }
     }
 }
 
 impl From<HostHeader> for neutral::HostHeader {
+    /// Builds the neutral header; a header the host marked sensitive stays
+    /// sensitive, and the neutral layer also flags credential header names.
+    /// Input: the mirror. Output: the neutral header.
     fn from(value: HostHeader) -> Self {
-        neutral::HostHeader::new(value.name, value.value)
+        let mut header = neutral::HostHeader::new(value.name, value.value);
+        header.sensitive = header.sensitive || value.sensitive;
+        header
     }
 }
 
 /// An HTTP request for a host transport, mirrored from `HostHttpRequest`.
 /// The neutral layer has already checked the URL against the vendor.
 /// Passed to a Python `HostTransport.send`; `body` is `bytes`.
+/// `repr` and `str` redact credential headers.
 #[pyclass(frozen, get_all, module = "troupekit")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HostHttpRequest {
     pub method: String,
     pub url: String,
@@ -464,6 +489,27 @@ impl From<neutral::HostHttpRequest> for HostHttpRequest {
             headers: value.headers.into_iter().map(Into::into).collect(),
             body: value.body,
         }
+    }
+}
+
+#[pymethods]
+impl HostHttpRequest {
+    /// The neutral layer's redacting text of this request.
+    /// Input: none. Output: the text; credential header values are
+    /// `[redacted]`.
+    fn __repr__(&self) -> String {
+        let mut request = neutral::HostHttpRequest::default();
+        request.method = self.method.clone();
+        request.url = self.url.clone();
+        request.headers = self.headers.iter().cloned().map(Into::into).collect();
+        request.body = self.body.clone();
+        format!("{request:?}")
+    }
+
+    /// Same text as `repr`, so `print(request)` never shows the key.
+    /// Input: none. Output: the redacted text.
+    fn __str__(&self) -> String {
+        self.__repr__()
     }
 }
 

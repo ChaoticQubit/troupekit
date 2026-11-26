@@ -700,6 +700,27 @@ abstract class ContractCases {
     }
 
     @Test
+    fun test_host_request_debug_hides_key() {
+        val headers = listOf(
+            HostHeader(name = "Authorization", value = "Bearer $SECRET", sensitive = false),
+            HostHeader(name = "x-trace", value = "sk-flagged-secret", sensitive = true),
+            HostHeader(name = "content-type", value = "application/json", sensitive = false),
+        )
+        val request = HostHttpRequest(
+            method = "POST",
+            url = "https://api.stub.test/v1/chat/completions",
+            headers = headers,
+            body = ByteArray(0),
+        )
+        val texts = listOf(request.toString(), "$request", headers[0].toString(), "${headers[1]}")
+        for (text in texts) {
+            assertFalse(text, text.contains(SECRET))
+            assertFalse(text, text.contains("sk-flagged-secret"))
+        }
+        assertTrue(texts[0], texts[0].contains("application/json"))
+    }
+
+    @Test
     fun everyCaseIsImplemented() {
         val names = shared("cases.txt").lines().map { it.trim() }.filter { it.isNotEmpty() }
         assertTrue(names.isNotEmpty())

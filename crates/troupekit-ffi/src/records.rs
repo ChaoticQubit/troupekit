@@ -1,3 +1,4 @@
+use std::fmt;
 use troupekit_ffi_core as neutral;
 
 const UNMIRRORED: &str = "troupekit-ffi has no mirror for a new neutral variant";
@@ -307,11 +308,14 @@ impl From<HostReply> for neutral::HostReply {
 
 /// One HTTP header, mirrored from `HostHeader`.
 /// Used in both directions: request headers out, reply headers back.
-/// Names and values are passed through unchanged.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+/// `sensitive` marks a credential; every text form shows it as `[redacted]`.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+#[uniffi::export(Debug, Display)]
 pub struct HostHeader {
     pub name: String,
     pub value: String,
+    #[uniffi(default = false)]
+    pub sensitive: bool,
 }
 
 impl From<neutral::HostHeader> for HostHeader {
@@ -319,20 +323,44 @@ impl From<neutral::HostHeader> for HostHeader {
         HostHeader {
             name: value.name,
             value: value.value,
+            sensitive: value.sensitive,
         }
     }
 }
 
 impl From<HostHeader> for neutral::HostHeader {
+    /// Builds the neutral header; a header the host marked sensitive stays
+    /// sensitive, and the neutral layer also flags credential header names.
+    /// Input: the mirror. Output: the neutral header.
     fn from(value: HostHeader) -> Self {
-        neutral::HostHeader::new(value.name, value.value)
+        let mut header = neutral::HostHeader::new(value.name, value.value);
+        header.sensitive = header.sensitive || value.sensitive;
+        header
+    }
+}
+
+impl fmt::Debug for HostHeader {
+    /// Writes the neutral layer's redacting form, so Kotlin `toString` and
+    /// Swift `debugDescription` never show a credential value.
+    /// Input: the formatter. Output: the neutral `Debug` text.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&neutral::HostHeader::from(self.clone()), f)
+    }
+}
+
+impl fmt::Display for HostHeader {
+    /// Same text as `Debug`; Swift `description` and Kotlin `toString`
+    /// read this one. Input: the formatter. Output: the redacted text.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
     }
 }
 
 /// An HTTP request for a host transport, mirrored from `HostHttpRequest`.
 /// The neutral layer has already checked the URL against the vendor.
-/// Input to the foreign `HostTransport::send`.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+/// Input to the foreign `HostTransport::send`; its text forms redact the key.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+#[uniffi::export(Debug, Display)]
 pub struct HostHttpRequest {
     pub method: String,
     pub url: String,
@@ -348,6 +376,38 @@ impl From<neutral::HostHttpRequest> for HostHttpRequest {
             headers: value.headers.into_iter().map(Into::into).collect(),
             body: value.body,
         }
+    }
+}
+
+impl From<HostHttpRequest> for neutral::HostHttpRequest {
+    /// Builds the neutral request, keeping every header's `sensitive` flag.
+    /// Input: the mirror. Output: the neutral request, used for its
+    /// redacting `Debug`.
+    fn from(value: HostHttpRequest) -> Self {
+        let mut request = neutral::HostHttpRequest::default();
+        request.method = value.method;
+        request.url = value.url;
+        request.headers = value.headers.into_iter().map(Into::into).collect();
+        request.body = value.body;
+        request
+    }
+}
+
+impl fmt::Debug for HostHttpRequest {
+    /// Writes the neutral layer's form, with credential headers redacted.
+    /// Input: the formatter. Output: the neutral `Debug` text.
+    /// Swift and Kotlin print this for the request.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&neutral::HostHttpRequest::from(self.clone()), f)
+    }
+}
+
+impl fmt::Display for HostHttpRequest {
+    /// Same text as `Debug`, for Swift `description` and Kotlin `toString`.
+    /// Input: the formatter. Output: the redacted text.
+    /// Never shows a credential header value.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
     }
 }
 
