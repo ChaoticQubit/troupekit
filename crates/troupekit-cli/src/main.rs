@@ -94,8 +94,9 @@ fn embedder(call: &IngestArgs) -> Result<Box<dyn Embedder>, String> {
     }
 }
 
-/// Runs one ingest: builds the embedder before touching the store,
-/// opens the store and the named index, then ingests the folder.
+/// Runs one ingest: builds the embedder and checks the chunk settings
+/// before touching the store, opens the store and the named index, then
+/// ingests the folder.
 /// Output: the report, or a message for a run that could not start.
 async fn run(call: &IngestArgs) -> Result<IngestReport, String> {
     let embedder = embedder(call)?;
@@ -108,9 +109,6 @@ async fn run(call: &IngestArgs) -> Result<IngestReport, String> {
         Quant::F16 => Quantization::F16,
         Quant::I8 => Quantization::I8,
     };
-    let store = SqliteStore::open(&call.db).await.map_err(|e| format!("cannot open {}: {e}", call.db.display()))?;
-    let settings = VectorSettings::new(embedder.dims()).with_kind(kind).with_quantization(quantization);
-    let vectors = store.vectors(&call.index, settings).await.map_err(|e| format!("index {}: {e}", call.index))?;
     let mut ingest = IngestSettings::default().with_scope(call.scope.clone());
     if call.chunk_tokens.is_some() || call.overlap_tokens.is_some() {
         let base = ingest.chunk();
@@ -120,6 +118,9 @@ async fn run(call: &IngestArgs) -> Result<IngestReport, String> {
         }
         ingest = ingest.with_chunk(chunk);
     }
+    let store = SqliteStore::open(&call.db).await.map_err(|e| format!("cannot open {}: {e}", call.db.display()))?;
+    let settings = VectorSettings::new(embedder.dims()).with_kind(kind).with_quantization(quantization);
+    let vectors = store.vectors(&call.index, settings).await.map_err(|e| format!("index {}: {e}", call.index))?;
     let report = ingest_dir(&vectors, embedder.as_ref(), &call.dir, &ingest).await.map_err(|e| format!("ingest of {}: {e}", call.dir.display()))?;
     Ok(report)
 }

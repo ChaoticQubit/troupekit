@@ -220,6 +220,52 @@ async fn deleted_file_leaves_the_index() {
 }
 
 #[tokio::test]
+async fn empty_folder_does_not_wipe_the_scope() {
+    let k = kit().await;
+    for name in ["a.md", "b.md", "c.md", "d.md"] {
+        k.write(name, &format!("text of {name}"));
+    }
+    let embedder = Counting::new();
+    ingest_dir(&k.vectors, &embedder, &k.folder(), &IngestSettings::default()).await.unwrap();
+    for name in ["a.md", "b.md", "c.md", "d.md"] {
+        std::fs::remove_file(k.folder().join(name)).unwrap();
+    }
+    k.write("notes.pdf", "%PDF");
+    let err = ingest_dir(&k.vectors, &embedder, &k.folder(), &IngestSettings::default()).await.unwrap_err();
+    assert!(matches!(&err, ContextError::Invalid(m) if m.contains("no supported files") && m.contains("4 sources")), "{err:?}");
+    assert_eq!(k.vectors.sources("docs").await.unwrap().len(), 4);
+    let all = IngestSettings::default().with_allow_remove_all(true);
+    assert_eq!(ingest_dir(&k.vectors, &embedder, &k.folder(), &all).await.unwrap().removed, 4);
+    assert!(k.vectors.sources("docs").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn removing_more_than_the_share_is_refused_with_the_count() {
+    let k = kit().await;
+    for name in ["a.md", "b.md", "c.md", "d.md"] {
+        k.write(name, &format!("text of {name}"));
+    }
+    let embedder = Counting::new();
+    ingest_dir(&k.vectors, &embedder, &k.folder(), &IngestSettings::default()).await.unwrap();
+    for name in ["a.md", "b.md", "c.md"] {
+        std::fs::remove_file(k.folder().join(name)).unwrap();
+    }
+    k.write("new.md", "a new file");
+    let calls = embedder.calls();
+    let err = ingest_dir(&k.vectors, &embedder, &k.folder(), &IngestSettings::default()).await.unwrap_err();
+    assert!(matches!(&err, ContextError::Invalid(m) if m.contains("3 of 4") && m.contains("50%")), "{err:?}");
+    assert_eq!(embedder.calls(), calls, "a refused run embeds nothing");
+    assert_eq!(k.vectors.sources("docs").await.unwrap(), ["a.md", "b.md", "c.md", "d.md"]);
+    let wider = IngestSettings::default().with_max_remove_share(80);
+    let report = ingest_dir(&k.vectors, &embedder, &k.folder(), &wider).await.unwrap();
+    assert_eq!((report.removed, report.added), (3, 1));
+    assert!(matches!(
+        ingest_dir(&k.vectors, &embedder, &k.folder(), &IngestSettings::default().with_max_remove_share(101)).await,
+        Err(ContextError::Invalid(_))
+    ));
+}
+
+#[tokio::test]
 async fn walk_cap_error_writes_nothing() {
     let k = kit().await;
     k.write("a.txt", "one");
@@ -242,4 +288,6 @@ fn defaults_are_the_safe_values() {
     assert_eq!(s.chunk(), ChunkConfig { max_tokens: 200, overlap_tokens: 20 });
     assert_eq!(s.load(), &LoadSettings::default());
     assert_eq!(s.origin(), Origin::External);
+    assert!(!s.allow_remove_all());
+    assert_eq!(s.max_remove_share(), 50);
 }
