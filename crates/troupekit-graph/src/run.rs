@@ -497,6 +497,9 @@ impl GraphRun {
                 run.scratch.insert(key.clone(), v);
             }
         }
+        if flow.budget_split() != BudgetSplit::default() {
+            run.split = Some(flow.budget_split());
+        }
         if !flow.is_v1() {
             run.format = GRAPH_FORMAT_FLOW;
             run.flow = Some(Box::new(flow));

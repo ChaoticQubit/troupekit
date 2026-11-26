@@ -767,6 +767,7 @@ mod untracked {
         }
         let io = io(&gates);
         let mut run = start(&text, &io).await.unwrap();
+        store.save(run.checkpoint()).await.unwrap();
         for _ in 0..10 {
             let out = run.step_durable(&io, &store).await.unwrap();
             store.save(run.checkpoint()).await.unwrap();

@@ -262,7 +262,9 @@ async fn lineage_walks_parents_to_the_root() {
     let io = io(&gates);
     let store = InMemCheckpoints::default();
     let (root, cps, _) = history(&io).await;
-    store.save(root.checkpoint()).await.unwrap();
+    for cp in &cps {
+        store.save(cp.clone()).await.unwrap();
+    }
     let a = GraphRun::fork(after_t1(&cps)).unwrap();
     store.save(a.checkpoint()).await.unwrap();
     let b = GraphRun::fork(&a.checkpoint()).unwrap();
