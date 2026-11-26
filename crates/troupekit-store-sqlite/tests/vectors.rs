@@ -387,7 +387,7 @@ async fn remove_source_drops_rows_keywords_index_and_status() {
     let other = SqliteStore::open(&t.path).await.unwrap();
     assert_eq!(docs(&other).await.len().await.unwrap(), 1);
     assert_eq!(vectors.remove_source("docs", "missing.md").await.unwrap(), 0);
-    store_error(vectors.remove_source(" ", "a.md").await, "scope");
+    store_error(vectors.remove_source("", "a.md").await, "scope");
 }
 
 #[tokio::test]
@@ -614,7 +614,8 @@ async fn every_bound_is_enforced() {
     store_error(v.search(&[1.0; DIMS], 1_001, &filter(&[])).await, "k");
     store_error(v.search(&[1.0; DIMS], 1, &filter(&[("a", "1"), ("b", "2")])).await, "max_meta_pairs");
     store_error(v.replace_source("", "a.md", vec![], "h").await, "scope");
-    store_error(v.replace_source("d", "a.md", vec![], "").await, "content_hash");
+    store_error(v.replace_source("d", "a", vec![], "").await, "content_hash");
+    store_error(v.replace_source("d", "a.md", vec![], "h").await, "source must be 1 to 3 bytes");
     assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk"), 0);
 }
 
