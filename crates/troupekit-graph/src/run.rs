@@ -1290,12 +1290,13 @@ impl GraphRun {
                 (Finished::Agent { run: kept, .. }, At::Agent { run: current, .. }) => {
                     let (k, c) = (kept.checkpoint(), current.checkpoint());
                     AgentRun::from_checkpoint(&k).map_err(|e| bad(e.to_string()))?;
+                    let caps = |cp: &Checkpoint| serde_json::from_value::<Limits>(cp.state["limits"].clone()).ok();
                     let same = k.run_id == c.run_id
                         && k.step >= c.step
                         && k.state["spec"] == c.state["spec"]
-                        && k.state["limits"] == c.state["limits"];
+                        && matches!((caps(&k), caps(&c)), (Some(kl), Some(cl)) if limits_within(&kl, &cl));
                     if !same {
-                        return Err(bad("it is not this branch's agent run (run id, step, persona or limits differ)".into()));
+                        return Err(bad("it is not this branch's agent run (run id, step or persona differ, or its limits exceed the branch's)".into()));
                     }
                 }
                 _ => return Err(bad(format!("its kind does not fit the work at `{node}`"))),
@@ -2557,9 +2558,46 @@ fn ready_map(branches: &[Branch]) -> Option<(String, usize)> {
         .map(|(map, first, _)| (map.to_string(), first))
 }
 
+/// Tells whether `kept` caps spending no more than `current`: each cap
+/// `current` sets is also set in `kept`, no larger, and a period cap
+/// keeps its key. A run's own work under a raised budget still fits.
+/// Returns true when `kept` fits inside `current`.
+fn limits_within(kept: &Limits, current: &Limits) -> bool {
+    let cap = |k: Option<u64>, c: Option<u64>| c.is_none_or(|c| k.is_some_and(|k| k <= c));
+    let period = |k: &Option<troupekit_agent::budget::PeriodLimit>, c: &Option<troupekit_agent::budget::PeriodLimit>| {
+        c.as_ref().is_none_or(|c| k.as_ref().is_some_and(|k| k.key == c.key && k.max_usd_micros <= c.max_usd_micros))
+    };
+    cap(kept.call, current.call)
+        && cap(kept.run, current.run)
+        && period(&kept.scope, &current.scope)
+        && period(&kept.user, &current.user)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kept_limits_fit_when_no_cap_is_larger() {
+        use troupekit_agent::budget::PeriodLimit;
+        let l = |run: Option<u64>, scope: Option<u64>| Limits {
+            call: None,
+            run,
+            scope: scope.map(|m| PeriodLimit { key: "s".into(), max_usd_micros: m }),
+            user: None,
+        };
+        assert!(limits_within(&l(Some(5), None), &l(Some(9), None)), "a raise keeps the old work");
+        assert!(limits_within(&l(Some(9), None), &l(Some(9), None)));
+        assert!(limits_within(&l(Some(5), None), &l(None, None)), "no cap now fits any");
+        assert!(!limits_within(&l(Some(10), None), &l(Some(9), None)), "a larger cap is refused");
+        assert!(!limits_within(&l(None, None), &l(Some(9), None)), "an uncapped run is refused");
+        assert!(limits_within(&l(None, Some(3)), &l(None, Some(4))));
+        assert!(!limits_within(&l(None, Some(5)), &l(None, Some(4))));
+        assert!(!limits_within(&l(None, None), &l(None, Some(4))));
+        let mut other = l(None, Some(3));
+        other.scope.as_mut().unwrap().key = "t".into();
+        assert!(!limits_within(&other, &l(None, Some(4))), "another period key is refused");
+    }
 
     fn item(map: &str, index: usize, at: At) -> Branch {
         Branch {
