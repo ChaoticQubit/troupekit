@@ -1,0 +1,7 @@
+name = "greeter"
+display_name = "Greeter"
+role = "Greets the user"
+goal = "Answer with one short greeting"
+instructions = "Reply with a short greeting."
+model = "stub/stub-model"
+max_turns = 2
