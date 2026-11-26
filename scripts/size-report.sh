@@ -11,7 +11,7 @@ for arg in "$@"; do
   esac
 done
 
-rows="a: b:--no-default-features,--features,sqlite c:--no-default-features,--features,sqlite,llama"
+rows="a: b:--no-default-features+--features+sqlite c:--no-default-features+--features+sqlite,llama"
 targets="aarch64-apple-ios aarch64-linux-android"
 
 artifact() {
@@ -39,7 +39,7 @@ echo "|---|---|---|---|---|"
 for target in $targets; do
   for row in $rows; do
     name="${row%%:*}"
-    flags="$(echo "${row#*:}" | tr ',' ' ')"
+    flags="$(echo "${row#*:}" | tr '+' ' ')"
     dir="target/size/$target-$name"
     cmd="cargo build -p troupekit-ffi --release --locked --target $target $flags"
     builds=$((builds + 1))
@@ -56,7 +56,7 @@ for target in $targets; do
       exit 2
     fi
     start="$(date +%s)"
-    CARGO_TARGET_DIR="$dir" $cmd
+    RUSTC_WRAPPER= CARGO_TARGET_DIR="$dir" $cmd
     end="$(date +%s)"
     file="$dir/$target/release/$(artifact "$target")"
     cp "$file" "$file.stripped"

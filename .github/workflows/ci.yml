@@ -249,7 +249,9 @@ jobs:
         shell: bash
         run: |
           for crate in troupekit troupekit-kit troupekit-ffi-core; do
-            if cargo tree -p "$crate" -e normal --locked | grep -E 'uniffi|pyo3'; then
+            tree="$(cargo tree -p "$crate" -e normal --locked)"
+            test -n "$tree"
+            if printf '%s\n' "$tree" | grep -E 'uniffi|pyo3'; then
               echo "$crate depends on a binding crate"
               exit 1
             fi
@@ -301,7 +303,7 @@ jobs:
         shell: bash
         run: |
           "${{ matrix.python }}" -m venv e2e-venv
-          if [ -x e2e-venv/bin/python ]; then py=e2e-venv/bin/python; else py=e2e-venv/Scripts/python.exe; fi
+          if [ -x e2e-venv/bin/python ]; then py="$PWD/e2e-venv/bin/python"; else py="$PWD/e2e-venv/Scripts/python.exe"; fi
           "$py" -m pip install --quiet dist/troupekit-*-abi3-*.whl "pytest==9.2.0"
           cd "$RUNNER_TEMP"
           "$py" -m pytest "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_smoke.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_e2e_toml.py"

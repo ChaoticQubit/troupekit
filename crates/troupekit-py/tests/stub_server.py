@@ -57,11 +57,17 @@ def make_handler(state):
         """
 
         def log_message(self, format, *args):
-            """Keeps the test output quiet. Input: log args. Output: none."""
+            """Drops the per-request access log so test output stays readable.
+
+            Input: the log format and args. Output: none.
+            """
             return
 
         def do_POST(self):
-            """Handles one chat request. Input: the request. Output: the reply."""
+            """Handles one chat request on CHAT_PATH, recording its body first.
+
+            Input: the request. Output: a JSON or SSE reply, or a 404 or 413 error.
+            """
             if self.path != CHAT_PATH:
                 self.send_error(404)
                 return
@@ -77,7 +83,10 @@ def make_handler(state):
                 self.reply_json()
 
         def reply_json(self):
-            """Sends the whole answer as one completion. Input: none. Output: none."""
+            """Sends the whole answer as one non-streaming chat completion.
+
+            Input: none. Output: none; writes the JSON body with its length.
+            """
             text = "".join(state.chunks)
             payload = {
                 "choices": [
@@ -114,7 +123,10 @@ def make_handler(state):
             self.wfile.flush()
 
         def send_event(self, payload):
-            """Writes one SSE `data:` line. Input: a JSON-able dict. Output: none."""
+            """Writes one SSE `data:` event and flushes it to the client.
+
+            Input: a JSON-able dict. Output: none.
+            """
             self.wfile.write(b"data: " + json.dumps(payload).encode() + b"\n\n")
             self.wfile.flush()
 
