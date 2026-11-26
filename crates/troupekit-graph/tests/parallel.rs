@@ -1260,6 +1260,87 @@ mod split {
         );
     }
 
+    struct Kids<'a> {
+        inner: &'a SimpleGraphIo,
+    }
+
+    #[async_trait::async_trait]
+    impl troupekit_graph::GraphIo for Kids<'_> {
+        fn agent(&self) -> &dyn troupekit_agent::AgentIo {
+            self.inner.agent()
+        }
+
+        async fn persona(
+            &self,
+            name: &str,
+        ) -> Result<troupekit_agent::Persona, troupekit_agent::AgentError> {
+            self.inner.persona(name).await
+        }
+
+        fn conditions(&self) -> &troupekit_graph::Conditions {
+            self.inner.conditions()
+        }
+
+        async fn flow(&self, name: &str) -> Result<Flow, troupekit_graph::GraphError> {
+            assert_eq!(name, "kid");
+            Flow::parse("test/kid.toml", KID)
+                .map_err(|e| troupekit_graph::GraphError::Setup(e.to_string()))
+        }
+    }
+
+    const KID: &str = "name = 'kid'\nstart = 'w'\n[state]\nb = 'int?'\n[[nodes]]\nid = 'w'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Go.'\nfields = { n = 'int' }\nsets = { n = 'b' }\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'w'\nto = 'e'\n";
+
+    async fn run_kid(limits: Limits) -> (Rig, GraphRun, GraphOutcome) {
+        let text = fan(&[("a", "string"), ("b", "int")], "").replace(
+            "[[nodes]]\nid = 'b'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Go.'\nwrites = 'b'\n",
+            "[[nodes]]\nid = 'b'\nkind = 'flow'\nflow = 'kid'\nreturns = 'b'\nwrites = 'b'\n",
+        );
+        assert!(text.contains("kind = 'flow'"), "b is a subflow");
+        let rig = rig();
+        let io = Kids { inner: &rig.io };
+        let flow = Flow::parse("test/fan.toml", &text).unwrap();
+        let mut run = GraphRun::start(flow, Map::new(), limits, &io)
+            .await
+            .unwrap();
+        let mut out = GraphOutcome::Continue;
+        for _ in 0..40 {
+            out = run.step(&io).await;
+            if out != GraphOutcome::Continue {
+                break;
+            }
+        }
+        (rig, run, out)
+    }
+
+    #[tokio::test]
+    async fn freed_reservation_tops_up_a_budget_paused_subflow() {
+        let (probe, _, out) = run_kid(Limits::default()).await;
+        assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
+        let seen = probe.estimates();
+        assert_eq!(
+            seen.len(),
+            3,
+            "a once, the child's agent once and once after the repair"
+        );
+        let total: u64 = seen.iter().sum();
+        let budget = total + total / 16;
+        assert!(
+            seen.iter().copied().max().unwrap() <= budget / 2,
+            "each branch can afford its first call"
+        );
+        let (rig, run, out) = run_kid(cap(budget)).await;
+        let GraphOutcome::Done(state) = out else {
+            panic!("a's unused share lets the subflow finish: {out:?}");
+        };
+        assert_eq!(state["b"], json!(7));
+        assert_eq!(rig.calls(), 3);
+        assert!(
+            run.usage().cost_usd_micros <= budget,
+            "spent {} of {budget}",
+            run.usage().cost_usd_micros
+        );
+    }
+
     #[tokio::test]
     async fn shared_split_keeps_v1_limits() {
         let agents = [("a", "string"), ("b", "string"), ("c", "string")];

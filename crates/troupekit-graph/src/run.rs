@@ -202,6 +202,10 @@ impl Branch {
                 RunState::Paused { reason, .. } => Some(reason),
                 _ => None,
             },
+            At::Flow { run } => match &run.status {
+                GraphStatus::WaitingBudget { reason } => Some(reason),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1017,6 +1021,11 @@ impl GraphRun {
             if b.budget_paused().is_none() {
                 continue;
             }
+            if let At::Flow { run } = &mut b.at {
+                let own = run.usage().cost_usd_micros;
+                run.raise_budget(node_limits(&base, spent - own, None, None))?;
+                continue;
+            }
             let At::Agent {
                 run,
                 call_cap,
@@ -1024,7 +1033,7 @@ impl GraphRun {
                 ..
             } = &mut b.at
             else {
-                unreachable!("budget pauses happen in agent branches");
+                unreachable!("budget pauses happen in agent and subflow branches");
             };
             let own = run.usage().cost_usd_micros;
             run.resume(node_limits(&base, spent - own, *call_cap, *run_cap))?;
@@ -1053,7 +1062,9 @@ impl GraphRun {
                 At::Agent { run, share: Some(s), .. } if !(skip_paused && b.budget_paused().is_some()) => {
                     s.saturating_sub(run.usage().cost_usd_micros)
                 }
-                At::Flow { run } => run.limits.run.map_or(0, |s| s.saturating_sub(run.usage().cost_usd_micros)),
+                At::Flow { run } if !(skip_paused && b.budget_paused().is_some()) => {
+                    run.limits.run.map_or(0, |s| s.saturating_sub(run.usage().cost_usd_micros))
+                }
                 _ => 0,
             })
             .sum()
@@ -1095,8 +1106,22 @@ impl GraphRun {
         let base = self.limits.clone();
         let mut granted = 0u64;
         for i in paused {
+            if let At::Flow { run } = &mut self.branches[i].at {
+                let used = run.usage().cost_usd_micros;
+                let grant = used.saturating_add(each);
+                let old = run.limits.run.unwrap_or(0);
+                granted = granted.saturating_add(each);
+                if raised || grant > old {
+                    let limits = Limits {
+                        run: Some(grant),
+                        ..base.clone()
+                    };
+                    run.raise_budget(limits).map_err(|e| e.to_string())?;
+                }
+                continue;
+            }
             let At::Agent { run, call_cap, run_cap, share } = &mut self.branches[i].at else {
-                unreachable!("budget pauses happen in agent branches");
+                unreachable!("budget pauses happen in agent and subflow branches");
             };
             let grant = run.usage().cost_usd_micros.saturating_add(each);
             let grant = run_cap.map_or(grant, |c| c.min(grant));
