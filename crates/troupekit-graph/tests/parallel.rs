@@ -355,13 +355,14 @@ async fn map_items_are_durable_one_by_one() {
     let mut run = GraphRun::restore(&store, id).await.unwrap();
     gates.open("w/b");
     gates.open("w/c");
-    let out = loop {
-        let out = run.step_durable(&io, &store).await.unwrap();
+    let mut out = GraphOutcome::Continue;
+    for _ in 0..40 {
+        out = run.step_durable(&io, &store).await.unwrap();
         store.save(run.checkpoint()).await.unwrap();
         if out != GraphOutcome::Continue {
-            break out;
+            break;
         }
-    };
+    }
     let GraphOutcome::Done(state) = out else {
         panic!("{out:?}");
     };

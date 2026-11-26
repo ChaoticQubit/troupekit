@@ -700,15 +700,11 @@ impl GraphRun {
             .expect("a step without a store or branch writes never errors")
     }
 
-    /// Runs one step as `step` does, and keeps each finished branch's
-    /// result in `store` as soon as that branch finishes, before its
-    /// siblings do. On a run from `restore`, branches with a kept result
-    /// are applied instead of run again, so they keep their single call.
-    /// With a store that keeps whole steps only it behaves exactly as `step`.
-    /// On `Err` (a store error or a branch write that does not match the
-    /// run) the caller must not checkpoint this run object: it reloads
-    /// with `restore`, never `from_checkpoint`, which would re-run finished
-    /// branches and conflict with their kept writes.
+    /// Runs one step as `step` does, keeping each finished branch's result
+    /// in `store` before its siblings finish; on a run from `restore`, kept
+    /// results apply instead of running again. On `Err` (store error or a
+    /// write that does not fit) the caller drops this run and reloads with
+    /// `restore`, never checkpointing it or using `from_checkpoint`.
     pub async fn step_durable(
         &mut self,
         io: &dyn GraphIo,
