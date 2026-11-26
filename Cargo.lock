@@ -2890,6 +2890,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "troupekit-context",
  "troupekit-core",
  "troupekit-providers",

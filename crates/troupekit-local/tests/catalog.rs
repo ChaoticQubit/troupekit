@@ -88,3 +88,72 @@ fn defaults_are_the_safe_values() {
     assert!(!s.embeddings());
     assert_eq!(s.licence(), "");
 }
+
+const ROW: &str = r#"
+[[model]]
+id = "m"
+url = "https://example.org/m.gguf"
+sha256 = "741ad12b64088fedc17c33aacb22e48be1972ef36a39f03666dd68bd15614fb9"
+bytes = 10
+ram_bytes = 20
+context = 2048
+class = "pi"
+licence = "mit"
+embeddings = true
+recommended = true
+"#;
+
+#[test]
+fn load_reads_every_field() {
+    let catalog = LocalCatalog::load(ROW).expect("loads");
+    let m = catalog.get("m").expect("row");
+    assert_eq!(m.bytes(), 10);
+    assert_eq!(m.ram_bytes(), 20);
+    assert_eq!(m.context(), 2_048);
+    assert_eq!(m.class(), DeviceClass::Pi);
+    assert_eq!(m.licence(), "mit");
+    assert!(m.embeddings() && m.recommended());
+}
+
+#[test]
+fn load_applies_the_row_checks() {
+    let http = ROW.replace("https://", "http://");
+    assert!(matches!(
+        LocalCatalog::load(&http),
+        Err(LocalError::Catalog(_))
+    ));
+    let bad_hash = ROW.replace("741ad12b", "741AD12B");
+    assert!(matches!(
+        LocalCatalog::load(&bad_hash),
+        Err(LocalError::Catalog(_))
+    ));
+    let unknown = ROW.replace("licence = \"mit\"", "licence = \"mit\"\nmirror = \"x\"");
+    assert!(matches!(
+        LocalCatalog::load(&unknown),
+        Err(LocalError::Catalog(_))
+    ));
+    let missing = ROW.replace("bytes = 10\n", "");
+    assert!(matches!(
+        LocalCatalog::load(&missing),
+        Err(LocalError::Catalog(_))
+    ));
+    let big = format!("{ROW}{}", " ".repeat(LocalCatalog::MAX_BYTES));
+    assert!(matches!(
+        LocalCatalog::load(&big),
+        Err(LocalError::Catalog(_))
+    ));
+}
+
+#[test]
+fn builtin_catalog_holds_the_test_model() {
+    let catalog = LocalCatalog::builtin();
+    let m = catalog
+        .get("smollm2-135m-instruct-q2k")
+        .expect("test model row");
+    assert_eq!(m.bytes(), 88_202_080);
+    assert_eq!(
+        m.sha256(),
+        "741ad12b64088fedc17c33aacb22e48be1972ef36a39f03666dd68bd15614fb9"
+    );
+    assert_eq!(m.licence(), "apache-2.0");
+}

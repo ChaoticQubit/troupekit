@@ -1,5 +1,9 @@
 use crate::error::LocalError;
+use serde::Deserialize;
 use std::collections::HashSet;
+use std::sync::OnceLock;
+
+const BUILTIN: &str = include_str!("../../../catalog/local.toml");
 
 const ID_MAX_BYTES: usize = 64;
 const URL_MAX_BYTES: usize = 2_048;
@@ -9,7 +13,8 @@ const ROWS_MAX: usize = 256;
 /// computers) or `Desktop`. `pick` filters by it.
 /// Default `Desktop`.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DeviceClass {
     Phone,
     Pi,
@@ -215,7 +220,81 @@ pub struct LocalCatalog {
     rows: Vec<LocalSpec>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct File {
+    #[serde(default)]
+    model: Vec<Row>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Row {
+    id: String,
+    url: String,
+    sha256: String,
+    bytes: u64,
+    ram_bytes: Option<u64>,
+    context: Option<usize>,
+    class: Option<DeviceClass>,
+    licence: Option<String>,
+    embeddings: Option<bool>,
+    recommended: Option<bool>,
+}
+
 impl LocalCatalog {
+    /// The largest catalog text `load` accepts, in bytes.
+    /// Setting S34 of the 0.3 plan bounds policy files the same way.
+    /// 64 KiB.
+    pub const MAX_BYTES: usize = 64 * 1024;
+
+    /// Parses catalog TOML: `[[model]]` tables with `id`, `url`,
+    /// `sha256`, `bytes` and optional `ram_bytes`, `context`, `class`,
+    /// `licence`, `embeddings`, `recommended`. Unknown keys are refused.
+    pub fn load(text: &str) -> Result<Self, LocalError> {
+        if text.len() > Self::MAX_BYTES {
+            return Err(LocalError::Catalog(format!(
+                "catalog is {} bytes, limit {}",
+                text.len(),
+                Self::MAX_BYTES
+            )));
+        }
+        let file: File =
+            toml::from_str(text).map_err(|e| LocalError::Catalog(e.message().to_string()))?;
+        let rows = file
+            .model
+            .into_iter()
+            .map(|r| {
+                let mut spec = LocalSpec::new(&r.id, &r.url, &r.sha256, r.bytes)?;
+                if let Some(v) = r.ram_bytes {
+                    spec = spec.with_ram_bytes(v);
+                }
+                if let Some(v) = r.context {
+                    spec = spec.with_context(v);
+                }
+                if let Some(v) = r.class {
+                    spec = spec.with_class(v);
+                }
+                if let Some(v) = r.licence {
+                    spec = spec.with_licence(v);
+                }
+                Ok(spec
+                    .with_embeddings(r.embeddings.unwrap_or(false))
+                    .with_recommended(r.recommended.unwrap_or(false)))
+            })
+            .collect::<Result<Vec<_>, LocalError>>()?;
+        Self::new(rows)
+    }
+
+    /// Returns the catalog shipped with the crate (`catalog/local.toml`),
+    /// parsed once. Input: none.
+    /// Panics only if the shipped file is invalid, which a test guards.
+    pub fn builtin() -> &'static LocalCatalog {
+        static CATALOG: OnceLock<LocalCatalog> = OnceLock::new();
+        CATALOG
+            .get_or_init(|| Self::load(BUILTIN).expect("the shipped catalog/local.toml is valid"))
+    }
+
     /// Builds a catalog from rows.
     /// Input: rows from `LocalSpec::new`. Output: the catalog, or
     /// `Catalog` on a duplicate id, two recommended rows or over 256 rows.
