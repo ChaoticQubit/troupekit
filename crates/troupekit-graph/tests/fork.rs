@@ -346,3 +346,44 @@ async fn fork_rekeys_a_live_agent_run() {
     assert!(matches!(drive(&mut fork, &io).await, GraphOutcome::Done(_)));
     assert_eq!(model.calls(), 1, "only the fork called the model");
 }
+
+const PAY: &str = "name = 'pay'\nstart = 't1'\n[state]\nx = 'string'\nok = 'bool'\ny = 'string'\n[[nodes]]\nid = 't1'\nkind = 'tool'\ntool = 't1'\nwrites = 'x'\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'approval'\nreads = ['x']\nwrites = 'ok'\n[[nodes]]\nid = 't2'\nkind = 'tool'\ntool = 't2'\nreads = ['x']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 't1'\nto = 'h'\n[[edges]]\nfrom = 'h'\nto = 't2'\n[[edges]]\nfrom = 't2'\nto = 'e'\n";
+
+#[tokio::test]
+async fn edit_state_cannot_change_what_a_human_approved() {
+    let gates = GatedTool::new();
+    let io = io(&gates);
+    let flow = Flow::parse("test/pay.toml", PAY).unwrap();
+    let mut run = GraphRun::start(flow, Map::new(), Limits::default(), &io)
+        .await
+        .unwrap();
+    let out = drive(&mut run, &io).await;
+    assert_eq!(out, approval());
+    run.update_state("x", json!("before approval"), None)
+        .expect("a value can change while its approval is still open");
+    assert_eq!(run.step(&io).await, approval(), "the human sees the edited value");
+    run.resume("h", json!(true)).unwrap();
+    let err = run
+        .update_state("x", json!("after approval"), None)
+        .unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Resume(m) if m.contains("`x`") && m.contains("approval node `h`")),
+        "{err}"
+    );
+    let mut fork = GraphRun::fork(&run.checkpoint()).unwrap();
+    let err = fork
+        .update_state("x", json!("forked edit"), None)
+        .unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Resume(_)),
+        "a fork keeps the approval: {err}"
+    );
+    let GraphOutcome::Done(state) = drive(&mut run, &io).await else {
+        panic!("the approved run finishes");
+    };
+    assert_eq!(
+        state["y"],
+        json!("before approval!"),
+        "t2 used the approved value"
+    );
+}

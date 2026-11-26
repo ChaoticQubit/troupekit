@@ -783,8 +783,8 @@ impl GraphRun {
     /// Writes `value` to state key `key` between steps, as node `as_node`
     /// would (its reducer applies), as a durable change: steps + 1, status
     /// queued. Refuses a finished run, an undeclared, untracked or mistyped
-    /// key, a key an approval node writes and a node that does not write
-    /// `key`. Returns `Resume` with the reason on a refusal.
+    /// key, a key an approval node writes or read for an answer it gave,
+    /// and a node that does not write `key`. Returns `Resume` on a refusal.
     pub fn update_state(
         &mut self,
         key: &str,
@@ -806,6 +806,16 @@ impl GraphRun {
         }
         if self.untracked(key) {
             return bad(format!("`{key}` is untracked; an edit would not be durable"));
+        }
+        if let Some(n) = self.workflow.nodes.iter().find(|n| {
+            matches!(n.kind, NodeKind::Human { ask: Ask::Approval, .. })
+                && n.reads.iter().any(|r| r == key)
+                && n.writes.as_ref().is_some_and(|w| self.state.get(w).is_some_and(|v| !v.is_null()))
+        }) {
+            return bad(format!(
+                "`{key}` was shown to approval node `{}`, which has answered; fork from a checkpoint before the approval to change it",
+                n.id
+            ));
         }
         let mut value = value;
         if let Some(id) = as_node {
