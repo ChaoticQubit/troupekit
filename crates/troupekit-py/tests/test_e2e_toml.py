@@ -12,6 +12,13 @@ FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "agent.toml"
 CHUNKS = ["Hello", " from", " the stub"]
 EVENTS_MAX = 10_000
 
+pytestmark = pytest.mark.xfail(
+    not hasattr(troupekit, "AgentBuilder"),
+    reason="B5: troupekit-py does not expose AgentBuilder, AgentHandle and RunStream yet",
+    raises=AttributeError,
+    strict=True,
+)
+
 
 def catalog_for(base_url):
     """Builds a catalog TOML naming one no-key vendor at the stub's URL.
