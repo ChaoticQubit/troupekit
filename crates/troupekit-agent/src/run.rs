@@ -118,6 +118,8 @@ pub struct AgentRun {
     usage: Usage,
     seq: u64,
     steps: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<(RunId, u64)>,
 }
 
 impl AgentRun {
@@ -172,6 +174,7 @@ impl AgentRun {
             usage: Usage::default(),
             seq: 0,
             steps: 0,
+            parent: None,
         })
     }
 
@@ -183,6 +186,60 @@ impl AgentRun {
         assert_eq!(self.seq, 0, "only a run without events takes a new id");
         self.run_id = run_id;
         self
+    }
+
+    /// Copies this run under a new run id: steps and the event sequence
+    /// restart at 0; messages, state, counters and usage are kept; the
+    /// parent is this run at its current step. Tool calls of the copy get
+    /// new idempotency keys, which contain the run id. Returns the copy.
+    pub fn fork(&self) -> AgentRun {
+        let mut child = self.clone();
+        child.run_id = RunId::new();
+        child.steps = 0;
+        child.seq = 0;
+        child.parent = Some((self.run_id, self.steps));
+        assert_ne!(child.run_id, self.run_id, "a fork has its own run id");
+        assert_eq!(child.messages, self.messages, "a fork keeps the conversation");
+        child
+    }
+
+    /// Forks the run saved in `cp`, keeps its first `index` messages, adds
+    /// `input` and leaves the fork ready for a model call. The cut must
+    /// follow a user or tool message, so it never splits a tool exchange,
+    /// and `input` must be a user message. Returns the fork, or `Setup`
+    /// for a bad cut and `Checkpoint` for a bad checkpoint.
+    pub fn fork_at_message(
+        cp: &Checkpoint,
+        index: usize,
+        input: Option<Message>,
+    ) -> Result<AgentRun, AgentError> {
+        let source = AgentRun::from_checkpoint(cp)?;
+        let bad = |m: &str| Err(AgentError::Setup(format!("fork at message {index}: {m}")));
+        if index == 0 || index > source.messages.len() {
+            let range = format!("index must be 1 to {}", source.messages.len());
+            return bad(&range);
+        }
+        if !matches!(source.messages[index - 1].role, Role::User | Role::Tool) {
+            return bad("the cut must follow a user or tool message");
+        }
+        if input.as_ref().is_some_and(|m| m.role != Role::User) {
+            return bad("input must be a user message");
+        }
+        let mut child = source.fork();
+        child.messages.truncate(index);
+        child.messages.extend(input);
+        child.state = RunState::CallModel;
+        child.repaired = false;
+        assert!(child.messages.len() >= index, "the fork keeps the cut");
+        assert!(child.messages.len() <= index + 1, "the fork adds at most one message");
+        Ok(child)
+    }
+
+    /// Returns the run and step this run was forked from, if any.
+    /// A run started with `new` has no parent.
+    /// The parent's checkpoints are never changed by a fork.
+    pub fn parent(&self) -> Option<(RunId, u64)> {
+        self.parent
     }
 
     /// Restores a run from `cp`. Returns `Checkpoint` when the state does
