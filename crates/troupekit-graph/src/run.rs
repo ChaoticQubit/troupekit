@@ -213,14 +213,27 @@ enum Finished {
     },
 }
 
-/// One branch write as stored: the finished unit and the run's event `seq`
-/// when it was kept. `restore` moves the run's `seq` past every kept one,
-/// so events of the re-run never reuse a number an observer already saw.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The event `seq` range one restored attempt of a step emits from, kept
+/// as a branch write of node `SEQ_NODE` before the attempt emits anything.
+/// Each attempt owns `[from, from + SEQ_STRIDE)`, so a later restore starts
+/// past every number an earlier attempt may have sent.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Kept {
-    seq: u64,
-    unit: Finished,
+struct SeqRange {
+    from: u64,
+}
+
+const SEQ_NODE: &str = "#seq";
+const SEQ_STRIDE: u64 = 1 << 32;
+const MAX_SEQ_RANGES: usize = 1 << 16;
+
+/// A seq range `restore` chose for the next attempt of `step`, written by
+/// `step_durable` at branch index `branch` before the step emits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Reserve {
+    step: u64,
+    branch: u32,
+    range: SeqRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -295,6 +308,8 @@ pub struct GraphRun {
     marks: Option<Marks>,
     #[serde(skip)]
     merged: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(skip)]
+    reserve: Option<Reserve>,
 }
 
 struct Reduced {
@@ -388,6 +403,7 @@ impl GraphRun {
             flow: None,
             marks: None,
             merged: BTreeMap::new(),
+            reserve: None,
         })
     }
 
@@ -726,10 +742,10 @@ impl GraphRun {
         self.step_with(io, Some(store)).await
     }
 
-    /// Restores run `run_id` from the latest checkpoint in `store` with
-    /// the branch writes kept for the step after it, which the next
-    /// `step_durable` applies. Returns `Resume` when the run has no
-    /// checkpoint and `Checkpoint` for a write that does not parse.
+    /// Restores run `run_id` from the latest checkpoint and the branch writes
+    /// of the step after it, which the next `step_durable` applies. Event
+    /// `seq` jumps to a fresh range past every earlier attempt's range, so
+    /// numbers have gaps but never repeat. Returns `Resume` with no checkpoint.
     pub async fn restore(store: &dyn CheckpointStore, run_id: RunId) -> Result<GraphRun, GraphError> {
         let cp = store
             .latest(run_id)
@@ -738,15 +754,34 @@ impl GraphRun {
         let mut run = GraphRun::from_checkpoint(&cp)?;
         let step = cp.step + 1;
         let mut done = BTreeMap::new();
+        let mut ranges: Vec<u64> = Vec::new();
         for w in store.branch_writes(run_id, step).await? {
             let bad = |m: String| GraphError::Checkpoint(format!("branch write {} of step {step}: {m}", w.branch()));
             let index = usize::try_from(w.branch()).map_err(|e| bad(e.to_string()))?;
-            let kept: Kept = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
-            run.seq = run.seq.max(kept.seq);
-            if done.insert(index, (w.node().to_string(), kept.unit)).is_some() {
+            if w.node() == SEQ_NODE {
+                let range: SeqRange = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
+                ranges.push(range.from);
+                continue;
+            }
+            let finished: Finished = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
+            if done.insert(index, (w.node().to_string(), finished)).is_some() {
                 return Err(bad("the branch has two writes".into()));
             }
         }
+        if ranges.len() >= MAX_SEQ_RANGES {
+            return Err(GraphError::Checkpoint(format!("step {step} was restored {} times", ranges.len())));
+        }
+        let floor = ranges.iter().copied().fold(run.seq, u64::max);
+        let from = floor
+            .checked_add(SEQ_STRIDE)
+            .ok_or_else(|| GraphError::Checkpoint(format!("event seq {floor} of step {step} is exhausted")))?;
+        let branch = u32::MAX - u32::try_from(ranges.len()).expect("bounded by MAX_SEQ_RANGES");
+        run.seq = from;
+        run.reserve = Some(Reserve {
+            step,
+            branch,
+            range: SeqRange { from },
+        });
         if !done.is_empty() {
             run.marks = Some(Marks { step, done });
         }
@@ -759,6 +794,7 @@ impl GraphRun {
         store: Option<&dyn CheckpointStore>,
     ) -> Result<GraphOutcome, GraphError> {
         let marks = self.marks.take();
+        let reserve = self.reserve.take();
         match &self.status {
             GraphStatus::Done => return Ok(GraphOutcome::Done(self.state.clone())),
             GraphStatus::Failed { error } => return Ok(GraphOutcome::Failed(error.clone())),
@@ -768,9 +804,19 @@ impl GraphRun {
             GraphStatus::Running => unreachable!("a step never starts inside another"),
             GraphStatus::Queued | GraphStatus::Checkpointed => {}
         }
+        if let (Some(r), Some(store)) = (reserve, store) {
+            if r.step == self.steps + 1 {
+                assert_eq!(self.seq, r.range.from, "a reserved attempt emits from its range");
+                let value = serde_json::to_value(r.range).expect("a seq range serializes");
+                store
+                    .save_branch(self.run_id, r.step, BranchWrite::new(r.branch, SEQ_NODE, value))
+                    .await?;
+            }
+        }
         self.steps += 1;
         self.status = GraphStatus::Running;
         self.merged.clear();
+        let first_seq = self.seq;
         let seq = AtomicU64::new(self.seq);
         let em = Emitter {
             run_id: self.run_id,
@@ -819,6 +865,7 @@ impl GraphRun {
             }
         }
         self.seq = seq.load(Ordering::SeqCst);
+        assert!(self.seq - first_seq < SEQ_STRIDE, "one attempt of a step stays inside its seq range");
         Ok(outcome)
     }
 
@@ -1179,11 +1226,7 @@ impl GraphRun {
                         return (work, None);
                     };
                     let branch = u32::try_from(i).expect("a step has far fewer than 2^32 branches");
-                    let kept = Kept {
-                        seq: em.seq.load(Ordering::SeqCst),
-                        unit: finished,
-                    };
-                    let value = serde_json::to_value(&kept).expect("a kept unit serializes");
+                    let value = serde_json::to_value(&finished).expect("a finished unit serializes");
                     let saved = store.save_branch(run_id, step, BranchWrite::new(branch, &node.id, value)).await;
                     (work, saved.err())
                 }

@@ -344,7 +344,7 @@ async fn write_for_another_node_is_refused() {
         BranchWrite::new(
             1,
             "zz",
-            json!({"seq": 0, "unit": {"kind": "tool", "output": "forged"}}),
+            json!({"kind": "tool", "output": "forged"}),
         ),
     );
     let mut run = GraphRun::restore(&store, id).await.unwrap();
@@ -515,4 +515,52 @@ async fn restored_step_never_reuses_an_emitted_seq() {
         after.iter().all(|seq| *seq > seen_max),
         "events after restore {after:?} reuse a seq up to {seen_max}"
     );
+}
+
+#[tokio::test]
+async fn second_restore_never_reuses_a_seq_of_the_first_restored_attempt() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let (io, sink) = io_events(&gates, model());
+    let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    let b_restarted = async {
+        while gates.calls("b").len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    };
+    let report = || format!("b calls: {}", gates.calls("b").len());
+    bounded("the restored attempt", report, async {
+        tokio::select! {
+            biased;
+            out = run.step_durable(&io, &store) => panic!("b is still closed: {out:?}"),
+            () = b_restarted => {}
+        }
+    })
+    .await;
+    drop(run);
+    let seen = sink.events();
+    let seen_max = seen.iter().map(|e| e.seq).max().unwrap();
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    gates.open("b");
+    done(drive(&mut run, &io, &store).await);
+    let after: Vec<u64> = sink.events()[seen.len()..].iter().map(|e| e.seq).collect();
+    assert!(!after.is_empty());
+    assert!(
+        after.iter().all(|seq| *seq > seen_max),
+        "events after the second restore {after:?} reuse a seq up to {seen_max}"
+    );
+    assert_eq!(gates.calls("a").len(), 1, "a's kept write still applies");
+}
+
+#[tokio::test]
+async fn seq_reservation_that_cannot_be_kept_runs_nothing() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let io = io(&gates, model());
+    let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    store.fail_writes.store(true, Ordering::SeqCst);
+    gates.open("b");
+    let err = run.step_durable(&io, &store).await.unwrap_err();
+    assert!(matches!(err, GraphError::Store(CoreError::Store(_))), "{err}");
+    assert_eq!(gates.calls("b").len(), 1, "no branch runs before the seq range is kept");
 }
