@@ -336,18 +336,47 @@ impl AgentBuilder {
     /// Output: the same builder, for chaining.
     pub fn knowledge(
         self: &Arc<Self>,
-        _config: KnowledgeConfig,
-        _embedder: Option<Arc<dyn HostEmbedder>>,
+        config: KnowledgeConfig,
+        embedder: Option<Arc<dyn HostEmbedder>>,
     ) -> Arc<Self> {
-        self.update(|_| Err(FfiError::unsupported("AgentBuilder::knowledge")))
+        let wrapped = embedder
+            .map(|host| crate::host::guarded("embedder", || crate::host::wrap_embedder(host)))
+            .transpose();
+        self.update(|agent| {
+            check_input("knowledge dir", &config.dir)?;
+            let mut knowledge =
+                troupekit_kit::Knowledge::dir(&config.dir).allow_failed(config.allow_failed);
+            if let Some(index) = config.index {
+                check_input("knowledge index", &index)?;
+                knowledge = knowledge.index(index);
+            }
+            if let Some(store) = config.store {
+                check_input("knowledge store", &store)?;
+                knowledge = knowledge.store(store);
+            }
+            if let Some(embedder) = wrapped? {
+                knowledge = knowledge.embedder(embedder);
+            }
+            Ok(agent.knowledge(knowledge))
+        })
     }
 
     #[cfg(feature = "knowledge")]
     /// Gives the agent fact memory for the user and session of `config`,
     /// with the memory tools.
     /// Output: the same builder, for chaining.
-    pub fn memory(self: &Arc<Self>, _config: MemoryConfig) -> Arc<Self> {
-        self.update(|_| Err(FfiError::unsupported("AgentBuilder::memory")))
+    pub fn memory(self: &Arc<Self>, config: MemoryConfig) -> Arc<Self> {
+        self.update(|agent| {
+            check_input("memory user", &config.user)?;
+            check_input("memory session", &config.session)?;
+            let mut memory = troupekit_kit::AgentMemory::new(config.user, config.session)
+                .preamble(config.preamble);
+            if let Some(path) = config.sqlite {
+                check_input("memory sqlite", &path)?;
+                memory = memory.sqlite(path);
+            }
+            Ok(agent.memory(memory))
+        })
     }
 
     /// Checks every setting, tool and model and returns a ready agent.

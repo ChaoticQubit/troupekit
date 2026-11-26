@@ -13,6 +13,10 @@ use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput};
 pub(crate) const MAX_TOOL_NAME_BYTES: usize = 64;
 pub(crate) const MAX_TOOL_DESCRIPTION_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
+#[cfg(feature = "knowledge")]
+pub(crate) const MAX_EMBED_BATCH: usize = 256;
+#[cfg(feature = "knowledge")]
+const MAX_EMBED_DIMS: u32 = 65_536;
 
 /// Receives every event of a stream as it happens, as the callback form
 /// of `RunStream::next`. Called on one thread per stream,
@@ -341,5 +345,88 @@ impl Tool for HostToolAdapter {
         }
         assert!(output.content.len() <= MAX_TOOL_OUTPUT_BYTES);
         Ok(output)
+    }
+}
+
+/// Checks host embedder `host` and wraps it as a kit embedder: `dims`
+/// read once, 1 to 65 536. Each call sends at most 256 texts to the host
+/// and checks every batch's count, length and finite values.
+/// Output: the embedder, or `InvalidArgument` for a bad `dims`.
+#[cfg(feature = "knowledge")]
+pub(crate) fn wrap_embedder(
+    host: Arc<dyn HostEmbedder>,
+) -> Result<Arc<dyn troupekit_context::embed::Embedder>, FfiError> {
+    let dims = host.dims();
+    if dims == 0 || dims > MAX_EMBED_DIMS {
+        return Err(FfiError::new(
+            ErrorCode::InvalidArgument,
+            "host embedder dims must be 1 to 65536",
+        ));
+    }
+    assert!(dims > 0);
+    Ok(Arc::new(HostEmbedderAdapter {
+        host,
+        dims: dims as usize,
+    }))
+}
+
+#[cfg(feature = "knowledge")]
+struct HostEmbedderAdapter {
+    host: Arc<dyn HostEmbedder>,
+    dims: usize,
+}
+
+#[cfg(feature = "knowledge")]
+#[async_trait]
+impl troupekit_context::embed::Embedder for HostEmbedderAdapter {
+    fn dims(&self) -> usize {
+        self.dims
+    }
+
+    async fn embed(
+        &self,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, troupekit_context::ContextError> {
+        use troupekit_context::ContextError;
+        let mut vectors = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(MAX_EMBED_BATCH) {
+            let host = self.host.clone();
+            let sent = batch.to_vec();
+            let called = tokio::task::spawn_blocking(move || {
+                catch_unwind(AssertUnwindSafe(|| host.embed(sent)))
+            })
+            .await;
+            let got = match called {
+                Ok(Ok(Ok(got))) => got,
+                Ok(Ok(Err(error))) => {
+                    return Err(ContextError::Embed(format!(
+                        "host embedder: {}",
+                        error.message
+                    )))
+                }
+                Ok(Err(_)) | Err(_) => {
+                    return Err(ContextError::Embed("host embedder panicked".into()))
+                }
+            };
+            if got.len() != batch.len() {
+                return Err(ContextError::Embed(format!(
+                    "host embedder returned {} vectors for {} texts",
+                    got.len(),
+                    batch.len()
+                )));
+            }
+            if got
+                .iter()
+                .any(|v| v.len() != self.dims || v.iter().any(|x| !x.is_finite()))
+            {
+                return Err(ContextError::Embed(format!(
+                    "host embedder vectors must be {} finite numbers",
+                    self.dims
+                )));
+            }
+            vectors.extend(got);
+        }
+        assert_eq!(vectors.len(), texts.len());
+        Ok(vectors)
     }
 }
