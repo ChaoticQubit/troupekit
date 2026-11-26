@@ -157,7 +157,7 @@ async fn graph_refuses_agent_with_members() {
         .unwrap_err();
     let message = format!("{err}");
     assert!(
-        message.contains("agent tools, delegates or members"),
+        message.contains("agent tools, delegates, members or handoffs"),
         "{message}"
     );
 }
@@ -376,6 +376,45 @@ async fn members_route_in_one_line() {
         .await
         .unwrap();
     assert_eq!(plain.run("hi").await.unwrap(), "Hello! You said: hi");
+}
+
+fn counted_reply(count: Arc<AtomicUsize>, reply: &'static str) -> Arc<dyn Model> {
+    Arc::new(FnModel::new("fake/m", move |_req| {
+        count.fetch_add(1, Ordering::SeqCst);
+        text_reply(reply, 10)
+    }))
+}
+
+#[tokio::test]
+async fn handoffs_in_one_line() {
+    let (desk, billing, tech) = (
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let to_tech = r#"{"next":"tech","reason":"hardware","answer":""}"#;
+    let fixed = r#"{"next":"end","reason":"done","answer":"Replace the screen."}"#;
+    let built = team_agent("desk", counted_reply(desk.clone(), to_tech))
+        .handoffs([
+            team_agent("billing", counted_reply(billing.clone(), fixed)),
+            team_agent("tech", counted_reply(tech.clone(), fixed)),
+        ])
+        .build()
+        .await
+        .unwrap();
+    let out = built.run_with("My laptop broke").await.unwrap();
+    assert_eq!(out.text(), "Replace the screen.");
+    assert_eq!(desk.load(Ordering::SeqCst), 1);
+    assert_eq!(tech.load(Ordering::SeqCst), 1);
+    assert_eq!(billing.load(Ordering::SeqCst), 0);
+    assert_eq!(out.messages().len(), 2);
+    let both = team_agent("desk", counted_reply(desk.clone(), to_tech))
+        .handoffs([team_agent("tech", counted_reply(tech.clone(), fixed))])
+        .members([team_agent("billing", counted_reply(billing, fixed))], TeamMode::Route)
+        .build()
+        .await;
+    let message = team_config(both.err().expect("members and handoffs together"));
+    assert!(message.contains("members or handoffs, not both"), "{message}");
 }
 
 #[tokio::test]

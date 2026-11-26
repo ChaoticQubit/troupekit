@@ -410,7 +410,7 @@ impl Agent {
 
     pub(crate) fn graph_conflict(&self) -> Option<&'static str> {
         if !self.members.is_empty() {
-            Some("agent tools, delegates or members; graphs do not take them yet")
+            Some("agent tools, delegates, members or handoffs; graphs do not take them yet")
         } else if self.limits != Limits::default() {
             Some("limits; set them on the graph")
         } else if !self.law_paths.is_empty() || !self.inline_laws.is_empty() {

@@ -31,6 +31,7 @@ pub(crate) struct Members {
     tool_names: Vec<String>,
     nest: u32,
     team: Option<(TeamMode, Vec<Agent>)>,
+    handoffs: Vec<Agent>,
 }
 
 /// How a leader works with its `members`: `Route` picks one member,
@@ -66,7 +67,7 @@ impl Members {
     /// Returns true when no member waits to be built.
     /// An agent without the 0.5 methods always returns true.
     pub(crate) fn is_empty(&self) -> bool {
-        !self.has_tools() && self.team.is_none()
+        !self.has_tools() && !self.is_team()
     }
 
     /// Returns true when agent tools or delegates wait to be built.
@@ -76,11 +77,11 @@ impl Members {
         !self.agent_tools.is_empty() || !self.delegates.is_empty()
     }
 
-    /// Returns true when the agent leads a team of `members`.
-    /// Such an agent builds into a flow run, not a single agent run.
-    /// False for every other agent.
+    /// Returns true when the agent leads a team of `members` or hands
+    /// off to `handoffs`. Such an agent builds into a flow run, not a
+    /// single agent run. False for every other agent.
     pub(crate) fn is_team(&self) -> bool {
-        self.team.is_some()
+        self.team.is_some() || !self.handoffs.is_empty()
     }
 
     /// Returns the names of the tools the members became at build.
@@ -117,6 +118,15 @@ impl Agent {
         let mut list = self.members.team.take().map(|(_, l)| l).unwrap_or_default();
         list.extend(members);
         self.members.team = Some((mode, list));
+        self
+    }
+
+    /// Lets this agent answer a request itself or hand it to one of
+    /// `agents`, which then answers it. The agents build into one flow from
+    /// the handoff pattern, bounded by its default `max_handoffs`, and run
+    /// as a graph behind `run` and `run_with`, like a team of `members`.
+    pub fn handoffs(mut self, agents: impl IntoIterator<Item = Agent>) -> Self {
+        self.members.handoffs.extend(agents);
         self
     }
 
@@ -178,6 +188,7 @@ impl Agent {
             tool_names: names,
             nest: members.nest,
             team: members.team,
+            handoffs: members.handoffs,
             ..Members::default()
         };
         assert!(!self.members.has_tools());
@@ -247,15 +258,9 @@ impl Agent {
     /// storage, then the team flow over leader and members. Fails on the
     /// first problem: mode, members, a member's own settings, or the flow.
     pub(crate) async fn build_team(mut self) -> Result<BuiltAgent, KitError> {
-        let (mode, members) = self
-            .members
-            .team
-            .take()
-            .expect("build_team runs for a team");
         let name = self.name().to_string();
-        if mode == TeamMode::Tasks {
-            return Err(KitError::config(&name, "team mode tasks is not built yet"));
-        }
+        let (text, members, answer) = self.pattern()?;
+        assert!(!self.members.is_team(), "the pattern took every member");
         if members.is_empty() || members.len() > TEAM_MEMBERS_MAX {
             let m = format!(
                 "a team takes 1 to {TEAM_MEMBERS_MAX} members, got {}",
@@ -280,20 +285,60 @@ impl Agent {
         let mut all: Vec<&Agent> = vec![&self];
         all.extend(members.iter());
         let io = team_io(&name, &all, &leader)?;
-        let flow = patterns::load(&format!("agent:{name}"), &team_text(&name, mode, &members)?)?;
+        let flow = patterns::load(&format!("agent:{name}"), &text)?;
         let probe = input_state("build check");
         GraphRun::start(flow.clone(), probe, leader.limits().clone(), &io).await?;
         assert!(!flow.workflow().nodes.is_empty());
-        Ok(leader.with_team(TeamFlow {
-            flow,
-            io,
-            answer: if mode == TeamMode::Broadcast {
-                "answers"
-            } else {
-                "output"
-            },
-        }))
+        Ok(leader.with_team(TeamFlow { flow, io, answer }))
     }
+
+    /// Takes the team or the handoffs off this agent and returns the
+    /// pattern TOML, the other agents and the state key of the answer:
+    /// `answers` for broadcast, else `output`. Fails for both at once and
+    /// for team mode `tasks`.
+    fn pattern(&mut self) -> Result<(String, Vec<Agent>, &'static str), KitError> {
+        let name = self.name().to_string();
+        let team = self.members.team.take();
+        let handoffs = std::mem::take(&mut self.members.handoffs);
+        match (team, handoffs.is_empty()) {
+            (Some(_), false) => {
+                let m = "an agent takes members or handoffs, not both";
+                Err(KitError::config(&name, m))
+            }
+            (Some((TeamMode::Tasks, _)), true) => {
+                Err(KitError::config(&name, "team mode tasks is not built yet"))
+            }
+            (Some((mode, members)), true) => {
+                let text = team_text(&name, mode, &members)?;
+                let answer = if mode == TeamMode::Broadcast {
+                    "answers"
+                } else {
+                    "output"
+                };
+                Ok((text, members, answer))
+            }
+            (None, false) => Ok((handoff_text(&name, &handoffs)?, handoffs, "output")),
+            (None, true) => panic!("build_team runs for a team or handoffs"),
+        }
+    }
+}
+
+fn handoff_text(name: &str, agents: &[Agent]) -> Result<String, KitError> {
+    let names: Vec<Toml> = agents
+        .iter()
+        .map(|a| Toml::String(a.name().to_string()))
+        .collect();
+    assert_eq!(names.len(), agents.len());
+    let mut allow = toml::Table::new();
+    allow.insert(name.into(), Toml::Array(names));
+    let mut handoff = toml::Table::new();
+    handoff.insert("start".into(), Toml::String(name.into()));
+    handoff.insert("allow".into(), Toml::Table(allow));
+    let mut table = toml::Table::new();
+    table.insert("name".into(), Toml::String(name.into()));
+    table.insert("handoff".into(), Toml::Table(handoff));
+    toml::to_string(&table)
+        .map_err(|e| KitError::config(name, format!("handoffs do not serialize: {e}")))
 }
 
 fn team_text(name: &str, mode: TeamMode, members: &[Agent]) -> Result<String, KitError> {

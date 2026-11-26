@@ -175,6 +175,31 @@ async fn macro_manages_key_reaches_builder() {
     assert!(text.starts_with("Hello! You said: "), "{text}");
 }
 
+/// Answer or hand the request to a desk.
+#[agent(model = "fake/m", handoffs = [echo_researcher, crew::echo_checker])]
+fn reception() {}
+
+#[tokio::test]
+async fn macro_handoffs_key_reaches_builder() {
+    let built = reception().model_client(echo_model()).build().await.unwrap();
+    let by_hand = Agent::new("reception")
+        .instructions("Answer or hand the request to a desk.")
+        .model("fake/m")
+        .model_client(echo_model())
+        .handoffs([echo_researcher(), crew::echo_checker()])
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(built.persona(), by_hand.persona());
+    let err = reception()
+        .model_client(echo_model())
+        .handoffs([echo_researcher()])
+        .build()
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("repeats"), "{err}");
+}
+
 /// Send each request to the right desk.
 #[agent(model = "fake/m", members = [echo_researcher, crew::echo_checker], team = "broadcast")]
 fn front_desk() {}

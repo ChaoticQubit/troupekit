@@ -6,7 +6,7 @@ use crate::tokens::{Delim, Error, Piece, SpanId, Tok};
 use crate::tool::crate_path;
 
 const WHAT: &str = "#[agent]";
-const KEYS: [&str; 23] = [
+const KEYS: [&str; 24] = [
     "model",
     "tools",
     "evals",
@@ -25,6 +25,7 @@ const KEYS: [&str; 23] = [
     "knowledge",
     "agents",
     "delegates",
+    "handoffs",
     "manages",
     "members",
     "team",
@@ -47,8 +48,8 @@ pub struct Call {
 /// How a call passes its value: `Plain` as written, `Invoke` as the call
 /// `path()`, `InvokeList` as the one-element array `[path()]`.
 /// `Members(mode)` as `[path()]` followed by the `TeamMode` variant.
-/// `agents`, `delegates`, `manages` and `members` name fns that return
-/// an Agent.
+/// `agents`, `delegates`, `handoffs`, `manages` and `members` name fns
+/// that return an Agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
     Plain,
@@ -232,10 +233,11 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                 }
             }
             "team" => team = Some((team_mode(arg)?, arg.key_span)),
-            "agents" | "delegates" | "manages" => {
+            "agents" | "delegates" | "handoffs" | "manages" => {
                 let (method, shape) = match arg.key.as_str() {
                     "agents" => ("agent_tool", Shape::Invoke),
                     "delegates" => ("delegates", Shape::InvokeList),
+                    "handoffs" => ("handoffs", Shape::InvokeList),
                     _ => ("manages", Shape::InvokeList),
                 };
                 calls.extend(agent_paths(arg, method, shape)?);
@@ -316,9 +318,10 @@ pub fn expand_agent(a: &AgentFn) -> Vec<Piece> {
     out
 }
 
-/// Parses an `agents`, `delegates` or `manages` list of fn paths into one
-/// `method` call per path, in list order. Returns an error on a value
-/// that is not a list of paths, or on an empty `delegates` or `manages`.
+/// Parses an `agents`, `delegates`, `handoffs` or `manages` list of fn
+/// paths into one `method` call per path, in list order. Returns an error
+/// on a value that is not a list of paths, or on an empty list other than
+/// `agents`.
 fn agent_paths(arg: &Arg, method: &'static str, shape: Shape) -> Result<Vec<Call>, Error> {
     let message = format!(
         "{} = takes a list like [researcher, team::checker]",
@@ -547,6 +550,18 @@ mod tests {
     }
 
     #[test]
+    fn handoffs_call_once_with_every_path() {
+        let item = format!("{DOC}fn desk() {{}}");
+        let a = parse_agent(&lex("handoffs = [billing, ::x::tech]"), &lex(&item)).unwrap();
+        assert_eq!(methods(&a), ["handoffs", "handoffs"]);
+        assert!(a.calls.iter().all(|c| c.shape == Shape::InvokeList));
+        assert_eq!(a.calls[1].value.len(), 6);
+        let message = "handoffs = takes a list like [researcher, team::checker]";
+        rejects("handoffs = []", &item, message);
+        rejects("handoffs = billing", &item, message);
+    }
+
+    #[test]
     fn manages_calls_once_with_every_path() {
         let item = lex(&format!("{DOC}fn boss() {{}}"));
         let a = parse_agent(&lex("manages = [researcher, ::x::editor]"), &item).unwrap();
@@ -755,7 +770,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_key() {
-        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, agents, delegates, manages, members, team, name, crate");
+        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, agents, delegates, handoffs, manages, members, team, name, crate");
     }
 
     #[test]
