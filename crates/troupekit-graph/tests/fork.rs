@@ -437,7 +437,7 @@ fn refused_for(err: GraphError, key: &str, reader: &str) {
     );
 }
 
-const MAP_AFTER: &str = "name = 'mapped'\nstart = 'h'\n[state]\nok = 'bool?'\nacct = 'string?'\nxs = 'list?'\nx = 'string?'\ny = 'string?'\nout = 'list?'\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'approval'\nwrites = 'ok'\n[[nodes]]\nid = 'm'\nkind = 'map'\nover = 'xs'\nitem = 'x'\nbody = 'pay'\nwrites = 'out'\n[[nodes]]\nid = 'pay'\nkind = 'tool'\ntool = 't2'\nreads = ['x', 'acct']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'h'\nto = 'm'\n[[edges]]\nfrom = 'm'\nto = 'e'\n";
+const MAP_AFTER: &str = "name = 'mapped'\nstart = 'h'\n[state]\nok = 'bool'\nacct = 'string?'\nxs = 'list?'\nx = 'string?'\ny = 'string?'\nout = 'list?'\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'approval'\nwrites = 'ok'\n[[nodes]]\nid = 'm'\nkind = 'map'\nover = 'xs'\nitem = 'x'\nbody = 'pay'\nwrites = 'out'\n[[nodes]]\nid = 'pay'\nkind = 'tool'\ntool = 't2'\nreads = ['x', 'acct']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'h'\nto = 'm'\n[[edges]]\nfrom = 'm'\nto = 'e'\n";
 
 #[tokio::test]
 async fn edit_state_cannot_change_a_key_a_map_body_reads_after_approval() {
@@ -453,7 +453,7 @@ async fn edit_state_cannot_change_a_key_a_map_body_reads_after_approval() {
     refused_for(err, "acct", "pay");
 }
 
-const SETS_BEFORE: &str = "name = 'set'\nstart = 'w'\n[state]\nok = 'bool?'\nx = 'string?'\ny = 'string?'\n[[nodes]]\nid = 'w'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Pick.'\nfields = { x = 'string' }\nsets = { x = 'x' }\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'approval'\nwrites = 'ok'\n[[nodes]]\nid = 'fix'\nkind = 'tool'\ntool = 't1'\nwrites = 'x'\n[[nodes]]\nid = 'pay'\nkind = 'tool'\ntool = 't2'\nreads = ['x']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'w'\nto = 'h'\n[[edges]]\nfrom = 'h'\nto = 'fix'\n[[edges]]\nfrom = 'fix'\nto = 'pay'\n[[edges]]\nfrom = 'pay'\nto = 'e'\n";
+const SETS_BEFORE: &str = "name = 'set'\nstart = 'w'\n[state]\nok = 'bool'\nx = 'string?'\ny = 'string?'\n[[nodes]]\nid = 'w'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Pick.'\nfields = { x = 'string' }\nsets = { x = 'x' }\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'approval'\nwrites = 'ok'\n[[nodes]]\nid = 'fix'\nkind = 'tool'\ntool = 't1'\nwrites = 'x'\n[[nodes]]\nid = 'pay'\nkind = 'tool'\ntool = 't2'\nreads = ['x']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'w'\nto = 'h'\n[[edges]]\nfrom = 'h'\nto = 'fix'\n[[edges]]\nfrom = 'fix'\nto = 'pay'\n[[edges]]\nfrom = 'pay'\nto = 'e'\n";
 
 #[tokio::test]
 async fn edit_state_cannot_change_a_key_set_before_approval() {
