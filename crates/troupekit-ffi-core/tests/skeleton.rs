@@ -117,10 +117,9 @@ fn version_matches_core() {
 }
 
 #[tokio::test]
-async fn unbuilt_parts_return_unsupported() {
+async fn empty_graph_is_refused_at_build() {
     let err = GraphBuilder::new("chain".into()).build().await.unwrap_err();
-    assert_eq!(err.code as u32, 17);
-    assert_eq!(err.code, ErrorCode::Unsupported);
+    assert_ne!(err.code, ErrorCode::Unsupported);
     assert!(err.run_id.is_none());
 }
 

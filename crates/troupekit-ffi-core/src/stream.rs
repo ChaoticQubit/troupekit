@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError};
 use troupekit_core::event::{Event, EventBody, PauseReason, Usage};
-use troupekit_kit::RunOutcome;
+use troupekit_kit::{GraphReport, RunOutcome};
 
 /// A run in progress that yields its events: pull them with `next`, or
 /// hand them to an `EventListener`, not both. The buffer drops text
@@ -41,6 +41,10 @@ impl std::fmt::Debug for RunStream {
 
 impl RunStream {
     pub(crate) fn agent(stream: troupekit_kit::RunStream<RunOutcome>) -> Arc<RunStream> {
+        RunStream::wrap(stream.run_id().to_string(), Arc::new(stream))
+    }
+
+    pub(crate) fn graph(stream: troupekit_kit::RunStream<GraphReport>) -> Arc<RunStream> {
         RunStream::wrap(stream.run_id().to_string(), Arc::new(stream))
     }
 
@@ -166,6 +170,37 @@ impl KitStream for troupekit_kit::RunStream<RunOutcome> {
     async fn result(&self) -> Result<RunResult, FfiError> {
         let outcome = self.finish().await?;
         Ok(RunResult::from_outcome(&outcome))
+    }
+}
+
+#[async_trait]
+impl KitStream for troupekit_kit::RunStream<GraphReport> {
+    async fn next(&self) -> Option<Event> {
+        troupekit_kit::RunStream::next(self).await
+    }
+
+    fn cancel(&self) {
+        troupekit_kit::RunStream::cancel(self);
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped_deltas()
+    }
+
+    async fn result(&self) -> Result<RunResult, FfiError> {
+        let report = self.finish().await?;
+        let output = report.output();
+        let text = match output {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        let mut result = RunResult::default();
+        result.text = text;
+        result.output_json = output.to_string();
+        result.usage = usage_of(report.usage());
+        result.run_id = report.run_id().to_string();
+        assert_eq!(result.model_calls, 0);
+        Ok(result)
     }
 }
 

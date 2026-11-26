@@ -270,6 +270,14 @@ pub(crate) fn guarded<T>(
 /// object schema with `"type": "object"` that compiles. Output: the
 /// tool, or `InvalidArgument` naming the bad part.
 pub(crate) fn wrap_tool(host: Arc<dyn HostTool>) -> Result<Arc<dyn Tool>, FfiError> {
+    let tool: Arc<dyn Tool> = Arc::new(host_tool(host)?);
+    Ok(tool)
+}
+
+/// Checks host tool `host` as `wrap_tool` does and returns the adapter
+/// itself, for a graph step that takes a tool by value.
+/// Output: the adapter, or `InvalidArgument` naming the bad part.
+pub(crate) fn host_tool(host: Arc<dyn HostTool>) -> Result<HostToolAdapter, FfiError> {
     let name = host.name();
     let name_ok = !name.is_empty()
         && name.len() <= MAX_TOOL_NAME_BYTES
@@ -313,10 +321,10 @@ pub(crate) fn wrap_tool(host: Arc<dyn HostTool>) -> Result<Arc<dyn Tool>, FfiErr
         schema,
         hosted: None,
     };
-    Ok(Arc::new(HostToolAdapter { host, spec }))
+    Ok(HostToolAdapter { host, spec })
 }
 
-struct HostToolAdapter {
+pub(crate) struct HostToolAdapter {
     host: Arc<dyn HostTool>,
     spec: ToolSpec,
 }

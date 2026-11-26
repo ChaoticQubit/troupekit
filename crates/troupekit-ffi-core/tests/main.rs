@@ -1,5 +1,6 @@
 mod agent;
 mod errors;
+mod graph;
 mod host;
 mod host_model;
 mod host_transport;

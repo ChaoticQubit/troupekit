@@ -50,14 +50,6 @@ impl FfiError {
             run_id: None,
         }
     }
-
-    /// Builds the `Unsupported` error for `what`, a neutral method name.
-    /// The 0.4 skeleton returns it from every body that is not filled in
-    /// yet. Output: an error naming `what` and saying it is not built yet.
-    pub(crate) fn unsupported(what: &str) -> FfiError {
-        assert!(!what.is_empty());
-        FfiError::new(ErrorCode::Unsupported, format!("{what} is not built yet"))
-    }
 }
 
 impl From<troupekit_kit::KitError> for FfiError {
