@@ -165,7 +165,8 @@ pub struct IngestReport {
 
 /// Ingests every loadable file under `dir` into `vectors`: unchanged
 /// files are skipped, others swapped in with `replace_source`, and after
-/// a complete walk the sources of the scope with no file are removed.
+/// a complete walk a source is removed only when its file is gone from
+/// disk, checked again just before removal; filtered-out files stay.
 /// Output: the report, or an error for a walk cap, a blank scope or a
 /// store write that fails.
 pub async fn ingest_dir(
@@ -188,7 +189,7 @@ pub async fn ingest_dir(
     let stored = vectors.sources(&settings.scope).await?;
     let gone: Vec<String> = stored
         .iter()
-        .filter(|s| !present.contains(*s))
+        .filter(|s| !present.contains(*s) && !on_disk(dir, s))
         .cloned()
         .collect();
     check_removals(gone.len(), stored.len(), present.is_empty(), settings)?;
@@ -244,6 +245,9 @@ pub async fn ingest_dir(
         }
     }
     for source in &gone {
+        if on_disk(dir, source) {
+            continue;
+        }
         vectors.remove_source(&settings.scope, source).await?;
         report.removed += 1;
     }
@@ -302,6 +306,20 @@ fn check_removals(
         )));
     }
     Ok(())
+}
+
+fn on_disk(dir: &Path, source: &str) -> bool {
+    let relative = Path::new(source);
+    let plain = relative
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)));
+    if !plain {
+        return false;
+    }
+    match std::fs::symlink_metadata(dir.join(relative)) {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// A folder an agent can search: `Knowledge::dir("docs")` plus settings.
