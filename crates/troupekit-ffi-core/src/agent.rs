@@ -259,10 +259,10 @@ impl AgentHandle {
         Err(FfiError::unsupported("AgentHandle::resume_for"))
     }
 
-    /// Starts a run on `input` and returns its event stream at once.
-    /// Output: the stream; its `result` gives the outcome or the error.
-    /// The signature waits on the leader's stream choice (eng log).
-    pub fn stream(&self, _input: String) -> Arc<RunStream> {
-        RunStream::unsupported()
+    /// Starts a run on `input` and returns its event stream once the
+    /// run id is known. Output: the stream, or the setup error (input,
+    /// tools, models) with its code, as `start` reports it.
+    pub async fn stream(&self, _input: String) -> Result<Arc<RunStream>, FfiError> {
+        Err(FfiError::unsupported("AgentHandle::stream"))
     }
 }
