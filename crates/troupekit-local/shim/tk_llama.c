@@ -103,6 +103,10 @@ int32_t tk_model_n_embd(const tk_model *model) {
     return llama_model_n_embd(model->model);
 }
 
+int32_t tk_model_n_embd_out(const tk_model *model) {
+    return llama_model_n_embd_out(model->model);
+}
+
 int32_t tk_model_has_template(const tk_model *model) {
     return llama_model_chat_template(model->model, NULL) != NULL ? 1 : 0;
 }

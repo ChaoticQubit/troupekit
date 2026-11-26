@@ -134,9 +134,10 @@ struct State {
     cached: Vec<i32>,
 }
 
-/// A GGUF model run in-process by llama.cpp: one model and one context
-/// behind a mutex, with prompt prefix reuse, cancel, grammar, scoring
-/// and embeddings. Every input is checked before it reaches C.
+/// A GGUF model run in-process by llama.cpp, checked before every C call.
+/// Send and Sync: the model pointer is read-only after load and the
+/// tokenizer API is thread safe (`llama.h:1265`); the one context is
+/// used only under the mutex, which serialises generate, score, embed.
 pub struct LlamaModel {
     model: NonNull<ffi::TkModel>,
     state: Mutex<State>,
@@ -200,7 +201,7 @@ impl LlamaModel {
             (
                 ffi::tk_model_n_ctx_train(model.as_ptr()),
                 ffi::tk_model_n_vocab(model.as_ptr()),
-                ffi::tk_model_n_embd(model.as_ptr()),
+                ffi::tk_model_n_embd_out(model.as_ptr()),
                 ffi::tk_model_has_template(model.as_ptr()),
             )
         };
@@ -660,7 +661,7 @@ impl LocalModel for LlamaModel {
             .iter()
             .map(|t| self.tokenize(t, false))
             .collect::<Result<Vec<_>, _>>()?;
-        let dims = unsafe { ffi::tk_model_n_embd(self.model.as_ptr()) } as usize;
+        let dims = unsafe { ffi::tk_model_n_embd_out(self.model.as_ptr()) } as usize;
         let mut state = self.lock();
         let ctx = state.ctx;
         unsafe { ffi::tk_set_embeddings(ctx.as_ptr(), 1) };

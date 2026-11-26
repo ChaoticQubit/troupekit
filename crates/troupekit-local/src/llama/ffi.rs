@@ -36,6 +36,7 @@ extern "C" {
     pub(crate) fn tk_model_n_ctx_train(model: *const TkModel) -> i32;
     pub(crate) fn tk_model_n_vocab(model: *const TkModel) -> i32;
     pub(crate) fn tk_model_n_embd(model: *const TkModel) -> i32;
+    pub(crate) fn tk_model_n_embd_out(model: *const TkModel) -> i32;
     pub(crate) fn tk_model_has_template(model: *const TkModel) -> i32;
     pub(crate) fn tk_ctx_new(
         model: *mut TkModel,

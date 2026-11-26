@@ -58,6 +58,11 @@ int32_t tk_model_n_vocab(const tk_model *model);
 /// tk_embeddings returns this many floats.
 int32_t tk_model_n_embd(const tk_model *model);
 
+/// Returns the length of each embedding output row.
+/// Input: a model. Output: floats per row of tk_embeddings.
+/// May differ from tk_model_n_embd for models with an output projection.
+int32_t tk_model_n_embd_out(const tk_model *model);
+
 /// Reports whether the model carries a default chat template.
 /// Input: a model. Output: 1 when present, 0 otherwise.
 /// Without one tk_chat_template_apply returns -1.
@@ -141,7 +146,7 @@ const float *tk_logits(tk_ctx *ctx, int32_t idx);
 
 /// Returns the embedding of an output row of the last decode.
 /// Inputs: context and output index. Output: n_embd floats owned by the
-/// context, or NULL when embedding output is off.
+/// context (tk_model_n_embd_out of them), or NULL when output is off.
 const float *tk_embeddings(tk_ctx *ctx, int32_t idx);
 
 /// Switches embedding output on or off for the next decodes.

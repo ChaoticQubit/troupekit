@@ -81,8 +81,8 @@ pub struct LocalInfo {
 
 impl LocalInfo {
     /// Builds the facts for a `LocalModel` implementation.
-    /// Inputs: context length and vocabulary size (both above 0),
-    /// embedding size (0 for none) and template presence.
+    /// Inputs: context length, vocabulary size, embedding size (0 for
+    /// none), template presence. Panics when context or vocabulary is 0.
     pub fn new(
         context_length: usize,
         vocab_size: usize,
@@ -547,9 +547,9 @@ pub struct Generation {
 }
 
 impl Generation {
-    /// Builds a result.
-    /// Inputs: text, generated token count, stop reason, mean log-prob
-    /// (at most 0, `None` unless asked for) and metrics.
+    /// Builds a result from text, token count, stop reason, mean
+    /// log-prob (`None` unless asked for) and metrics.
+    /// Panics when the mean log-prob is above 0 or NaN.
     pub fn new(
         text: String,
         tokens: usize,
