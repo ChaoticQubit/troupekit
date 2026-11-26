@@ -87,3 +87,55 @@ async fn macro_and_builder_build_the_same_persona() {
         .unwrap();
     assert_eq!(from_macro.persona(), from_builder.persona());
 }
+
+fn shared_transport() -> std::sync::Arc<troupekit_providers::transport::ScriptedTransport> {
+    static SHARED: std::sync::OnceLock<
+        std::sync::Arc<troupekit_providers::transport::ScriptedTransport>,
+    > = std::sync::OnceLock::new();
+    SHARED.get_or_init(crate::common::scripted).clone()
+}
+
+#[derive(Default)]
+struct Collected(std::sync::Mutex<Vec<troupekit_core::event::Event>>);
+
+impl troupekit_agent::EventSink for Collected {
+    fn emit(&self, event: troupekit_core::event::Event) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+fn collected() -> std::sync::Arc<Collected> {
+    static SHARED: std::sync::OnceLock<std::sync::Arc<Collected>> = std::sync::OnceLock::new();
+    SHARED.get_or_init(Default::default).clone()
+}
+
+/// Say hello.
+#[agent(model = "fake/m", model_client = crate::common::echo_model())]
+fn with_client() {}
+
+/// Say hello.
+#[agent(model = "ollama/llama3", transport = shared_transport())]
+fn with_transport() {}
+
+/// Say hello.
+#[agent(model = "fake/m", model_client = crate::common::echo_model(), events = collected())]
+fn with_events() {}
+
+#[tokio::test]
+async fn macro_model_client_key_reaches_builder() {
+    let text = with_client().run("hi").await.unwrap();
+    assert_eq!(text, "Hello! You said: hi");
+}
+
+#[tokio::test]
+async fn macro_transport_key_reaches_builder() {
+    let _ = with_transport().run("hi").await;
+    assert_eq!(shared_transport().sent().len(), 1);
+}
+
+#[tokio::test]
+async fn macro_events_key_reaches_builder() {
+    with_events().run("hi").await.unwrap();
+    let events = collected().0.lock().unwrap().len();
+    assert!(events >= 2, "{events}");
+}
