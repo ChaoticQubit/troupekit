@@ -1,0 +1,23 @@
+name = "desk"
+start = "lead"
+
+[state]
+input = "string"
+output = "string"
+
+[[nodes]]
+id = "lead"
+kind = "agent"
+persona = "lead"
+prompt = "Hand parts of the request to your coworkers as needed, then give the final answer."
+reads = ["input"]
+writes = "output"
+delegates = ["billing", "tech"]
+
+[[nodes]]
+id = "end"
+kind = "end"
+
+[[edges]]
+from = "lead"
+to = "end"

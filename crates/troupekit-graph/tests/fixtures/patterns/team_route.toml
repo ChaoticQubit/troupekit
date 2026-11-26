@@ -1,0 +1,79 @@
+name = "triage"
+start = "triage_lead"
+
+[state]
+billing_approved = "bool"
+customer = "string?"
+input = "string"
+output = "string"
+
+[[nodes]]
+id = "triage_lead"
+kind = "agent"
+persona = "triage-lead"
+prompt = "Pick the team member who should handle the request."
+reads = ["input", "customer"]
+goto = ["approve_billing", "tech", "sales"]
+
+[[nodes]]
+id = "billing"
+kind = "agent"
+persona = "billing"
+reads = ["input", "customer"]
+writes = "output"
+
+[[nodes]]
+id = "tech"
+kind = "agent"
+persona = "tech"
+reads = ["input", "customer"]
+writes = "output"
+
+[[nodes]]
+id = "sales"
+kind = "agent"
+persona = "sales"
+reads = ["input", "customer"]
+writes = "output"
+
+[[nodes]]
+id = "approve_billing"
+kind = "human"
+ask = "approval"
+prompt = "Approve handing the request to `billing`?"
+writes = "billing_approved"
+
+[[nodes]]
+id = "check_billing"
+kind = "switch"
+on = "billing_approved"
+
+[[nodes]]
+id = "end"
+kind = "end"
+
+[[edges]]
+from = "billing"
+to = "end"
+
+[[edges]]
+from = "tech"
+to = "end"
+
+[[edges]]
+from = "sales"
+to = "end"
+
+[[edges]]
+from = "approve_billing"
+to = "check_billing"
+
+[[edges]]
+from = "check_billing"
+to = "billing"
+when = "true"
+
+[[edges]]
+from = "check_billing"
+to = "end"
+when = "false"
