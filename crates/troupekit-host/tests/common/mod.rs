@@ -156,6 +156,13 @@ pub struct Stack {
 /// persona, at clock time 1_000_000.
 /// Returns the stack.
 pub fn stack(model: FnModel, tools: ToolRegistry) -> Stack {
+    stack_on(model, tools, InMemCheckpoints::default())
+}
+
+/// Builds a stack like `stack` over the given checkpoint store, such as
+/// `InMemCheckpoints::with_history()` for branch writes and forks.
+/// Returns the stack.
+pub fn stack_on(model: FnModel, tools: ToolRegistry, checkpoints: InMemCheckpoints) -> Stack {
     let model = Arc::new(model);
     let clock = Arc::new(FixedClock::new(1_000_000));
     let events = Arc::new(EventLog::default());
@@ -171,7 +178,7 @@ pub fn stack(model: FnModel, tools: ToolRegistry) -> Stack {
     ))]);
     Stack {
         queue: Arc::new(InMemQueue::new(clock.clone())),
-        checkpoints: Arc::new(InMemCheckpoints::default()),
+        checkpoints: Arc::new(checkpoints),
         io: Arc::new(SimpleGraphIo::new(Arc::new(agent), personas)),
         events,
         clock,
