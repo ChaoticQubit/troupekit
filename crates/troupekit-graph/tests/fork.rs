@@ -277,3 +277,70 @@ async fn lineage_walks_parents_to_the_root() {
         .unwrap()
         .is_empty());
 }
+
+fn run_ids(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                match (k.as_str(), x) {
+                    ("run_id", Value::String(id)) => out.push(id.clone()),
+                    _ => run_ids(x, out),
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| run_ids(x, out)),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn fork_rekeys_a_live_agent_run() {
+    use troupekit_agent::MemorySource;
+    use troupekit_graph::testing::{text_reply, FnModel};
+    use troupekit_providers::Price;
+    let price = Price {
+        input_usd_micros_per_mtok: 1_000_000,
+        output_usd_micros_per_mtok: 2_000_000,
+        verified: true,
+        long_context: None,
+        search_usd_micros: 0,
+    };
+    let writer = "name = 'writer'\ndisplay_name = 'W'\nrole = 'Writes.'\ngoal = 'Done.'\ninstructions = 'Do it.'\nmodel = 'fake/m'\n";
+    let model = Arc::new(FnModel::new("fake/m", |_| text_reply("ok", 10)));
+    let agent = SimpleIo::new(ToolRegistry::new()).with_model("fake/m", model.clone(), price);
+    let personas = PersonaLoader::new(vec![Arc::new(MemorySource::new(
+        "test",
+        [("writer.toml".to_string(), writer.to_string())],
+    ))]);
+    let io = SimpleGraphIo::new(Arc::new(agent), personas);
+    let text = "name = 'ag'\nstart = 'a'\n[state]\nx = 'string'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Go.'\nwrites = 'x'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n";
+    let tight = Limits {
+        run: Some(1),
+        ..Limits::default()
+    };
+    let flow = Flow::parse("test/ag.toml", text).unwrap();
+    let mut run = GraphRun::start(flow, Map::new(), tight, &io).await.unwrap();
+    assert!(
+        matches!(run.step(&io).await, GraphOutcome::Waiting(_)),
+        "the agent waits on its budget"
+    );
+    let cp = run.checkpoint();
+    let mut before = Vec::new();
+    run_ids(&cp.state, &mut before);
+    assert!(
+        before.len() >= 2,
+        "the graph and its agent run carry run ids: {before:?}"
+    );
+    let fork = GraphRun::fork(&cp).unwrap();
+    let mut after = Vec::new();
+    run_ids(&fork.checkpoint().state, &mut after);
+    assert_eq!(after.len(), before.len());
+    assert!(
+        after.iter().all(|id| !before.contains(id)),
+        "no run id of the fork equals one of the original: {before:?} {after:?}"
+    );
+    let mut fork = fork;
+    fork.raise_budget(Limits::default()).unwrap();
+    assert!(matches!(drive(&mut fork, &io).await, GraphOutcome::Done(_)));
+    assert_eq!(model.calls(), 1, "only the fork called the model");
+}

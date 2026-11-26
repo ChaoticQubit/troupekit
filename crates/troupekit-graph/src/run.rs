@@ -704,7 +704,7 @@ impl GraphRun {
     }
 
     /// Starts a new run from checkpoint `cp`: a new run id, steps and seq
-    /// at 0, call keys cleared, subflow runs re-keyed, the parent link set
+    /// at 0, call keys cleared, agent and subflow runs re-keyed, the parent link set
     /// to `cp`. It waits for the same human if `cp` did, keeps a finished
     /// status and is queued otherwise. The parent is never written.
     /// Returns the fork, or `Checkpoint` for a bad checkpoint.
@@ -726,11 +726,10 @@ impl GraphRun {
         for (i, b) in self.branches.iter_mut().enumerate() {
             b.call = None;
             match &mut b.at {
-                At::Agent { .. } => {
-                    return Err(GraphError::Checkpoint(format!(
-                        "node `{}`: forking an agent branch mid-run needs AgentRun::fork (0.5 B1)",
-                        b.node
-                    )))
+                At::Agent { run, .. } => {
+                    let old = run.run_id();
+                    **run = run.fork();
+                    assert_ne!(run.run_id(), old, "a forked agent run has its own run id");
                 }
                 At::Flow { run } => run.rekey(RunId::derived(run_id, &format!("fork:{i}")))?,
                 _ => {}
