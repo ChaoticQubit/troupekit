@@ -4,14 +4,16 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+use troupekit_agent::delegate::{AgentTool, DelegateSettings};
 use troupekit_agent::{
     drive, AgentIo, AgentRun, EventSink, Limits, Persona, RunState, SimpleIo, StepOutcome,
 };
 use troupekit_core::event::{Event, Usage};
 use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
-use troupekit_core::message::{Message, Role};
+use troupekit_core::message::{ContentPart, Message, Role};
 use troupekit_core::store::CheckpointStore;
+use troupekit_tools::Tool;
 
 const BASE_RETRY_MS: u64 = 500;
 const MAX_RETRY_MS: u64 = 30_000;
@@ -27,6 +29,12 @@ impl EventSink for Discard {
 /// An empty conversation fails when the run starts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input(Vec<Message>);
+
+impl Input {
+    pub(crate) fn into_messages(self) -> Vec<Message> {
+        self.0
+    }
+}
 
 impl From<&str> for Input {
     fn from(text: &str) -> Self {
@@ -64,6 +72,7 @@ pub struct RunOutcome {
     model_calls: u32,
     run_id: RunId,
     messages: Vec<Message>,
+    pub(crate) member_runs: Vec<RunId>,
 }
 
 impl RunOutcome {
@@ -108,6 +117,13 @@ impl RunOutcome {
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
+
+    /// Returns the run ids of the member agents this run called, through
+    /// `agent_tool` or `delegates`, in call order. Empty for an agent
+    /// without members. Each id opens the member's own checkpoints.
+    pub fn member_runs(&self) -> &[RunId] {
+        &self.member_runs
+    }
 }
 
 /// An agent that passed every `build` check, ready to run many times.
@@ -120,7 +136,9 @@ pub struct BuiltAgent {
 
 struct Inner {
     persona: Persona,
-    io: SimpleIo,
+    io: Arc<SimpleIo>,
+    tool: Arc<AgentTool>,
+    member_tools: Vec<String>,
     limits: Limits,
     store: Option<Arc<dyn CheckpointStore>>,
     retries: u32,
@@ -138,10 +156,23 @@ impl BuiltAgent {
         retries: u32,
         laws: Laws,
     ) -> Self {
+        let io = Arc::new(io);
+        let settings = member_settings(&limits, store.as_ref());
+        let tool = AgentTool::new(
+            &persona.name,
+            &describe(&persona),
+            persona.clone(),
+            io.clone(),
+            settings,
+        )
+        .expect("a built persona is a valid agent tool");
+        assert_eq!(tool.spec().name, persona.name);
         BuiltAgent {
             inner: Arc::new(Inner {
                 persona,
                 io,
+                tool: Arc::new(tool),
+                member_tools: Vec::new(),
                 limits,
                 store,
                 retries,
@@ -188,8 +219,13 @@ impl BuiltAgent {
     pub async fn run_with(&self, input: impl Into<Input>) -> Result<RunOutcome, KitError> {
         let inner = &self.inner;
         let messages = self.messages(input.into()).await?;
-        let mut run =
-            AgentRun::new(&inner.persona, messages, inner.limits.clone(), &inner.io).await?;
+        let mut run = AgentRun::new(
+            &inner.persona,
+            messages,
+            inner.limits.clone(),
+            inner.io.as_ref(),
+        )
+        .await?;
         let store: Arc<dyn CheckpointStore> = match &inner.store {
             Some(store) => store.clone(),
             None => Arc::new(InMemCheckpoints::default()),
@@ -232,14 +268,46 @@ impl BuiltAgent {
         &self.inner.laws
     }
 
-    async fn finish(
+    pub(crate) fn agent_tool(&self) -> &Arc<AgentTool> {
+        &self.inner.tool
+    }
+
+    pub(crate) fn store(&self) -> Option<&Arc<dyn CheckpointStore>> {
+        self.inner.store.as_ref()
+    }
+
+    pub(crate) fn io(&self) -> Arc<SimpleIo> {
+        self.inner.io.clone()
+    }
+
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.inner.limits
+    }
+
+    pub(crate) fn with_member_tools(mut self, names: Vec<String>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("a fresh BuiltAgent is not shared");
+        inner.member_tools = names;
+        self
+    }
+
+    #[cfg(feature = "knowledge")]
+    pub(crate) fn has_preamble(&self) -> bool {
+        self.inner.preamble.is_some()
+    }
+
+    #[cfg(not(feature = "knowledge"))]
+    pub(crate) fn has_preamble(&self) -> bool {
+        false
+    }
+
+    pub(crate) async fn finish(
         &self,
         run: &mut AgentRun,
         store: &dyn CheckpointStore,
     ) -> Result<RunOutcome, KitError> {
-        let io: &dyn AgentIo = &self.inner.io;
+        let io: &dyn AgentIo = self.inner.io.as_ref();
         match run.state().clone() {
-            RunState::Done { output } => return Ok(outcome(run, output)),
+            RunState::Done { output } => return Ok(outcome(run, output, &self.inner.member_tools)),
             RunState::Failed { error } => {
                 return Err(KitError::Failed {
                     run_id: run.run_id(),
@@ -257,7 +325,9 @@ impl BuiltAgent {
         let mut attempts = 0u32;
         loop {
             match drive(run, io, store).await? {
-                StepOutcome::Done(output) => return Ok(outcome(run, output)),
+                StepOutcome::Done(output) => {
+                    return Ok(outcome(run, output, &self.inner.member_tools))
+                }
                 StepOutcome::Retry {
                     error,
                     retry_after_ms,
@@ -307,7 +377,7 @@ impl fmt::Debug for BuiltAgent {
     }
 }
 
-fn outcome(run: &AgentRun, output: Value) -> RunOutcome {
+fn outcome(run: &AgentRun, output: Value, member_tools: &[String]) -> RunOutcome {
     let text = match &output {
         Value::String(text) => text.clone(),
         other => other.to_string(),
@@ -319,7 +389,61 @@ fn outcome(run: &AgentRun, output: Value) -> RunOutcome {
         model_calls: run.model_calls(),
         run_id: run.run_id(),
         messages: run.messages().to_vec(),
+        member_runs: member_runs(run.messages(), member_tools),
     }
+}
+
+/// Returns the member run ids named in the replies to calls of
+/// `member_tools`, in call order. Replies that do not parse or carry no
+/// id are skipped: a failed member start still names its id.
+fn member_runs(messages: &[Message], member_tools: &[String]) -> Vec<RunId> {
+    if member_tools.is_empty() {
+        return Vec::new();
+    }
+    let parts = || messages.iter().flat_map(|m| &m.parts);
+    let calls: Vec<&str> = parts()
+        .filter_map(|p| match p {
+            ContentPart::ToolCall { id, name, .. } if member_tools.contains(name) => {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let ids: Vec<RunId> = parts()
+        .filter_map(|p| match p {
+            ContentPart::ToolResult {
+                call_id, content, ..
+            } if calls.contains(&call_id.as_str()) => {
+                let reply: Value = serde_json::from_str(content).ok()?;
+                serde_json::from_value(reply.get("member_run_id")?.clone()).ok()
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(ids.len() <= calls.len(), "one member run per member call");
+    ids
+}
+
+/// Returns the delegate settings a member run of this agent uses: its own
+/// limits as the base, and its store, so a member run resumes from its
+/// checkpoints after a crash. The depth cap stays at its default.
+pub(crate) fn member_settings(
+    limits: &Limits,
+    store: Option<&Arc<dyn CheckpointStore>>,
+) -> DelegateSettings {
+    let settings = DelegateSettings::default().with_limits(limits.clone());
+    match store {
+        Some(store) => settings.with_store(store.clone()),
+        None => settings,
+    }
+}
+
+/// Returns the tool description of an agent: its role and its goal.
+/// Never empty, since `Persona::parse` requires both.
+pub(crate) fn describe(persona: &Persona) -> String {
+    let text = format!("{} Goal: {}", persona.role.trim(), persona.goal.trim());
+    assert!(!text.trim().is_empty());
+    text
 }
 
 fn retry_delay(attempt: u32, retry_after_ms: Option<u64>) -> Duration {
