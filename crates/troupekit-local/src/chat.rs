@@ -1,7 +1,7 @@
 use crate::error::LocalError;
 use crate::model::{ChatMessage, ChatRole, Flow, GenParams, GenStop, Generation, LocalModel};
 use crate::reply::parse_reply;
-use crate::tools::{tool_prompt, ToolMode};
+use crate::tools::{request_grammar, turn_prompt, ToolMode};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -174,7 +174,11 @@ impl LocalChat {
 
     fn render(&self, req: &CompletionRequest) -> Result<Vec<ChatMessage>, ProviderError> {
         let mut system = req.system_text().unwrap_or_default();
-        let tools = tool_prompt(&req.tools, self.settings.tool_mode);
+        let tools = turn_prompt(
+            &req.tools,
+            self.settings.tool_mode,
+            req.output_schema.as_ref(),
+        );
         if !tools.is_empty() {
             if !system.is_empty() {
                 system.push_str("\n\n");
@@ -226,6 +230,12 @@ impl LocalChat {
     ) -> Result<CompletionResponse, ProviderError> {
         req.validate()?;
         let req = req.sendable(false)?;
+        let grammar = request_grammar(
+            &req.tools,
+            self.settings.tool_mode,
+            req.output_schema.as_ref(),
+        )
+        .map_err(server)?;
         let messages = self.render(&req)?;
         for message in &messages {
             self.refuse_control_tokens(message.content())?;
@@ -249,6 +259,7 @@ impl LocalChat {
             .with_temperature(temperature as f32)
             .with_seed(self.settings.seed)
             .with_ban_eos(self.settings.ban_eos)
+            .with_grammar(grammar)
             .with_confidence(self.settings.min_confidence.is_some())
             .with_cancel(Some(cancel));
         let prompt_tokens = prompt.len();

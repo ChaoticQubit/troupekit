@@ -29,4 +29,4 @@ pub use model::{
     LocalModel,
 };
 pub use reply::{parse_reply, REPLY_MAX_BYTES};
-pub use tools::{tool_prompt, ToolMode};
+pub use tools::{output_grammar, tool_grammar, tool_prompt, ToolMode};
