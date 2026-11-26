@@ -642,3 +642,67 @@ mod fields {
         );
     }
 }
+
+fn run_ids_in(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => m.iter().for_each(|(k, x)| match (k.as_str(), x) {
+            ("run_id", Value::String(id)) => out.push(id.clone()),
+            _ => run_ids_in(x, out),
+        }),
+        Value::Array(a) => a.iter().for_each(|x| run_ids_in(x, out)),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn member_run_id_is_derived_from_the_call() {
+    use troupekit_agent::delegate::member_run_id;
+    use troupekit_tools::ToolContext;
+    let d = delegating_io();
+    let flow = Flow::parse("test/r.toml", &delegate_flow()).unwrap();
+    let mut graph = GraphRun::start(flow, Map::new(), Limits::default(), &d.io)
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    let mut out = GraphOutcome::Continue;
+    for _ in 0..40 {
+        out = graph.step(&d.io).await;
+        run_ids_in(&graph.checkpoint().state, &mut seen);
+        if out != GraphOutcome::Continue {
+            break;
+        }
+    }
+    let GraphOutcome::Done(state) = out else {
+        panic!("the delegating run finishes: {out:?}");
+    };
+    let graph_id = graph.run_id().to_string();
+    let agents: Vec<String> = seen.into_iter().filter(|id| *id != graph_id).collect();
+    assert!(
+        !agents.is_empty(),
+        "the agent branch was checkpointed with its run id"
+    );
+    let member: Vec<_> = d
+        .sink
+        .events()
+        .iter()
+        .map(|e| e.run_id)
+        .filter(|id| id.to_string() != graph_id && !agents.contains(&id.to_string()))
+        .collect();
+    assert!(!member.is_empty(), "member events reach the sink");
+    let expected: Vec<_> = agents
+        .iter()
+        .map(|id| serde_json::from_value::<troupekit_core::ids::RunId>(json!(id)).unwrap())
+        .flat_map(|agent| {
+            (0..8).map(move |step| member_run_id(&ToolContext::for_call(agent, step, 0)))
+        })
+        .collect();
+    assert!(
+        expected.contains(&member[0]),
+        "the member run id is derived from the agent run id and the call key"
+    );
+    let answer = state["out"].as_str().unwrap();
+    assert!(
+        answer.contains(&member[0].to_string()),
+        "the tool result names the member run: {answer}"
+    );
+}
