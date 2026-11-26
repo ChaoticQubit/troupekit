@@ -124,3 +124,5 @@ async fn run(call: &IngestArgs) -> Result<IngestReport, String> {
     let report = ingest_dir(&vectors, embedder.as_ref(), &call.dir, &ingest).await.map_err(|e| format!("ingest of {}: {e}", call.dir.display()))?;
     Ok(report)
 }
+
+use troupekit_trace as _;

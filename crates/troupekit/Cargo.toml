@@ -12,6 +12,7 @@ rust-version = "1.89"
 autotests = false
 
 [dependencies]
+troupekit-trace = { path = "../troupekit-trace", version = "0.1.0" }
 troupekit-core.workspace = true
 troupekit-agent = { path = "../troupekit-agent", version = "0.1.0", default-features = false }
 troupekit-graph = { path = "../troupekit-graph", version = "0.1.0", default-features = false }
@@ -19,6 +20,7 @@ troupekit-host = { path = "../troupekit-host", version = "0.1.0", default-featur
 troupekit-store-sqlite = { path = "../troupekit-store-sqlite", version = "0.1.0", optional = true }
 troupekit-context = { path = "../troupekit-context", version = "0.1.0", optional = true }
 troupekit-kit = { path = "../troupekit-kit", version = "0.1.0", default-features = false, optional = true }
+troupekit-local = { path = "../troupekit-local", version = "0.1.0", default-features = false, optional = true }
 
 [features]
 default = ["sqlite", "reqwest"]
@@ -27,6 +29,8 @@ knowledge = ["sqlite", "dep:troupekit-context", "dep:troupekit-kit", "troupekit-
 reqwest = ["troupekit-agent/reqwest", "troupekit-graph/reqwest", "troupekit-host/reqwest"]
 sqlcipher = ["sqlite", "troupekit-store-sqlite/sqlcipher"]
 sqlcipher-system = ["sqlite", "troupekit-store-sqlite/sqlcipher-system"]
+local = ["dep:troupekit-kit", "troupekit-kit/local", "dep:troupekit-local"]
+llama = ["local", "troupekit-kit/llama", "troupekit-local/llama"]
 
 [[example]]
 name = "kill_resume"
@@ -39,6 +43,15 @@ required-features = ["knowledge"]
 [[example]]
 name = "hybrid_latency"
 required-features = ["knowledge"]
+
+[[example]]
+name = "support_agent_offline"
+required-features = ["llama", "knowledge"]
+test = true
+
+[[example]]
+name = "kill_model_call"
+required-features = ["llama", "sqlite"]
 
 [[test]]
 name = "main"

@@ -41,3 +41,7 @@ pub mod prelude {
     #[cfg(feature = "knowledge")]
     pub use crate::{AgentMemory, Knowledge};
 }
+
+use troupekit_trace as _;
+#[cfg(feature = "local")]
+use troupekit_local as _;

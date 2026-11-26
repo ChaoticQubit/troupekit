@@ -2757,9 +2757,11 @@ dependencies = [
  "troupekit-graph",
  "troupekit-host",
  "troupekit-kit",
+ "troupekit-local",
  "troupekit-providers",
  "troupekit-store-sqlite",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2777,6 +2779,7 @@ dependencies = [
  "troupekit-core",
  "troupekit-providers",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2787,6 +2790,7 @@ dependencies = [
  "tokio",
  "troupekit",
  "troupekit-providers",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2803,6 +2807,7 @@ dependencies = [
  "troupekit-core",
  "troupekit-store-sqlite",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2814,6 +2819,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "troupekit-trace",
  "uuid",
 ]
 
@@ -2833,6 +2839,7 @@ dependencies = [
  "troupekit-core",
  "troupekit-providers",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2849,6 +2856,7 @@ dependencies = [
  "troupekit-graph",
  "troupekit-providers",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2856,6 +2864,7 @@ name = "troupekit-index"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2874,10 +2883,12 @@ dependencies = [
  "troupekit-context",
  "troupekit-core",
  "troupekit-graph",
+ "troupekit-local",
  "troupekit-macros",
  "troupekit-providers",
  "troupekit-store-sqlite",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2913,6 +2924,7 @@ dependencies = [
  "toml",
  "troupekit-context",
  "troupekit-core",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2926,6 +2938,7 @@ dependencies = [
  "tokio",
  "troupekit-core",
  "troupekit-index",
+ "troupekit-trace",
 ]
 
 [[package]]
@@ -2943,6 +2956,7 @@ dependencies = [
  "tokio",
  "toml",
  "troupekit-core",
+ "troupekit-trace",
  "url",
 ]
 

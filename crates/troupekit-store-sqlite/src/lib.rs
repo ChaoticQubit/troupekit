@@ -537,3 +537,5 @@ mod tests {
         assert_eq!(pragma(&store, "user_version").await, i64::from(SCHEMA_VERSION));
     }
 }
+
+use troupekit_trace as _;

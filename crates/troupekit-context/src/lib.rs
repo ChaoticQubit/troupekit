@@ -19,3 +19,5 @@ pub mod text;
 pub mod tools;
 
 pub use error::ContextError;
+
+use troupekit_trace as _;
