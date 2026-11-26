@@ -394,34 +394,71 @@ fn outcome(run: &AgentRun, output: Value, member_tools: &[String]) -> RunOutcome
 }
 
 /// Returns the member run ids named in the replies to calls of
-/// `member_tools`, in call order. Replies that do not parse or carry no
-/// id are skipped: a failed member start still names its id.
+/// `member_tools`, in call order. A result counts only for a call of the
+/// assistant message right before it, each call once; a call id repeated
+/// within one message, or a reply without an id, is skipped.
 fn member_runs(messages: &[Message], member_tools: &[String]) -> Vec<RunId> {
     if member_tools.is_empty() {
         return Vec::new();
     }
-    let parts = || messages.iter().flat_map(|m| &m.parts);
-    let calls: Vec<&str> = parts()
-        .filter_map(|p| match p {
-            ContentPart::ToolCall { id, name, .. } if member_tools.contains(name) => {
-                Some(id.as_str())
+    let mut ids = Vec::new();
+    let mut pending: Vec<&str> = Vec::new();
+    let mut member_calls = 0usize;
+    for message in messages {
+        match message.role {
+            Role::Assistant => {
+                pending = turn_member_calls(message, member_tools);
+                member_calls += pending.len();
             }
-            _ => None,
-        })
-        .collect();
-    let ids: Vec<RunId> = parts()
-        .filter_map(|p| match p {
-            ContentPart::ToolResult {
-                call_id, content, ..
-            } if calls.contains(&call_id.as_str()) => {
-                let reply: Value = serde_json::from_str(content).ok()?;
-                serde_json::from_value(reply.get("member_run_id")?.clone()).ok()
+            Role::Tool => {
+                for part in &message.parts {
+                    let ContentPart::ToolResult {
+                        call_id, content, ..
+                    } = part
+                    else {
+                        continue;
+                    };
+                    let Some(at) = pending.iter().position(|c| c == call_id) else {
+                        continue;
+                    };
+                    pending.swap_remove(at);
+                    if let Some(id) = reply_run_id(content) {
+                        ids.push(id);
+                    }
+                }
             }
-            _ => None,
-        })
-        .collect();
-    assert!(ids.len() <= calls.len(), "one member run per member call");
+            _ => pending.clear(),
+        }
+    }
+    assert!(ids.len() <= member_calls, "each member call is used once");
     ids
+}
+
+/// Returns the ids of the member calls in one assistant message whose id
+/// no other call in that message shares. Returns an empty list for a
+/// message without member calls.
+fn turn_member_calls<'a>(message: &'a Message, member_tools: &[String]) -> Vec<&'a str> {
+    let calls: Vec<(&str, &str)> = message
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::ToolCall { id, name, .. } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+    let unique = |id: &str| calls.iter().filter(|(c, _)| *c == id).count() == 1;
+    let members: Vec<&str> = calls
+        .iter()
+        .filter(|(id, name)| member_tools.iter().any(|t| t == name) && unique(id))
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(members.len() <= calls.len());
+    members
+}
+
+fn reply_run_id(content: &str) -> Option<RunId> {
+    let reply: Value = serde_json::from_str(content).ok()?;
+    serde_json::from_value(reply.get("member_run_id")?.clone()).ok()
 }
 
 /// Returns the delegate settings a member run of this agent uses: its own
@@ -454,6 +491,53 @@ fn retry_delay(attempt: u32, retry_after_ms: Option<u64>) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn call(id: &str, name: &str) -> ContentPart {
+        ContentPart::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: json!({}),
+        }
+    }
+
+    fn result(id: &str, run: RunId) -> ContentPart {
+        ContentPart::ToolResult {
+            call_id: id.into(),
+            content: json!({"member_run_id": run.to_string(), "answer": "x"}).to_string(),
+            is_error: false,
+        }
+    }
+
+    fn msg(role: Role, parts: Vec<ContentPart>) -> Message {
+        Message::new(role, parts).unwrap()
+    }
+
+    #[test]
+    fn member_runs_pairs_results_with_calls_of_the_same_turn() {
+        let (member, other, again) = (RunId::new(), RunId::new(), RunId::new());
+        let tools = vec!["researcher".to_string()];
+        let messages = vec![
+            Message::text(Role::User, "Go"),
+            msg(Role::Assistant, vec![call("call_0", "researcher")]),
+            msg(Role::Tool, vec![result("call_0", member)]),
+            msg(Role::Assistant, vec![call("call_0", "other")]),
+            msg(Role::Tool, vec![result("call_0", other)]),
+            msg(Role::Assistant, vec![call("call_0", "researcher")]),
+            msg(
+                Role::Tool,
+                vec![result("call_0", again), result("call_0", other)],
+            ),
+            msg(
+                Role::Assistant,
+                vec![call("c1", "researcher"), call("c1", "other")],
+            ),
+            msg(Role::Tool, vec![result("c1", other), result("c1", other)]),
+            Message::text(Role::Assistant, "Done."),
+        ];
+        assert_eq!(member_runs(&messages, &tools), [member, again]);
+        assert!(member_runs(&messages, &[]).is_empty());
+    }
 
     #[test]
     fn retry_delay_backs_off_and_caps() {
