@@ -1,4 +1,5 @@
 use crate::error::GraphError;
+use crate::flow::{Flow, FlowKind, GRAPH_FORMAT_FLOW};
 use crate::io::{Emitter, GraphIo, NodeIo};
 use crate::workflow::{Ask, Node, NodeKind, Workflow};
 use futures_util::future::join_all;
@@ -12,9 +13,10 @@ use troupekit_core::message::{Message, Role};
 use troupekit_core::store::Checkpoint;
 use troupekit_tools::{fence_untrusted, ToolContext, ToolError};
 
-/// Version of the serialized graph run.
-/// `from_checkpoint` refuses any other, so a deploy never resumes
-/// a run it cannot read.
+/// Version of the serialized graph run of a 0.1 workflow.
+/// A run of a flow that uses a 0.5 feature writes `GRAPH_FORMAT_FLOW` (2).
+/// `from_checkpoint` refuses any other, so a deploy never resumes a run it
+/// cannot read.
 pub const GRAPH_FORMAT: u32 = 1;
 
 const MAX_RETRY_DELAY_MS: u64 = 300_000;
@@ -199,6 +201,15 @@ pub struct GraphRun {
     stopped: Option<Stop>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flow: Option<Box<Flow>>,
+}
+
+struct Reduced {
+    key: String,
+    branch: usize,
+    node: String,
+    value: Value,
 }
 
 impl GraphRun {
@@ -269,7 +280,42 @@ impl GraphRun {
             active_ms: 0,
             stopped: None,
             failure: None,
+            flow: None,
         })
+    }
+
+    /// Starts a run of `flow` on `input` under `limits`, with the checks of
+    /// `new`. A flow with no 0.5 feature runs exactly as `new` would; any
+    /// other writes `GRAPH_FORMAT_FLOW`. Returns `Setup` for a flow feature
+    /// this engine does not run yet.
+    pub async fn start(
+        flow: Flow,
+        input: Map<String, Value>,
+        limits: Limits,
+        io: &dyn GraphIo,
+    ) -> Result<GraphRun, GraphError> {
+        if let Some(feature) = unsupported(&flow) {
+            return Err(GraphError::Setup(format!(
+                "flow `{}`: {feature} is not run by this engine yet",
+                flow.name()
+            )));
+        }
+        let mut run = GraphRun::new(flow.workflow().clone(), input, limits, io).await?;
+        if !flow.is_v1() {
+            run.format = GRAPH_FORMAT_FLOW;
+            run.flow = Some(Box::new(flow));
+        }
+        Ok(run)
+    }
+
+    /// Returns the flow the run started with: the stored flow of a run
+    /// started from a flow with 0.5 features, else its workflow as a flow.
+    /// It never changes.
+    pub fn flow(&self) -> Flow {
+        match &self.flow {
+            Some(flow) => (**flow).clone(),
+            None => Flow::from(self.workflow.clone()),
+        }
     }
 
     /// Sets the active-work time limit: the run stops once its steps have
@@ -377,9 +423,14 @@ impl GraphRun {
         let bad = |m: String| GraphError::Checkpoint(m);
         let mut run: GraphRun =
             serde_json::from_value(cp.state.clone()).map_err(|e| bad(e.to_string()))?;
-        if run.format != GRAPH_FORMAT {
+        let expected = if run.flow.is_some() {
+            GRAPH_FORMAT_FLOW
+        } else {
+            GRAPH_FORMAT
+        };
+        if run.format != expected {
             return Err(bad(format!(
-                "graph format {} is not {GRAPH_FORMAT}",
+                "graph format {} is not {expected}",
                 run.format
             )));
         }
@@ -632,6 +683,7 @@ impl GraphRun {
         }
         let results = self.run_branches(io, em).await;
         let mut retry: Option<(String, Option<u64>)> = None;
+        let mut reduced: Vec<Reduced> = Vec::new();
         for (i, w) in results.into_iter().enumerate() {
             let node = self.node(&self.branches[i].node).clone();
             match w {
@@ -657,17 +709,20 @@ impl GraphRun {
                     };
                     self.usage += run.usage();
                     self.branches[i].at = At::Left;
-                    if let Err(e) = self.write(&node, output) {
+                    if let Err(e) = self.write(&node, i, output, &mut reduced) {
                         return GraphOutcome::Failed(e);
                     }
                 }
                 Work::Tool(Ok(output)) => {
                     self.branches[i].at = At::Left;
-                    if let Err(e) = self.write(&node, output) {
+                    if let Err(e) = self.write(&node, i, output, &mut reduced) {
                         return GraphOutcome::Failed(e);
                     }
                 }
             }
+        }
+        if let Err(e) = self.reduce(reduced) {
+            return GraphOutcome::Failed(e);
         }
         match self.settle(io).await {
             Err(e) => return GraphOutcome::Failed(e),
@@ -755,10 +810,25 @@ impl GraphRun {
         join_all(futures).await
     }
 
-    fn write(&mut self, node: &Node, value: Value) -> Result<(), String> {
+    fn write(
+        &mut self,
+        node: &Node,
+        branch: usize,
+        value: Value,
+        reduced: &mut Vec<Reduced>,
+    ) -> Result<(), String> {
         let Some(key) = &node.writes else {
             return Ok(());
         };
+        if self.reducer(key).is_some() {
+            reduced.push(Reduced {
+                key: key.clone(),
+                branch,
+                node: node.id.clone(),
+                value,
+            });
+            return Ok(());
+        }
         let errs = self.workflow.check_value(key, &value);
         if !errs.is_empty() {
             return Err(format!(
@@ -768,6 +838,37 @@ impl GraphRun {
             ));
         }
         self.state.insert(key.clone(), value);
+        Ok(())
+    }
+
+    fn reducer(&self, key: &str) -> Option<crate::flow::Reducer> {
+        self.flow.as_ref().and_then(|f| f.reducer(key))
+    }
+
+    fn reduce(&mut self, reduced: Vec<Reduced>) -> Result<(), String> {
+        assert!(
+            reduced.windows(2).all(|w| w[0].branch < w[1].branch),
+            "results are applied in ascending branch index"
+        );
+        let mut keys: Vec<String> = Vec::new();
+        for r in &reduced {
+            if !keys.contains(&r.key) {
+                keys.push(r.key.clone());
+            }
+        }
+        for key in keys {
+            let reducer = self.reducer(&key).expect("only reducer keys are deferred");
+            let group: Vec<&Reduced> = reduced.iter().filter(|r| r.key == key).collect();
+            let last = group.last().expect("a reduced key has a write");
+            let writes: Vec<(usize, Value)> = group.iter().map(|r| (r.branch, r.value.clone())).collect();
+            let fail = |m: String| format!("node `{}`: reducing `{key}`: {m}", last.node);
+            let value = reducer.reduce(self.state.get(&key), &writes).map_err(fail)?;
+            let errs = self.workflow.check_value(&key, &value);
+            if !errs.is_empty() {
+                return Err(fail(format!("result does not match `{key}`: {}", errs.join("; "))));
+            }
+            self.state.insert(key, value);
+        }
         Ok(())
     }
 
@@ -880,6 +981,21 @@ impl GraphRun {
         );
         true
     }
+}
+
+fn unsupported(flow: &Flow) -> Option<String> {
+    if flow.nested() {
+        return Some("a nested fan-out".into());
+    }
+    if !flow.untracked().is_empty() {
+        return Some("untracked state".into());
+    }
+    let node = flow
+        .workflow()
+        .nodes
+        .iter()
+        .find(|n| flow.kind(&n.id) != Some(&FlowKind::from_v1(&n.kind)))?;
+    Some(format!("node `{}` of a 0.5 kind or option", node.id))
 }
 
 fn node_limits(
