@@ -1,5 +1,5 @@
 use crate::error::GraphError;
-use crate::flow::{BudgetSplit, Flow, FlowKind, GRAPH_FORMAT_FLOW};
+use crate::flow::{BudgetSplit, JoinMode, Flow, FlowKind, GRAPH_FORMAT_FLOW};
 use crate::io::{Emitter, GraphIo, NodeIo};
 use crate::workflow::{Ask, Node, NodeKind, Workflow};
 use futures_util::future::join_all;
@@ -10,7 +10,7 @@ use troupekit_agent::{AgentRun, Budget, Limits, RunState, StepOutcome};
 use troupekit_core::event::{EventBody, PauseReason, Usage};
 use troupekit_core::ids::RunId;
 use troupekit_core::message::{Message, Role};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use troupekit_core::error::CoreError;
 use troupekit_core::store::{BranchWrite, Checkpoint, CheckpointStore};
 use troupekit_tools::{fence_untrusted, ToolContext, ToolError};
@@ -1046,7 +1046,7 @@ impl GraphRun {
     }
 
     fn workers(&self) -> Vec<bool> {
-        let window = self.windows();
+        let window = self.openings();
         self.branches
             .iter()
             .zip(window)
@@ -1056,6 +1056,138 @@ impl GraphRun {
 
     fn flow_kind(&self, id: &str) -> Option<&FlowKind> {
         self.flow.as_ref()?.kind(id)
+    }
+
+    fn deferred(&self, id: &str) -> bool {
+        match self.flow_kind(id) {
+            Some(FlowKind::Agent { defer, .. } | FlowKind::Tool { defer, .. } | FlowKind::Flow { defer, .. }) => *defer,
+            _ => false,
+        }
+    }
+
+    fn is_any(&self, id: &str) -> bool {
+        matches!(self.flow_kind(id), Some(FlowKind::Join { mode: JoinMode::Any }))
+    }
+
+    fn openings(&self) -> Vec<bool> {
+        let window = self.windows();
+        if !self.branches.iter().any(|b| self.deferred(&b.node)) {
+            return window;
+        }
+        let others_parked = self
+            .branches
+            .iter()
+            .all(|b| self.deferred(&b.node) || b.at == At::Joined);
+        self.branches
+            .iter()
+            .zip(window)
+            .map(|(b, open)| open && (others_parked || !self.deferred(&b.node)))
+            .collect()
+    }
+
+    fn fork_outs(&self, id: &str) -> Option<Vec<String>> {
+        let outs = self.workflow.next(id);
+        (outs.len() >= 2 && outs.iter().all(|e| e.when.is_none()))
+            .then(|| outs.iter().map(|e| e.to.clone()).collect())
+    }
+
+    fn join_of(&self, fork: &str, depth: usize) -> String {
+        assert!(depth <= self.workflow.nodes.len(), "fan-outs nest at most once per node");
+        let outs = self.fork_outs(fork).expect("join_of walks from a fork");
+        let mut cur = outs[0].clone();
+        for _ in 0..=self.workflow.nodes.len() {
+            if matches!(self.node(&cur).kind, NodeKind::Join) {
+                return cur;
+            }
+            let from = if self.fork_outs(&cur).is_some() {
+                self.join_of(&cur, depth + 1)
+            } else {
+                cur.clone()
+            };
+            let next = self.workflow.next(&from);
+            assert_eq!(next.len(), 1, "a fan-out branch leads on by one edge");
+            cur = next[0].to.clone();
+        }
+        unreachable!("a validated fan-out branch ends at its join");
+    }
+
+    fn region(&self, fork: &str, join: &str, out: &mut BTreeSet<String>, depth: usize) {
+        assert!(depth <= self.workflow.nodes.len(), "fan-outs nest at most once per node");
+        for first in self.fork_outs(fork).expect("region walks from a fork") {
+            let mut cur = first;
+            for _ in 0..=self.workflow.nodes.len() {
+                if cur == join {
+                    break;
+                }
+                out.insert(cur.clone());
+                if let Some(FlowKind::Map { body, .. }) = self.flow_kind(&cur) {
+                    out.insert(body.clone());
+                }
+                let from = if self.fork_outs(&cur).is_some() {
+                    let inner = self.join_of(&cur, depth + 1);
+                    self.region(&cur, &inner, out, depth + 1);
+                    out.insert(inner.clone());
+                    inner
+                } else {
+                    cur.clone()
+                };
+                let next = self.workflow.next(&from);
+                assert_eq!(next.len(), 1, "a fan-out branch leads on by one edge");
+                cur = next[0].to.clone();
+            }
+            assert_eq!(cur, join, "every branch of the fan-out ends at its join");
+        }
+    }
+
+    fn close_any(&mut self) -> bool {
+        let Some(join) = self
+            .branches
+            .iter()
+            .find(|b| b.at == At::Joined && self.is_any(&b.node))
+            .map(|b| b.node.clone())
+        else {
+            return false;
+        };
+        let fork = self
+            .workflow
+            .nodes
+            .iter()
+            .map(|n| n.id.clone())
+            .find(|id| self.fork_outs(id).is_some() && self.join_of(id, 0) == join)
+            .expect("every join closes one fan-out");
+        let mut region = BTreeSet::new();
+        self.region(&fork, &join, &mut region, 0);
+        region.insert(join.clone());
+        let before = self.usage();
+        let mut first = None;
+        let mut kept = Vec::with_capacity(self.branches.len());
+        for b in std::mem::take(&mut self.branches) {
+            if !region.contains(&b.node) {
+                kept.push(b);
+                continue;
+            }
+            first.get_or_insert(kept.len());
+            if let At::Agent { run, .. } = &b.at {
+                self.usage += run.usage();
+            }
+        }
+        let at = first.expect("the join has a parked branch");
+        kept.insert(
+            at,
+            Branch {
+                node: join,
+                at: At::Left,
+                call: None,
+                item: None,
+            },
+        );
+        self.branches = kept;
+        let after = self.usage();
+        assert!(
+            after.cost_usd_micros >= before.cost_usd_micros && after.input_tokens >= before.input_tokens,
+            "dropped branches keep their usage"
+        );
+        true
     }
 
     fn windows(&self) -> Vec<bool> {
@@ -1340,7 +1472,7 @@ impl GraphRun {
     }
 
     async fn settle(&mut self, io: &dyn GraphIo) -> Result<bool, String> {
-        let passes = 2 * self.workflow.nodes.len() + 4;
+        let passes = 3 * self.workflow.nodes.len() + 8;
         for _ in 0..passes {
             let mut changed = false;
             let mut next = Vec::with_capacity(self.branches.len());
@@ -1355,7 +1487,7 @@ impl GraphRun {
                 next.extend(out.into_iter().map(|e| Branch::enter(&e.to)));
             }
             self.branches = next;
-            let window = self.windows();
+            let window = self.openings();
             for i in 0..self.branches.len() {
                 if self.branches[i].at != At::Enter {
                     continue;
@@ -1422,6 +1554,9 @@ impl GraphRun {
             changed |= self.close_joins();
             changed |= self.collect_maps()?;
             if !changed {
+                changed = self.close_any();
+            }
+            if !changed {
                 return Ok(false);
             }
         }
@@ -1437,7 +1572,7 @@ impl GraphRun {
                 .iter()
                 .filter(|o| o.node == b.node && o.at == At::Joined)
                 .count();
-            (b.at == At::Joined && parked == self.workflow.in_degree(&b.node))
+            (b.at == At::Joined && !self.is_any(&b.node) && parked == self.workflow.in_degree(&b.node))
                 .then(|| b.node.clone())
         });
         let Some(join) = ready else {
@@ -1478,19 +1613,39 @@ fn apply_finished(b: &mut Branch, finished: Finished) -> Work {
     }
 }
 
+fn run_plain(kind: &FlowKind) -> FlowKind {
+    match kind.clone() {
+        FlowKind::Agent {
+            persona,
+            prompt,
+            goto,
+            delegates,
+            model,
+            ..
+        } => FlowKind::Agent {
+            persona,
+            prompt,
+            goto,
+            delegates,
+            model,
+            defer: false,
+        },
+        FlowKind::Tool { tool, .. } => FlowKind::Tool { tool, defer: false },
+        FlowKind::Join { .. } => FlowKind::Join { mode: JoinMode::All },
+        other => other,
+    }
+}
+
 fn unsupported(flow: &Flow) -> Option<String> {
     if flow.budget_split() == BudgetSplit::Shared {
         return Some("a shared budget split".into());
-    }
-    if flow.nested() {
-        return Some("a nested fan-out".into());
     }
     if !flow.untracked().is_empty() {
         return Some("untracked state".into());
     }
     let node = flow.workflow().nodes.iter().find(|n| match flow.kind(&n.id) {
         Some(FlowKind::Map { .. }) => false,
-        kind => kind != Some(&FlowKind::from_v1(&n.kind)),
+        kind => kind.map(run_plain) != Some(FlowKind::from_v1(&n.kind)),
     })?;
     Some(format!("node `{}` of a 0.5 kind or option", node.id))
 }

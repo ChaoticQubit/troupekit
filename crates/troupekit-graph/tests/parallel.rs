@@ -587,3 +587,361 @@ async fn shared_budget_split_is_refused_until_it_is_run() {
         "{err}"
     );
 }
+
+fn chain_io(gates: &GatedTool, names: &[&str]) -> SimpleGraphIo {
+    let mut tools = ToolRegistry::new();
+    for name in names {
+        let reply = format!("{name}!");
+        tools
+            .register(gates.tool(name, move |_| ToolOutput::text(reply.clone())))
+            .unwrap();
+    }
+    SimpleGraphIo::new(Arc::new(SimpleIo::new(tools)), PersonaLoader::new(vec![]))
+}
+
+fn tool_node(id: &str, extra: &str) -> String {
+    format!("[[nodes]]\nid = '{id}'\nkind = 'tool'\ntool = '{id}'\nwrites = '{id}'\n{extra}")
+}
+
+fn graph(state: &[&str], nodes: &[String], edges: &[(&str, &str)]) -> String {
+    let mut text = "name = 'g'\nstart = 's'\n[state]\n".to_string();
+    for key in state {
+        text.push_str(&format!("{key} = 'string?'\n"));
+    }
+    for n in nodes {
+        text.push_str(n);
+    }
+    for (from, to) in edges {
+        text.push_str(&format!("[[edges]]\nfrom = '{from}'\nto = '{to}'\n"));
+    }
+    text
+}
+
+fn join_node(id: &str, mode: &str) -> String {
+    format!("[[nodes]]\nid = '{id}'\nkind = 'join'\n{mode}")
+}
+
+const END_NODE: &str = "[[nodes]]\nid = 'e'\nkind = 'end'\n";
+
+fn open_all(gates: &GatedTool, names: &[&str]) {
+    for name in names {
+        gates.open(name);
+    }
+}
+
+async fn finish(
+    text: &str,
+    io: &SimpleGraphIo,
+    gates: &GatedTool,
+) -> (Map<String, Value>, GraphRun) {
+    let flow = Flow::parse("test/g.toml", text).unwrap();
+    let mut run = GraphRun::start(flow, Map::new(), Limits::default(), io)
+        .await
+        .unwrap();
+    let out = bounded("the run", || started(gates), drive_plain(&mut run, io)).await;
+    let GraphOutcome::Done(state) = out else {
+        panic!("{out:?}");
+    };
+    (state, run)
+}
+
+#[tokio::test]
+async fn nested_fan_out_joins_inner_then_outer() {
+    let names = ["s", "a", "i", "c", "d", "k"];
+    let gates = GatedTool::new();
+    open_all(&gates, &names);
+    let io = chain_io(&gates, &names);
+    let nodes: Vec<String> = names
+        .iter()
+        .map(|n| tool_node(n, ""))
+        .chain([
+            join_node("j2", ""),
+            join_node("j1", ""),
+            END_NODE.to_string(),
+        ])
+        .collect();
+    let text = graph(
+        &names,
+        &nodes,
+        &[
+            ("s", "a"),
+            ("s", "i"),
+            ("i", "c"),
+            ("i", "d"),
+            ("c", "j2"),
+            ("d", "j2"),
+            ("j2", "k"),
+            ("k", "j1"),
+            ("a", "j1"),
+            ("j1", "e"),
+        ],
+    );
+    let flow = Flow::parse("test/g.toml", &text).unwrap();
+    assert!(!flow.is_v1(), "a nested fan-out is a 0.5 flow");
+    let (state, run) = finish(&text, &io, &gates).await;
+    let order = gates.finished();
+    let at = |n: &str| order.iter().position(|o| o == n).unwrap();
+    assert!(
+        at("c") < at("k") && at("d") < at("k"),
+        "inner join closes before k: {order:?}"
+    );
+    assert_eq!(order.len(), names.len(), "every tool ran once: {order:?}");
+    for n in names {
+        assert_eq!(state[n], json!(format!("{n}!")));
+    }
+    assert_eq!(run.checkpoint().state["format"], json!(GRAPH_FORMAT_FLOW));
+}
+
+#[tokio::test]
+async fn any_join_takes_the_lowest_index_arrival() {
+    let names = ["s", "a", "b", "after"];
+    let gates = GatedTool::new();
+    let io = chain_io(&gates, &names);
+    let nodes: Vec<String> = names
+        .iter()
+        .map(|n| tool_node(n, ""))
+        .chain([join_node("j", "mode = 'any'\n"), END_NODE.to_string()])
+        .collect();
+    let text = graph(
+        &names,
+        &nodes,
+        &[
+            ("s", "a"),
+            ("s", "b"),
+            ("a", "j"),
+            ("b", "j"),
+            ("j", "after"),
+            ("after", "e"),
+        ],
+    );
+    let flow = Flow::parse("test/g.toml", &text).unwrap();
+    let mut run = GraphRun::start(flow, Map::new(), Limits::default(), &io)
+        .await
+        .unwrap();
+    let opener = async {
+        gates.open("s");
+        while gates.in_flight("a") + gates.in_flight("b") < 2 {
+            tokio::task::yield_now().await;
+        }
+        gates.open("b");
+        while gates.finished().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        gates.open("a");
+        gates.open("after");
+    };
+    let (out, ()) = bounded("the any-join run", || started(&gates), async {
+        tokio::join!(drive_plain(&mut run, &io), opener)
+    })
+    .await;
+    let GraphOutcome::Done(state) = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(gates.finished(), vec!["s", "b", "a", "after"]);
+    assert_eq!(
+        gates.calls("after").len(),
+        1,
+        "an any-join continues one branch"
+    );
+    assert_eq!(
+        (&state["a"], &state["b"]),
+        (&json!("a!"), &json!("b!")),
+        "same-step arrivals keep their writes"
+    );
+}
+
+#[tokio::test]
+async fn any_join_drops_losing_branches_and_their_pending_writes() {
+    let names = ["s", "a", "b1", "b2", "after"];
+    let gates = GatedTool::new();
+    open_all(&gates, &names);
+    open_all(&gates, &["w/x", "w/y"]);
+    let mut tools = ToolRegistry::new();
+    for name in names {
+        let reply = format!("{name}!");
+        tools
+            .register(gates.tool(name, move |_| ToolOutput::text(reply.clone())))
+            .unwrap();
+    }
+    tools
+        .register(gates.tool_per_item("w", "x", |args| {
+            ToolOutput::text(args["x"].as_str().unwrap().to_string())
+        }))
+        .unwrap();
+    let io = SimpleGraphIo::new(Arc::new(SimpleIo::new(tools)), PersonaLoader::new(vec![]));
+    let mut nodes: Vec<String> = names.iter().map(|n| tool_node(n, "")).collect();
+    nodes.push(
+        "[[nodes]]\nid = 'm'\nkind = 'map'\nover = 'xs'\nitem = 'x'\nbody = 'w'\nwrites = 'out'\n"
+            .into(),
+    );
+    nodes.push(
+        "[[nodes]]\nid = 'w'\nkind = 'tool'\ntool = 'w'\nreads = ['x']\nwrites = 'y'\n".into(),
+    );
+    nodes.push(join_node("j", "mode = 'any'\n"));
+    nodes.push(END_NODE.into());
+    let mut text = graph(
+        &names,
+        &nodes,
+        &[
+            ("s", "a"),
+            ("s", "b1"),
+            ("b1", "m"),
+            ("m", "b2"),
+            ("a", "j"),
+            ("b2", "j"),
+            ("j", "after"),
+            ("after", "e"),
+        ],
+    );
+    text = text.replace(
+        "[state]\n",
+        "[state]\nxs = 'list'\nx = 'string'\ny = 'string'\nout = 'list'\n",
+    );
+    let flow = Flow::parse("test/g.toml", &text).unwrap();
+    let mut input = Map::new();
+    input.insert("xs".into(), json!(["x", "y"]));
+    let mut run = GraphRun::start(flow, input, Limits::default(), &io)
+        .await
+        .unwrap();
+    let out = bounded(
+        "the any-join run",
+        || started(&gates),
+        drive_plain(&mut run, &io),
+    )
+    .await;
+    let GraphOutcome::Done(state) = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(state["a"], json!("a!"));
+    assert_eq!(
+        state["b1"],
+        json!("b1!"),
+        "a loser's write finished before the close stays"
+    );
+    assert!(
+        gates.calls("w/x").is_empty() && gates.calls("w/y").is_empty(),
+        "dropped map items never run"
+    );
+    assert!(
+        gates.calls("b2").is_empty(),
+        "the loser's next node never runs"
+    );
+    assert_eq!(state.get("out"), None, "the dropped map writes nothing");
+    assert_eq!(gates.calls("after").len(), 1);
+}
+
+#[tokio::test]
+async fn deferred_node_waits_for_all_other_work() {
+    let names = ["s", "d", "a1", "a2", "after"];
+    let gates = GatedTool::new();
+    open_all(&gates, &names);
+    let io = chain_io(&gates, &names);
+    let nodes: Vec<String> = names
+        .iter()
+        .map(|n| tool_node(n, if *n == "d" { "defer = true\n" } else { "" }))
+        .chain([join_node("j", ""), END_NODE.to_string()])
+        .collect();
+    let text = graph(
+        &names,
+        &nodes,
+        &[
+            ("s", "d"),
+            ("s", "a1"),
+            ("a1", "a2"),
+            ("d", "j"),
+            ("a2", "j"),
+            ("j", "after"),
+            ("after", "e"),
+        ],
+    );
+    finish(&text, &io, &gates).await;
+    assert_eq!(gates.finished(), vec!["s", "a1", "a2", "d", "after"]);
+}
+
+#[tokio::test]
+async fn deferred_node_runs_once() {
+    let names = ["s", "d1", "d2", "a"];
+    let gates = GatedTool::new();
+    let io = chain_io(&gates, &names);
+    let nodes: Vec<String> = names
+        .iter()
+        .map(|n| {
+            tool_node(
+                n,
+                if n.starts_with('d') {
+                    "defer = true\n"
+                } else {
+                    ""
+                },
+            )
+        })
+        .chain([join_node("j", ""), END_NODE.to_string()])
+        .collect();
+    let text = graph(
+        &names,
+        &nodes,
+        &[
+            ("s", "d1"),
+            ("s", "d2"),
+            ("s", "a"),
+            ("d1", "j"),
+            ("d2", "j"),
+            ("a", "j"),
+            ("j", "e"),
+        ],
+    );
+    let flow = Flow::parse("test/g.toml", &text).unwrap();
+    let mut run = GraphRun::start(flow, Map::new(), Limits::default(), &io)
+        .await
+        .unwrap();
+    let opener = async {
+        open_all(&gates, &["s", "a"]);
+        while gates.in_flight("d1") + gates.in_flight("d2") < 2 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            gates.finished(),
+            vec!["s", "a"],
+            "deferred nodes start after a"
+        );
+        open_all(&gates, &["d1", "d2"]);
+    };
+    let (out, ()) = bounded("the deferred run", || started(&gates), async {
+        tokio::join!(drive_plain(&mut run, &io), opener)
+    })
+    .await;
+    assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
+    assert_eq!(
+        (gates.calls("d1").len(), gates.calls("d2").len()),
+        (1, 1),
+        "each deferred node runs once"
+    );
+    assert_eq!(
+        gates.max_in_flight(),
+        2,
+        "parked deferred nodes start together"
+    );
+}
+
+#[tokio::test]
+async fn deferred_agent_with_a_model_override_is_still_refused() {
+    let gates = GatedTool::new();
+    let io = chain_io(&gates, &["s"]);
+    let text = graph(
+        &["s", "w"],
+        &[
+            tool_node("s", ""),
+            "[[nodes]]\nid = 'w'\nkind = 'agent'\npersona = 'writer'\nwrites = 'w'\nmodel = 'fake/other'\ndefer = true\n".into(),
+            END_NODE.into(),
+        ],
+        &[("s", "w"), ("w", "e")],
+    );
+    let flow = Flow::parse("test/g.toml", &text).unwrap();
+    let err = GraphRun::start(flow, Map::new(), Limits::default(), &io)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, troupekit_graph::GraphError::Setup(m) if m.contains("node `w` of a 0.5 kind or option")),
+        "{err}"
+    );
+}

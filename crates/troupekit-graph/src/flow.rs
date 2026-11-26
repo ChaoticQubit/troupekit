@@ -370,13 +370,6 @@ impl Flow {
                 .all(|n| self.kinds.get(&n.id) == Some(&FlowKind::from_v1(&n.kind)))
     }
 
-    /// Returns true when a fan-out sits inside a branch of another.
-    /// Such a flow is never `is_v1`.
-    /// Only the engine reads it.
-    pub(crate) fn nested(&self) -> bool {
-        self.nested
-    }
-
     /// Returns the flow's name.
     /// It is the outline workflow's name.
     /// Events of a run carry it.
