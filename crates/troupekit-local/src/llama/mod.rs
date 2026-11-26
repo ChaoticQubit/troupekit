@@ -4,6 +4,11 @@
 
 #[allow(dead_code)]
 pub(crate) mod ffi;
+mod metrics;
+mod model;
+mod sampler;
+
+pub use model::{LlamaModel, LlamaSettings};
 
 use std::ffi::CStr;
 use std::sync::Once;
