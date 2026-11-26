@@ -1,0 +1,117 @@
+{
+  "run_id": "01a2169d-73e1-7633-9ae5-4bf5d8766745",
+  "step": 2,
+  "state": {
+    "active_ms": 0,
+    "branches": [
+      {
+        "at": {
+          "at": "enter"
+        },
+        "node": "save"
+      }
+    ],
+    "format": 1,
+    "limits": {
+      "call": null,
+      "run": null,
+      "scope": null,
+      "user": null
+    },
+    "retries": 0,
+    "run_id": "01a2169d-73e1-7633-9ae5-4bf5d8766745",
+    "seq": 6,
+    "state": {
+      "goal": "g",
+      "plan": {
+        "steps": [
+          "warm up",
+          "run"
+        ]
+      }
+    },
+    "status": {
+      "status": "checkpointed"
+    },
+    "steps": 2,
+    "usage": {
+      "cost_usd_micros": 20,
+      "input_tokens": 10,
+      "output_tokens": 5
+    },
+    "workflow": {
+      "edges": [
+        {
+          "from": "plan",
+          "to": "save",
+          "when": null
+        },
+        {
+          "from": "save",
+          "to": "done",
+          "when": null
+        }
+      ],
+      "max_retries": 5,
+      "max_steps": 200,
+      "name": "linear",
+      "nodes": [
+        {
+          "id": "plan",
+          "kind": {
+            "persona": "planner",
+            "prompt": "Plan the week.",
+            "type": "agent"
+          },
+          "reads": [
+            "goal"
+          ],
+          "writes": "plan"
+        },
+        {
+          "id": "save",
+          "kind": {
+            "tool": "save_plan",
+            "type": "tool"
+          },
+          "reads": [
+            "plan"
+          ],
+          "writes": "note"
+        },
+        {
+          "id": "done",
+          "kind": {
+            "type": "end"
+          },
+          "reads": [],
+          "writes": null
+        }
+      ],
+      "start": "plan",
+      "state": {
+        "goal": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "plan": {
+          "additionalProperties": false,
+          "properties": {
+            "steps": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  }
+}
