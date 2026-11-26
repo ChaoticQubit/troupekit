@@ -1,0 +1,2 @@
+agent_evals_not_strings.rs:5:
+error: evals = takes a list of string literals

@@ -1,0 +1,2 @@
+agent_bad_name.rs:6:
+error: agent name must be lowercase ASCII letters, digits and _

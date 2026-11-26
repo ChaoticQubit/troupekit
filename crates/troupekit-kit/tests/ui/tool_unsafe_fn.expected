@@ -1,0 +1,2 @@
+tool_unsafe_fn.rs:6:
+error: #[tool] fns cannot be const, unsafe or extern

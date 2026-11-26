@@ -1,0 +1,2 @@
+agent_generic.rs:6:
+error: #[agent] fn cannot be generic

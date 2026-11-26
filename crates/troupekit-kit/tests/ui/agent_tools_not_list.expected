@@ -1,0 +1,2 @@
+agent_tools_not_list.rs:5:
+error: tools = takes a list like [add, math::mul]

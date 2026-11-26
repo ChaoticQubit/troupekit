@@ -1,0 +1,2 @@
+agent_return.rs:6:
+error: #[agent] fn must take no arguments, return nothing and have an empty body {}; configure it with attribute keys or use Agent::new

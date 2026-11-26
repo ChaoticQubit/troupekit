@@ -101,6 +101,15 @@ pub trait VectorStore: Send + Sync {
     async fn search(&self, query: &[f32], k: usize, filter: &Filter) -> Result<Vec<Scored>, CoreError>;
 }
 
+/// Object-safe keyword search over stored text, so a store can be chosen
+/// at runtime. `search_text` ranks records by BM25, higher scores first,
+/// keeps only records whose meta matches `filter` and returns at most `k`
+/// hits. Query text is plain words, never a query language.
+#[async_trait]
+pub trait KeywordStore: Send + Sync {
+    async fn search_text(&self, query: &str, k: usize, filter: &Filter) -> Result<Vec<Scored>, CoreError>;
+}
+
 /// Byte storage by path, for attached files and media.
 /// `put` replaces any existing bytes at the path.
 /// `get` of an unknown path returns `CoreError::NotFound`.

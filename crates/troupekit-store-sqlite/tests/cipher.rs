@@ -110,3 +110,26 @@ async fn key_never_appears_in_errors_or_debug() {
     let text = format!("{err} {err:?}");
     assert!(!text.contains(quoted), "{text}");
 }
+
+#[tokio::test]
+async fn fts5_is_available_with_sqlcipher() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secret.db");
+    drop(encrypted(&path).await);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.pragma_update(None, "key", KEY).unwrap();
+    conn.execute_batch(
+        "INSERT INTO chunk (index_name, id, text, meta_json, vector)
+           VALUES ('docs', 'a', 'refund policy', '{}', X'0000803F');
+         INSERT INTO chunk_fts (rowid, text) SELECT key, text FROM chunk;",
+    )
+    .unwrap();
+    let id: String = conn
+        .query_row(
+            "SELECT c.id FROM chunk_fts JOIN chunk c ON c.key = chunk_fts.rowid WHERE chunk_fts MATCH 'refund'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(id, "a");
+}

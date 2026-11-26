@@ -100,6 +100,14 @@ impl FactBook {
             .collect())
     }
 
+    /// Counts the stored edits in the log of `subject`, sets and removes,
+    /// live or shadowed. Input: a non-blank subject. Output: the count, or
+    /// `ContextError::Invalid` for a blank subject.
+    pub async fn entries(&self, subject: &str) -> Result<usize, ContextError> {
+        let name = log_name(subject)?;
+        Ok(self.log.read(&name).await?.len())
+    }
+
     /// Appends `entry` to the subject's log with a conditional append.
     /// Retries on `CoreError::Conflict` up to `MAX_ATTEMPTS` times in total,
     /// then returns the conflict; other store errors return at once.

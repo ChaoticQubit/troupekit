@@ -1,0 +1,2 @@
+agent_no_doc.rs:5:
+error: #[agent] needs a /// doc comment or instructions = "..."; it becomes the instructions

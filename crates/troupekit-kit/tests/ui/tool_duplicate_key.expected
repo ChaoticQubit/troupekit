@@ -1,0 +1,2 @@
+tool_duplicate_key.rs:5:
+error: #[tool] key `name` is set twice

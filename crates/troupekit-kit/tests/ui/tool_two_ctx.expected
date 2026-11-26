@@ -1,0 +1,2 @@
+tool_two_ctx.rs:8:
+error: #[tool] takes at most one ToolContext argument

@@ -164,21 +164,55 @@ impl VendorSpec {
     }
 }
 
+/// Default inputs per embeddings request when a row names none.
+/// Below every supported vendor's own limit.
+/// Setting S29.
+const DEFAULT_EMBEDDING_MAX_BATCH: usize = 64;
+
+/// Largest embedding dimension or batch a catalog row may name.
+/// Matches the index bound on vector dimensions.
+/// Rows above it are `Invalid`.
+const MAX_EMBEDDING_DIMS: usize = 65_536;
+
+const MAX_EMBEDDING_BATCH: usize = 2_048;
+
+fn default_embedding_max_batch() -> usize {
+    DEFAULT_EMBEDDING_MAX_BATCH
+}
+
+/// One embedding model a vendor serves: a top-level `[[embedding]]` row.
+/// `dims` is the vector length the endpoint returns, `max_batch` the
+/// inputs per request, the price is per million input tokens.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingSpec {
+    pub vendor: String,
+    pub id: String,
+    pub dims: usize,
+    #[serde(default = "default_embedding_max_batch")]
+    pub max_batch: usize,
+    pub input_usd_micros_per_mtok: u64,
+    pub price_verified: bool,
+}
+
 /// The provider catalog: vendors as data, loaded from TOML `[[vendor]]`
-/// tables with `[[vendor.model]]` rows. Settings screens list it, and
+/// tables with `[[vendor.model]]` rows and top-level `[[embedding]]` rows.
 /// `connect` turns a `vendor/model` choice into a ready `Model`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Catalog {
     #[serde(default, rename = "vendor")]
     vendors: Vec<VendorSpec>,
+    #[serde(default, rename = "embedding", skip_serializing_if = "Vec::is_empty")]
+    embeddings: Vec<EmbeddingSpec>,
 }
 
 impl Catalog {
     /// Parses and checks a catalog from TOML `text`.
-    /// Returns `Parse` for bad TOML or unknown fields, `Invalid` for a
-    /// bad id, base URL, repeated entry, zero long-context threshold, or a
-    /// verified paid price without an `https://` price source.
+    /// Returns `Parse` for bad TOML or unknown fields, `UnknownVendor` for
+    /// an embedding row naming no vendor, and `Invalid` for a bad id, URL,
+    /// bound, repeated entry, or verified price without a price source.
     pub fn load(text: &str) -> Result<Self, CatalogError> {
         let catalog: Catalog =
             toml::from_str(text).map_err(|e| CatalogError::Parse(e.to_string()))?;
@@ -191,6 +225,13 @@ impl Catalog {
     /// Each carries its models and prices.
     pub fn vendors(&self) -> &[VendorSpec] {
         &self.vendors
+    }
+
+    /// Lists every embedding model in catalog order.
+    /// Returns the rows as a slice; empty for a catalog without any.
+    /// Each names its vendor, dimension, batch size and price.
+    pub fn embedding_specs(&self) -> &[EmbeddingSpec] {
+        &self.embeddings
     }
 
     /// Looks up the vendor with `id`.
@@ -238,6 +279,62 @@ impl Catalog {
         let transport = crate::reqwest_transport::ReqwestTransport::new()
             .map_err(|e| CatalogError::Transport(e.message))?;
         self.connect_with(selector, key, Arc::new(transport))
+    }
+
+    /// Builds an embedder for `selector` (`vendor/model`, an embedding
+    /// row) through `transport`, using `key` unless the vendor takes none.
+    /// Returns a selector error, or `MissingKey` when a needed key is absent.
+    #[cfg(feature = "embeddings")]
+    pub fn embedder_with(
+        &self,
+        selector: &str,
+        key: Option<Secret>,
+        transport: Arc<dyn Transport>,
+    ) -> Result<crate::embed::HttpEmbedder, CatalogError> {
+        let (vendor_id, model_id) = selector
+            .split_once('/')
+            .filter(|(v, m)| !v.is_empty() && !m.is_empty())
+            .ok_or_else(|| CatalogError::BadSelector(selector.to_owned()))?;
+        let vendor = self
+            .vendor(vendor_id)
+            .ok_or_else(|| CatalogError::UnknownVendor(vendor_id.to_owned()))?;
+        if vendor.protocol == Protocol::Anthropic {
+            return Err(CatalogError::BadSelector(format!(
+                "{selector}: vendor has no embeddings endpoint"
+            )));
+        }
+        let spec = self
+            .embeddings
+            .iter()
+            .find(|e| e.vendor == vendor_id && e.id == model_id)
+            .ok_or_else(|| CatalogError::UnknownModel(selector.to_owned()))?;
+        let key = match vendor.auth {
+            AuthStyle::NoKey => None,
+            _ => Some(key.ok_or_else(|| CatalogError::MissingKey(vendor.id.clone()))?),
+        };
+        Ok(crate::embed::HttpEmbedder::new(
+            selector.to_owned(),
+            spec.id.clone(),
+            vendor.endpoint(),
+            key,
+            transport,
+            spec.dims,
+            spec.max_batch,
+        ))
+    }
+
+    /// Builds an embedder like `embedder_with`, over a new default
+    /// `ReqwestTransport`. Returns `Transport` when the HTTP client
+    /// cannot start, else what `embedder_with` returns.
+    #[cfg(all(feature = "embeddings", feature = "reqwest"))]
+    pub fn embedder(
+        &self,
+        selector: &str,
+        key: Option<Secret>,
+    ) -> Result<crate::embed::HttpEmbedder, CatalogError> {
+        let transport = crate::reqwest_transport::ReqwestTransport::new()
+            .map_err(|e| CatalogError::Transport(e.message))?;
+        self.embedder_with(selector, key, Arc::new(transport))
     }
 
     pub(crate) fn resolve(
@@ -329,6 +426,46 @@ impl Catalog {
                         v.id, m.id
                     ));
                 }
+            }
+        }
+        self.validate_embeddings()
+    }
+
+    fn validate_embeddings(&self) -> Result<(), CatalogError> {
+        let mut seen = HashSet::new();
+        for e in &self.embeddings {
+            let vendor = self
+                .vendor(&e.vendor)
+                .ok_or_else(|| CatalogError::UnknownVendor(e.vendor.clone()))?;
+            if vendor.protocol == Protocol::Anthropic {
+                return invalid(format!(
+                    "embedding {}/{}: vendor has no embeddings endpoint",
+                    e.vendor, e.id
+                ));
+            }
+            if !valid_model_id(&e.id) {
+                return invalid(format!("embedding id {:?} is not allowed", e.id));
+            }
+            if !seen.insert((e.vendor.as_str(), e.id.as_str())) {
+                return invalid(format!("embedding {}/{} is listed twice", e.vendor, e.id));
+            }
+            if e.dims == 0 || e.dims > MAX_EMBEDDING_DIMS {
+                return invalid(format!(
+                    "embedding {}/{} dims must be in 1..={MAX_EMBEDDING_DIMS}",
+                    e.vendor, e.id
+                ));
+            }
+            if e.max_batch == 0 || e.max_batch > MAX_EMBEDDING_BATCH {
+                return invalid(format!(
+                    "embedding {}/{} max_batch must be in 1..={MAX_EMBEDDING_BATCH}",
+                    e.vendor, e.id
+                ));
+            }
+            if e.price_verified && e.input_usd_micros_per_mtok > 0 && vendor.price_source.is_none() {
+                return invalid(format!(
+                    "embedding {}/{} has a verified price but its vendor has no price_source",
+                    e.vendor, e.id
+                ));
             }
         }
         Ok(())
