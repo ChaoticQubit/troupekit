@@ -2305,6 +2305,14 @@ fn untracked_misuse(flow: &Flow) -> Option<String> {
         if matches!(kind, Some(FlowKind::Human { .. })) && n.writes.as_deref().is_some_and(secret) {
             return Some(format!("human node `{}` cannot write untracked key: its answer is checkpointed", n.id));
         }
+        if let (Some(FlowKind::Agent { sets, .. }), Some(w)) = (kind, n.writes.as_deref()) {
+            if let Some(k) = sets.values().find(|k| secret(k)).filter(|_| !secret(w)) {
+                return Some(format!(
+                    "node `{}` sets untracked `{k}` but writes the whole reply to tracked `{w}`",
+                    n.id
+                ));
+            }
+        }
     }
     None
 }

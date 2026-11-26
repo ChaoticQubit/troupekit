@@ -800,4 +800,19 @@ mod untracked {
             "{err}"
         );
     }
+
+    #[tokio::test]
+    async fn untracked_set_beside_a_tracked_whole_reply_is_refused_at_start() {
+        let gates = GatedTool::new();
+        let io = io(&gates);
+        let text = "name = 'l'\nstart = 'login'\nuntracked = ['token']\n[state]\ntoken = 'string?'\nreply = '{token: string, note: string}?'\n[[nodes]]\nid = 'login'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Log in.'\nfields = { token = 'string', note = 'string' }\nsets = { token = 'token' }\nwrites = 'reply'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'login'\nto = 'e'\n";
+        let err = start(text, &io).await.unwrap_err();
+        assert!(
+            matches!(&err, GraphError::Setup(m) if m.contains("node `login` sets untracked `token`") && m.contains("tracked `reply`")),
+            "{err}"
+        );
+        let without = text.replace("writes = 'reply'\n", "");
+        let other = start(&without, &io).await.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(!other.contains("sets untracked"), "a set alone keeps the secret in scratch: {other}");
+    }
 }
