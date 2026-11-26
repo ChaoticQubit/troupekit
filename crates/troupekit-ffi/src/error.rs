@@ -30,20 +30,22 @@ pub enum ErrorCode {
 
 /// The one error Swift and Kotlin see: the neutral `FfiError` with its code
 /// as a number, so a code added later still reaches the app unchanged.
-/// Input: a neutral error. Output: `Failure { code, message, run_id }`.
+/// Input: a neutral error. Output: `Failure { code, detail, run_id }`; the
+/// text is `detail` because a Kotlin exception field named `message` clashes
+/// with `Throwable.message` in the generated code.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Error)]
 pub enum TroupekitError {
     Failure {
         code: u32,
-        message: String,
+        detail: String,
         run_id: Option<String>,
     },
 }
 
 impl fmt::Display for TroupekitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let TroupekitError::Failure { code, message, .. } = self;
-        write!(f, "troupekit error {code}: {message}")
+        let TroupekitError::Failure { code, detail, .. } = self;
+        write!(f, "troupekit error {code}: {detail}")
     }
 }
 
@@ -53,7 +55,7 @@ impl From<neutral::FfiError> for TroupekitError {
     fn from(error: neutral::FfiError) -> Self {
         TroupekitError::Failure {
             code: error.code as u32,
-            message: error.message,
+            detail: error.message,
             run_id: error.run_id,
         }
     }
@@ -61,16 +63,17 @@ impl From<neutral::FfiError> for TroupekitError {
 
 /// Error a Swift or Kotlin host callback returns; the neutral layer turns it
 /// into a tool error output, a model failure or a transport failure.
-/// Input: the foreign message. Output: the neutral `HostError` with that text.
+/// Input: the foreign text as `detail`, named so for the same Kotlin clash.
+/// Output: the neutral `HostError` with that text.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Error)]
 pub enum HostError {
-    Failed { message: String },
+    Failed { detail: String },
 }
 
 impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let HostError::Failed { message } = self;
-        f.write_str(message)
+        let HostError::Failed { detail } = self;
+        f.write_str(detail)
     }
 }
 
@@ -79,14 +82,14 @@ impl std::error::Error for HostError {}
 impl From<uniffi::UnexpectedUniFFICallbackError> for HostError {
     fn from(error: uniffi::UnexpectedUniFFICallbackError) -> Self {
         HostError::Failed {
-            message: error.reason,
+            detail: error.reason,
         }
     }
 }
 
 impl From<HostError> for neutral::HostError {
     fn from(error: HostError) -> Self {
-        let HostError::Failed { message } = error;
-        neutral::HostError::new(message)
+        let HostError::Failed { detail } = error;
+        neutral::HostError::new(detail)
     }
 }

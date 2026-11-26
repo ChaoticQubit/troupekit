@@ -104,7 +104,7 @@ final class RecordingTool: HostTool, @unchecked Sendable {
         lock.withLock { seen.append((args, Thread.isMainThread)) }
         switch behaviour {
         case .echo: return args["text"] ?? ""
-        case .hostError(let message): throw HostError.Failed(message: message)
+        case .hostError(let message): throw HostError.Failed(detail: message)
         case .crash: throw Boom()
         case .output(let text): return text
         }
@@ -155,7 +155,7 @@ final class StubTransport: HostTransport, @unchecked Sendable {
     func send(request: HostHttpRequest, sink: HttpSink) throws {
         lock.withLock { seen.append(request.url) }
         if let failure {
-            throw HostError.Failed(message: failure)
+            throw HostError.Failed(detail: failure)
         }
         let header = HostHeader(name: "content-type", value: "text/event-stream")
         sink.head(status: 200, url: headUrl ?? request.url, headers: [header])
@@ -751,7 +751,7 @@ final class ContractTests: XCTestCase {
 /// `Unsupported` only, so the case's own assertions run otherwise.
 func rethrowUnbuilt(_ code: UInt32, _ message: String) throws {
     if code == codes["Unsupported"] {
-        throw TroupekitError.Failure(code: code, message: message, runId: nil)
+        throw TroupekitError.Failure(code: code, detail: message, runId: nil)
     }
 }
 

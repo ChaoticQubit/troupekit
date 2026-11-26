@@ -13,7 +13,7 @@ const FREEZE_NAMES_MIN: usize = 50;
 
 /// Every UniFFI error code has the number of the neutral code of the same name.
 /// Input: the 19 code pairs of plan section 6.1. Output: passes when each pair
-/// has equal numbers and an `FfiError` keeps code, message and run id.
+/// has equal numbers and an `FfiError` keeps code, message (as `detail`) and run id.
 #[test]
 fn error_code_survives_conversion() {
     let pairs = [
@@ -47,11 +47,11 @@ fn error_code_survives_conversion() {
         error.run_id = Some("run-1".to_owned());
         let TroupekitError::Failure {
             code: number,
-            message,
+            detail,
             run_id,
         } = TroupekitError::from(error);
         assert_eq!(number, code as u32);
-        assert_eq!(message, "boom");
+        assert_eq!(detail, "boom");
         assert_eq!(run_id.as_deref(), Some("run-1"));
     }
 }
