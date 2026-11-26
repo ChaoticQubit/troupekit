@@ -260,7 +260,10 @@ func sse(_ payload: [String: Any]) -> Data {
 /// Input: none. Output: the SSE chunks, ending with stop and `[DONE]`.
 /// Each chunk is one `HttpSink.chunk` call.
 func answerChunks() -> [Data] {
-    var chunks = answerParts.map { sse(["choices": [["index": 0, "delta": ["content": $0]]]]) }
+    var chunks = answerParts.map { part -> Data in
+        let delta: [String: Any] = ["index": 0, "delta": ["content": part]]
+        return sse(["choices": [delta]])
+    }
     let stop: [String: Any] = ["index": 0, "delta": [String: String](), "finish_reason": "stop"]
     chunks.append(sse(["choices": [stop]]))
     chunks.append(Data("data: [DONE]\n\n".utf8))
@@ -379,16 +382,24 @@ func skipIfUnbuilt(_ error: Error) throws -> Never {
 /// the UniFFI Swift bindings. The runtime is set once with a 16-event
 /// buffer, small enough for the full-buffer case and enough for the others.
 final class ContractTests: XCTestCase {
+    /// Whether `initialize` took the 16-event buffer. It answers
+    /// `InvalidArgument` when another test in this process used the runtime
+    /// first; only the full-buffer case depends on the buffer, so it skips.
+    static var bufferSet = false
+
     override class func setUp() {
         super.setUp()
         let settings = RuntimeSettings(workerThreads: 2, maxInputBytes: 1_048_576, eventBuffer: 16)
         do {
             try initialize(settings: settings)
+            bufferSet = true
         } catch {
-            if case let TroupekitError.Failure(code, _, _) = error, code == codes["Unsupported"] {
-                return
+            guard case let TroupekitError.Failure(code, _, _) = error else {
+                fatalError("initialize threw a non-TroupekitError: \(error)")
             }
-            fatalError("initialize failed: \(error)")
+            precondition(
+                code == codes["Unsupported"] || code == codes["InvalidArgument"],
+                "initialize failed: \(error)")
         }
     }
 
@@ -691,6 +702,7 @@ final class ContractTests: XCTestCase {
     }
 
     func test_full_buffer_drops_deltas_not_lifecycle() async throws {
+        try XCTSkipUnless(ContractTests.bufferSet, "runtime set up before this runner")
         try await neutral {
             let chatty = ScriptedModel([String(repeating: "x", count: 500)])
             let stream = try await hostAgent(chatty).build().stream(input: "hi")

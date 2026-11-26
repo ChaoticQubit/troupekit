@@ -667,6 +667,7 @@ abstract class ContractCases {
 
     @Test
     fun test_full_buffer_drops_deltas_not_lifecycle() = neutral {
+        assumeTrue("runtime set up before this runner", ContractRuntime.bufferSet)
         val chatty = ScriptedModel(listOf("x".repeat(500)))
         val stream = hostAgent(chatty).build().stream("hi")
         stream.result()
@@ -714,6 +715,14 @@ abstract class ContractCases {
  * Input: none. Output: `ready()` returns once `initialize` has run.
  */
 object ContractRuntime {
+    /**
+     * Whether `initialize` took the 16-event buffer. It answers
+     * `InvalidArgument` when another test in this process used the runtime
+     * first; only the full-buffer case depends on the buffer, so it skips.
+     */
+    var bufferSet = false
+        private set
+
     init {
         try {
             val settings = RuntimeSettings(
@@ -722,8 +731,10 @@ object ContractRuntime {
                 eventBuffer = EVENT_BUFFER.toUInt(),
             )
             initialize(settings)
+            bufferSet = true
         } catch (error: TroupekitException.Failure) {
-            check(error.code == CODES["Unsupported"]) { "initialize failed: ${error.detail}" }
+            val expected = setOf(CODES["Unsupported"], CODES["InvalidArgument"])
+            check(error.code in expected) { "initialize failed: ${error.detail}" }
         }
     }
 
