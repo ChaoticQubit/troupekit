@@ -360,3 +360,22 @@ async fn retryable_child_failure_makes_the_parent_retryable() {
         "the child's tool re-ran once"
     );
 }
+
+#[tokio::test]
+async fn child_with_an_unregistered_tool_is_refused_at_start() {
+    let gates = GatedTool::new();
+    gates.open("c2");
+    let root = "name = 'parent'\nstart = 'r'\n[state]\ntopic = 'string'\nr = 'string?'\ny = 'string?'\n[[nodes]]\nid = 'r'\nkind = 'tool'\ntool = 'c2'\nwrites = 'r'\n[[nodes]]\nid = 'sub'\nkind = 'flow'\nflow = 'polish'\nreads = ['topic']\nreturns = 'summary'\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'r'\nto = 'sub'\n[[edges]]\nfrom = 'sub'\nto = 'e'\n";
+    let child = CHILD.replace("tool = 'c1'", "tool = 'nope'");
+    let io = io(
+        &gates,
+        model(),
+        &[("parent", root.to_string()), ("polish", child)],
+    );
+    let err = start("parent", &io).await.unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Setup(m) if m.contains("flow `polish`, node `c1`") && m.contains("tool `nope` is not registered")),
+        "{err}"
+    );
+    assert!(gates.calls("c2").is_empty(), "no root tool ran");
+}

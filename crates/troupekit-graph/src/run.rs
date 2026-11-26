@@ -383,51 +383,9 @@ impl GraphRun {
         limits: Limits,
         io: &dyn GraphIo,
     ) -> Result<GraphRun, GraphError> {
-        let setup = |id: &str, m: String| GraphError::Setup(format!("node `{id}`: {m}"));
-        for n in &workflow.nodes {
-            if flow.is_some_and(|f| {
-                matches!(f.kind(&n.id), Some(FlowKind::Map { .. } | FlowKind::Switch { .. } | FlowKind::Flow { .. }))
-            }) {
-                continue;
-            }
-            match &n.kind {
-                NodeKind::Agent { persona, .. } => {
-                    let p = io
-                        .persona(persona)
-                        .await
-                        .map_err(|e| setup(&n.id, e.to_string()))?;
-                    let p = node_persona(flow, io, &n.id, p).map_err(|e| setup(&n.id, e))?;
-                    let delegates = node_delegates(flow, &n.id);
-                    if !delegates.is_empty() && io.agent_arc().is_none() {
-                        return Err(setup(
-                            &n.id,
-                            "delegates need a GraphIo that shares its AgentIo (agent_arc)".into(),
-                        ));
-                    }
-                    for d in delegates {
-                        io.persona(d)
-                            .await
-                            .map_err(|e| setup(&n.id, format!("delegate `{d}`: {e}")))?;
-                    }
-                    let probe = vec![Message::text(Role::User, "setup check")];
-                    AgentRun::new(&p, probe, Limits::default(), io.agent())
-                        .await
-                        .map_err(|e| setup(&n.id, e.to_string()))?;
-                }
-                NodeKind::Tool { tool } if io.agent().tools().get(tool).is_none() => {
-                    return Err(setup(&n.id, format!("tool `{tool}` is not registered")));
-                }
-                NodeKind::Router { condition }
-                    if io.conditions().get(&condition.name).is_none() =>
-                {
-                    return Err(setup(
-                        &n.id,
-                        format!("condition `{}` is not registered", condition.name),
-                    ));
-                }
-                _ => {}
-            }
-        }
+        check_nodes(&workflow, flow, io)
+            .await
+            .map_err(|(id, m)| GraphError::Setup(format!("node `{id}`: {m}")))?;
         for (k, v) in &input {
             if !workflow.state.contains_key(k) {
                 return Err(GraphError::Setup(format!(
@@ -2368,6 +2326,59 @@ fn run_plain(kind: &FlowKind) -> FlowKind {
 
 const MAX_SUBFLOW_DEPTH: usize = 4;
 
+/// Checks before any step that every node of `workflow` can run: agent
+/// personas, overrides, delegates and models load, tools and conditions
+/// are registered. Map, switch and flow nodes are checked elsewhere.
+/// Returns the failing node's id and why.
+async fn check_nodes(workflow: &Workflow, flow: Option<&Flow>, io: &dyn GraphIo) -> Result<(), (String, String)> {
+    let setup = |id: &str, m: String| (id.to_string(), m);
+    for n in &workflow.nodes {
+        if flow.is_some_and(|f| {
+            matches!(f.kind(&n.id), Some(FlowKind::Map { .. } | FlowKind::Switch { .. } | FlowKind::Flow { .. }))
+        }) {
+            continue;
+        }
+        match &n.kind {
+            NodeKind::Agent { persona, .. } => {
+                let p = io
+                    .persona(persona)
+                    .await
+                    .map_err(|e| setup(&n.id, e.to_string()))?;
+                let p = node_persona(flow, io, &n.id, p).map_err(|e| setup(&n.id, e))?;
+                let delegates = node_delegates(flow, &n.id);
+                if !delegates.is_empty() && io.agent_arc().is_none() {
+                    return Err(setup(
+                        &n.id,
+                        "delegates need a GraphIo that shares its AgentIo (agent_arc)".into(),
+                    ));
+                }
+                for d in delegates {
+                    io.persona(d)
+                        .await
+                        .map_err(|e| setup(&n.id, format!("delegate `{d}`: {e}")))?;
+                }
+                let probe = vec![Message::text(Role::User, "setup check")];
+                AgentRun::new(&p, probe, Limits::default(), io.agent())
+                    .await
+                    .map_err(|e| setup(&n.id, e.to_string()))?;
+            }
+            NodeKind::Tool { tool } if io.agent().tools().get(tool).is_none() => {
+                return Err(setup(&n.id, format!("tool `{tool}` is not registered")));
+            }
+            NodeKind::Router { condition }
+                if io.conditions().get(&condition.name).is_none() =>
+            {
+                return Err(setup(
+                    &n.id,
+                    format!("condition `{}` is not registered", condition.name),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn check_children<'a>(
     flow: &'a Flow,
     io: &'a dyn GraphIo,
@@ -2399,13 +2410,9 @@ fn check_children<'a>(
             if !child.workflow().state.contains_key(returns) {
                 return Err(setup(format!("flow `{name}` has no state key `{returns}` to return")));
             }
-            for c in &child.workflow().nodes {
-                if let NodeKind::Agent { persona, .. } = &c.kind {
-                    let p = io.persona(persona).await.map_err(|e| setup(format!("flow `{name}`: {e}")))?;
-                    node_persona(Some(&child), io, &c.id, p)
-                        .map_err(|e| setup(format!("flow `{name}`, node `{}`: {e}", c.id)))?;
-                }
-            }
+            check_nodes(child.workflow(), Some(&child), io)
+                .await
+                .map_err(|(id, m)| setup(format!("flow `{name}`, node `{id}`: {m}")))?;
             path.push(name.clone());
             check_children(&child, io, path).await?;
             path.pop();
