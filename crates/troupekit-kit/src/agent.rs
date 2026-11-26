@@ -466,6 +466,7 @@ impl Agent {
         })
     }
 
+    #[cfg(feature = "knowledge")]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }

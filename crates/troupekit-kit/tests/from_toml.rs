@@ -279,7 +279,7 @@ async fn two_toml_agents_in_one_graph_are_told_apart() {
         .unwrap_err();
     assert!(
         err.to_string()
-            .contains("two different agents are named `toml`"),
+            .contains("two different agents are named `support`"),
         "{err}"
     );
 }
@@ -302,5 +302,65 @@ async fn toml_file_instructions_outside_its_directory_is_refused() {
     assert!(
         err.to_string().contains("persona file's directory"),
         "{err}"
+    );
+}
+
+fn node_personas(graph: &troupekit::BuiltGraph) -> Vec<String> {
+    graph
+        .workflow()
+        .nodes
+        .iter()
+        .filter_map(|n| match &n.kind {
+            troupekit_graph::NodeKind::Agent { persona, .. } => Some(persona.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn toml_agent_in_graph_uses_its_persona_name() {
+    let built = Graph::new("solo")
+        .agent(
+            "answer",
+            Agent::from_toml_file(FIXTURE)
+                .model_client(support_model())
+                .tool(lookup_order()),
+        )
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(node_personas(&built), vec!["support".to_string()]);
+    let output = built.run("When does order 7 ship?").await.unwrap();
+    assert!(
+        output.to_string().contains("order 7 ships Monday"),
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn two_toml_personas_share_a_graph() {
+    let model = support_model();
+    let order: Arc<dyn Tool> = Arc::new(lookup_order());
+    let billing = fixture_text().replace("name = \"support\"", "name = \"billing\"");
+    let built = Graph::new("pair")
+        .agent(
+            "first",
+            Agent::from_toml(fixture_text())
+                .model_client(model.clone())
+                .tool_arc(order.clone()),
+        )
+        .agent(
+            "second",
+            Agent::from_toml(billing)
+                .model_client(model)
+                .tool_arc(order),
+        )
+        .edge("first", "second")
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        node_personas(&built),
+        vec!["support".to_string(), "billing".to_string()]
     );
 }

@@ -69,6 +69,19 @@ impl Agent {
         }
     }
 
+    /// Returns the persona name a graph knows this agent by: the TOML
+    /// `name` for a TOML agent, the builder name otherwise. Reads the
+    /// persona source, so it fails as `build` would on a bad source.
+    pub(crate) fn persona_name(&self) -> Result<String, KitError> {
+        let Some((source, table)) = self.toml_source()? else {
+            return Ok(self.name.clone());
+        };
+        match table.get("name").and_then(Toml::as_str) {
+            Some(name) if !name.trim().is_empty() => Ok(name.to_string()),
+            _ => Err(KitError::config(&source, "persona needs name = \"...\"")),
+        }
+    }
+
     #[cfg(feature = "knowledge")]
     pub(crate) fn toml_selector(&self) -> Option<String> {
         let (_, table) = self.toml_source().ok()??;
