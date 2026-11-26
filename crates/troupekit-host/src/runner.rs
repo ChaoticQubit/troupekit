@@ -10,6 +10,7 @@ use troupekit_core::error::CoreError;
 use troupekit_core::ids::RunId;
 use troupekit_core::store::CheckpointStore;
 use troupekit_graph::{GraphIo, GraphOutcome, GraphRun, Stop};
+use troupekit_trace::{trace_span, Trace};
 
 const DEFAULT_LEASE_MS: i64 = 300_000;
 const STORE_RETRY_MS: i64 = 1_000;
@@ -126,6 +127,18 @@ impl Runner {
     /// queue the outcome. A save conflict returns `Lost`; store errors
     /// reschedule the job after one second and return the error.
     pub async fn process(&self, lease: &Lease) -> Result<Processed, HostError> {
+        let mut span = trace_span!(Trace::Graphs, "graph.job", run = lease.run_id.to_string());
+        let result = span.instrument(self.process_leased(lease)).await;
+        match &result {
+            Ok(Processed::Stepped(_)) => span.record("outcome", "stepped"),
+            Ok(Processed::Unchanged(_)) => span.record("outcome", "unchanged"),
+            Ok(Processed::Lost) => span.record("outcome", "lost"),
+            Err(e) => span.fail(e.to_string()),
+        }
+        result
+    }
+
+    async fn process_leased(&self, lease: &Lease) -> Result<Processed, HostError> {
         let cp = match self.checkpoints.latest(lease.run_id).await {
             Ok(Some(cp)) => cp,
             Ok(None) => {

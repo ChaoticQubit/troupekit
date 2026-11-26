@@ -13,4 +13,3 @@ pub use events::EventLog;
 pub use queue::{InMemQueue, JobQueue, JobState, Lease};
 pub use runner::{Processed, Runner, TickOptions, TickReport, WorkOptions};
 
-use troupekit_trace as _;

@@ -1289,3 +1289,111 @@ async fn a_failed_checkpoint_from_before_the_class_is_classified_from_its_error(
         );
     }
 }
+
+fn traced() -> (troupekit_trace::Tracer, Arc<troupekit_trace::MemorySink>) {
+    let sink = Arc::new(troupekit_trace::MemorySink::default());
+    let tracer = troupekit_trace::Tracer::builder()
+        .sink(sink.clone())
+        .build()
+        .unwrap();
+    (tracer, sink)
+}
+
+fn trace_records(sink: &troupekit_trace::MemorySink) -> Vec<Value> {
+    sink.lines()
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn named<'a>(records: &'a [Value], name: &str) -> Vec<&'a Value> {
+    records
+        .iter()
+        .filter(|r| r["t"] != "end" && r["name"] == name)
+        .collect()
+}
+
+const THREE_TOOLS: &str = "name = 'three'\nstart = 'a'\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 't'\n[[nodes]]\nid = 'b'\nkind = 'tool'\ntool = 't'\n[[nodes]]\nid = 'c'\nkind = 'tool'\ntool = 't'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'b'\n[[edges]]\nfrom = 'b'\nto = 'c'\n[[edges]]\nfrom = 'c'\nto = 'e'\n";
+
+fn ok_tool() -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(FnTool::new("t", |_, _| async { Ok(ToolOutput::text("ok")) }))
+        .unwrap();
+    tools
+}
+
+#[tokio::test]
+async fn graph_step_and_edge_emit_spans() {
+    let f = fixture(planner_model(), ok_tool(), Conditions::new());
+    let mut run = GraphRun::new(wf(THREE_TOOLS), Map::new(), Limits::default(), &f.io)
+        .await
+        .unwrap();
+    let (tracer, sink) = traced();
+    let out = tracer.in_scope(drive(&mut run, &f.io)).await;
+    drop(tracer);
+    assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
+    let records = trace_records(&sink);
+    let steps = named(&records, "graph.step");
+    let nodes: Vec<&str> = steps.iter().map(|r| r["fields"]["node"].as_str().unwrap()).collect();
+    assert_eq!(nodes, ["a", "b", "c"]);
+    assert!(steps.iter().all(|r| r["cat"] == "graphs" && r["fields"]["kind"] == "tool"));
+    let edges: Vec<(&str, &str)> = named(&records, "graph.edge")
+        .iter()
+        .map(|r| {
+            assert_eq!(r["t"], "event");
+            (r["fields"]["from"].as_str().unwrap(), r["fields"]["to"].as_str().unwrap())
+        })
+        .collect();
+    assert_eq!(edges, [("a", "b"), ("b", "c"), ("c", "e")]);
+}
+
+#[tokio::test]
+async fn tool_node_emits_tool_span() {
+    let (f, w) = tool_only("out", "string", ToolOutput::text("\"fine\""));
+    let mut run = GraphRun::new(w, Map::new(), Limits::default(), &f.io)
+        .await
+        .unwrap();
+    let (tracer, sink) = traced();
+    tracer.in_scope(drive(&mut run, &f.io)).await;
+    drop(tracer);
+    let records = trace_records(&sink);
+    let tool = named(&records, "tool.call");
+    assert_eq!(tool.len(), 1);
+    assert_eq!(tool[0]["cat"], "tools");
+    assert_eq!(tool[0]["fields"]["name"], "t");
+    assert_eq!(tool[0]["fields"]["node"], "a");
+    assert_eq!(tool[0]["parent"], named(&records, "graph.step")[0]["span"]);
+    let end = records
+        .iter()
+        .find(|r| r["t"] == "end" && r["span"] == tool[0]["span"])
+        .unwrap();
+    assert_eq!(end["fields"]["is_error"], false);
+    assert_eq!(end["fields"]["output"]["bytes"], 6);
+}
+
+#[tokio::test]
+async fn max_steps_law_event_is_emitted() {
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(FnTool::new("spin", |_, _| async {
+            Ok(ToolOutput::text("true"))
+        }))
+        .unwrap();
+    let f = fixture(planner_model(), tools, Conditions::new());
+    let text = "name = 'spin'\nstart = 'a'\nmax_steps = 5\n[state]\nagain = 'bool'\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 'spin'\nwrites = 'again'\n[[nodes]]\nid = 'r'\nkind = 'router'\ncondition = 'flag(again)'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'r'\n[[edges]]\nfrom = 'r'\nto = 'a'\nwhen = 'true'\n[[edges]]\nfrom = 'r'\nto = 'e'\nwhen = 'false'\n";
+    let mut run = GraphRun::new(wf(text), Map::new(), Limits::default(), &f.io)
+        .await
+        .unwrap();
+    let (tracer, sink) = traced();
+    tracer.in_scope(drive(&mut run, &f.io)).await;
+    drop(tracer);
+    let records = trace_records(&sink);
+    let laws = named(&records, "law.check");
+    assert!(laws.iter().all(|r| r["cat"] == "laws" && r["fields"]["law"] == "step_stays_within_max_steps"));
+    assert_eq!(laws.iter().filter(|r| r["fields"]["held"] == false).count(), 1);
+    assert_eq!(laws.last().unwrap()["fields"]["held"], false);
+    assert_eq!(laws.last().unwrap()["fields"]["max_steps"], 5);
+    let edges = named(&records, "graph.edge");
+    assert!(edges.iter().any(|r| r["fields"]["from"] == "r" && r["fields"]["label"] == "true"));
+}
