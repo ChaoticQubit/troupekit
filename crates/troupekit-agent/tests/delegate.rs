@@ -141,8 +141,17 @@ async fn member_spend_is_capped_by_member_budget() {
     assert!(out.is_error);
     let error = body(&out)["error"].as_str().unwrap().to_string();
     assert!(error.contains("paused"), "{error}");
-    assert!(error.contains("run"), "{error}");
+    assert!(error.contains(r#""limit":"run""#), "{error}");
     assert!(model.seen().is_empty(), "no model call above the member cap");
+    let s = setup(vec![text("expensive")], PRICE);
+    let model = s.model.clone();
+    let persona = member("helper", "fake/m", "[budget]\nrun_usd = 0.000001");
+    let settings = DelegateSettings::default().with_max_run_usd_micros(1_000_000);
+    let tool = AgentTool::new("helper", "Asks the helper.", persona, Arc::new(s.io), settings);
+    let out = tool.unwrap().call(json!({"task": "Go"}), &ctx).await.unwrap();
+    let error = body(&out)["error"].as_str().unwrap().to_string();
+    assert!(error.contains(r#""limit":"run""#), "{error}");
+    assert!(model.seen().is_empty(), "the lower persona budget wins");
 }
 
 #[tokio::test]

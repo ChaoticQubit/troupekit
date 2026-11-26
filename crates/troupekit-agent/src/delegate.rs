@@ -15,9 +15,13 @@ use troupekit_core::tool::ToolSpec;
 use troupekit_tools::{fence_capped, valid_tool_name, Tool, ToolContext, ToolError, ToolOutput};
 
 /// Name of the tool a leader uses to hand a task to a coworker.
+/// Its arguments are `{coworker, task, context?}`; the coworker runs the
+/// task as a member run and the result comes back fenced.
 pub const DELEGATE_WORK: &str = "delegate_work";
 
 /// Name of the tool a leader uses to ask a coworker a question.
+/// Its arguments are `{coworker, question, context?}`; offered unless
+/// `DelegateSettings::with_ask_question(false)` turns it off.
 pub const ASK_QUESTION: &str = "ask_question";
 
 const DEFAULT_MAX_DEPTH: u32 = 3;
@@ -111,26 +115,36 @@ impl DelegateSettings {
     }
 
     /// Returns the delegation depth cap.
+    /// A nested call deeper than this is a tool error.
+    /// Default 3.
     pub fn max_depth(&self) -> u32 {
         self.max_depth
     }
 
     /// Returns the member run spend cap, if set.
+    /// The member persona budget applies on top when lower.
+    /// Default none.
     pub fn max_run_usd_micros(&self) -> Option<u64> {
         self.max_run_usd_micros
     }
 
     /// Returns the base limits of member runs.
+    /// Their scope and user keys decide where member spend is recorded.
+    /// Default no limits.
     pub fn limits(&self) -> &Limits {
         &self.limits
     }
 
     /// Returns the member checkpoint store, if set.
+    /// Without one, member runs keep their checkpoints in memory for the
+    /// length of the call and never resume.
     pub fn store(&self) -> Option<&Arc<dyn CheckpointStore>> {
         self.store.as_ref()
     }
 
     /// Returns whether the `ask_question` tool is offered.
+    /// `delegate_work` is always offered.
+    /// Default on.
     pub fn ask_question(&self) -> bool {
         self.ask_question
     }
@@ -453,13 +467,17 @@ impl DelegationTools {
         Ok(DelegationTools { tools })
     }
 
-    /// Returns the tools to register for the leader.
+    /// Returns the tools to register for the leader: `delegate_work`,
+    /// then `ask_question` when the settings offer it.
+    /// The list is never empty.
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         self.tools.clone()
     }
 }
 
 /// One delegation tool: `delegate_work` or, with `ask`, `ask_question`.
+/// It holds the shared coworker list and calls the named coworker's
+/// `AgentTool` with the caller's context.
 struct Delegate {
     spec: ToolSpec,
     ask: bool,
