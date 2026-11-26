@@ -53,6 +53,8 @@ pub struct Agent {
     pub(crate) storage: Storage,
     #[cfg(feature = "knowledge")]
     pub(crate) memory: Option<crate::memory::AgentMemory>,
+    #[cfg(feature = "knowledge")]
+    pub(crate) knowledge: Option<crate::knowledge::Knowledge>,
     catalog: Option<Catalog>,
     api_key: Option<Secret>,
     api_key_env: Option<String>,
@@ -88,6 +90,8 @@ impl Agent {
             storage: Storage::memory(),
             #[cfg(feature = "knowledge")]
             memory: None,
+            #[cfg(feature = "knowledge")]
+            knowledge: None,
             catalog: None,
             api_key: None,
             api_key_env: None,
@@ -201,10 +205,19 @@ impl Agent {
 
     /// Gives the agent long-term memory for one user and session: the five
     /// memory tools, bound to them, and a preamble of facts and summary.
-    /// Needs `AgentMemory::sqlite(..)` in 0.2.
+    /// Needs `AgentMemory::sqlite(..)` or `.knowledge(..)` in 0.2.
     #[cfg(feature = "knowledge")]
     pub fn memory(mut self, memory: crate::memory::AgentMemory) -> Self {
         self.memory = Some(memory);
+        self
+    }
+
+    /// Lets the agent search a folder: ingested at `build` (unchanged files
+    /// skipped) and served by the `search_knowledge` tool, fenced as
+    /// untrusted text. Takes `Knowledge::dir(..)` or a path.
+    #[cfg(feature = "knowledge")]
+    pub fn knowledge(mut self, knowledge: impl Into<crate::knowledge::Knowledge>) -> Self {
+        self.knowledge = Some(knowledge.into());
         self
     }
 
@@ -392,7 +405,7 @@ impl Agent {
         } else if self.ledger.is_some() {
             Some("ledger; set it on the graph")
         } else if self.has_context() {
-            Some("memory; graphs do not take it in 0.2")
+            Some("memory or knowledge; graphs do not take them in 0.2")
         } else {
             None
         }
@@ -400,7 +413,7 @@ impl Agent {
 
     #[cfg(feature = "knowledge")]
     fn has_context(&self) -> bool {
-        self.memory.is_some()
+        self.memory.is_some() || self.knowledge.is_some()
     }
 
     #[cfg(not(feature = "knowledge"))]

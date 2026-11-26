@@ -1,7 +1,11 @@
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use troupekit::{agent, Agent, AgentMemory, Graph, KitError};
+use troupekit::knowledge::Embedder;
+use troupekit::{agent, Agent, AgentMemory, Graph, KitError, Knowledge, Storage};
+use troupekit_context::embed::HashingEmbedder;
+use troupekit_context::ContextError;
 use troupekit_core::event::Usage;
 use troupekit_core::message::{ContentPart, Message, Role};
 use troupekit_graph::testing::{text_reply, FnModel};
@@ -83,6 +87,30 @@ async fn build_error(agent: Agent) -> KitError {
     }
 }
 
+struct Counting {
+    inner: HashingEmbedder,
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Embedder for Counting {
+    fn dims(&self) -> usize {
+        self.inner.dims()
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, ContextError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.embed(texts).await
+    }
+}
+
+fn docs(dir: &Path) -> PathBuf {
+    let docs = dir.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(docs.join("refunds.md"), "Refunds take five days.").unwrap();
+    docs
+}
+
 #[tokio::test]
 async fn memory_needs_user_and_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -135,7 +163,79 @@ async fn preamble_is_prepended_when_on() {
 }
 
 #[tokio::test]
-async fn graphs_refuse_agents_with_memory() {
+async fn knowledge_dir_ingests_once_then_skips() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = docs(dir.path());
+    let embedder = Arc::new(Counting {
+        inner: HashingEmbedder::new(32),
+        calls: AtomicUsize::new(0),
+    });
+    let reader = || {
+        Agent::new("reader")
+            .instructions("Read.")
+            .model("fake/m")
+            .model_client(echo_user_text())
+            .checkpoints(Storage::sqlite(dir.path().join("kb.db")))
+            .knowledge(Knowledge::dir(&docs).embedder(embedder.clone()))
+    };
+    let built = reader().build().await.unwrap();
+    assert_eq!(built.persona().tools, ["search_knowledge".to_string()]);
+    let after_first = embedder.calls.load(Ordering::SeqCst);
+    assert!(after_first > 0);
+    reader().build().await.unwrap();
+    assert_eq!(embedder.calls.load(Ordering::SeqCst), after_first);
+}
+
+#[tokio::test]
+async fn knowledge_without_embedder_fails_at_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = Agent::new("reader")
+        .instructions("Read.")
+        .model("fake/m")
+        .model_client(echo_user_text())
+        .knowledge(Knowledge::dir(docs(dir.path())).store(dir.path().join("kb.db")));
+    assert_eq!(
+        build_error(agent).await.to_string(),
+        "agent `reader`: knowledge needs an embedder: call Knowledge::embedder(..)"
+    );
+}
+
+#[tokio::test]
+async fn knowledge_text_is_fenced_external() {
+    let dir = tempfile::tempdir().unwrap();
+    let knowledge = Knowledge::from(docs(dir.path()))
+        .store(dir.path().join("kb.db"))
+        .embedder(Arc::new(HashingEmbedder::new(32)));
+    let answer = Agent::new("reader")
+        .instructions("Read.")
+        .model("fake/m")
+        .model_client(calling("search_knowledge", json!({"query": "refunds"})))
+        .knowledge(knowledge)
+        .run("refunds?")
+        .await
+        .unwrap();
+    assert!(answer.contains("<untrusted-content>"), "{answer}");
+    assert!(answer.contains("five days"), "{answer}");
+}
+
+#[tokio::test]
+async fn memory_and_knowledge_share_one_kit() {
+    let dir = tempfile::tempdir().unwrap();
+    let knowledge = Knowledge::dir(docs(dir.path()))
+        .store(db(&dir))
+        .embedder(Arc::new(HashingEmbedder::new(32)));
+    let built = rememberer(echo_user_text(), AgentMemory::new("ada", "s1"))
+        .knowledge(knowledge)
+        .build()
+        .await
+        .unwrap();
+    let mut expected = vec!["search_knowledge".to_string()];
+    expected.extend(MEMORY_TOOLS.map(String::from));
+    assert_eq!(built.persona().tools, expected);
+}
+
+#[tokio::test]
+async fn graphs_refuse_agents_with_memory_or_knowledge() {
     let dir = tempfile::tempdir().unwrap();
     let memory = AgentMemory::new("u1", "s1").sqlite(db(&dir));
     let err = Graph::new("g")
@@ -145,7 +245,7 @@ async fn graphs_refuse_agents_with_memory() {
         .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "agent `graph:g`: agent node `note` sets its own memory; graphs do not take it in 0.2"
+        "agent `graph:g`: agent node `note` sets its own memory or knowledge; graphs do not take them in 0.2"
     );
 }
 
@@ -154,16 +254,25 @@ fn macro_memory() -> AgentMemory {
     AgentMemory::new("u1", "s1").sqlite(path)
 }
 
+fn macro_knowledge() -> Knowledge {
+    let dir = std::env::temp_dir().join(format!("kit-macro-kb-{}", std::process::id()));
+    Knowledge::dir(docs(&dir))
+        .store(dir.join("kb.db"))
+        .embedder(Arc::new(HashingEmbedder::new(32)))
+}
+
 /// Remembers things.
-#[agent(model = "fake/m", memory = macro_memory())]
+#[agent(model = "fake/m", memory = macro_memory(), knowledge = macro_knowledge())]
 fn noted() {}
 
 #[tokio::test]
-async fn macro_memory_key() {
+async fn macro_memory_and_knowledge_keys() {
     let built = noted()
         .model_client(echo_user_text())
         .build()
         .await
         .unwrap();
-    assert_eq!(built.persona().tools, MEMORY_TOOLS.map(String::from));
+    let mut expected = vec!["search_knowledge".to_string()];
+    expected.extend(MEMORY_TOOLS.map(String::from));
+    assert_eq!(built.persona().tools, expected);
 }

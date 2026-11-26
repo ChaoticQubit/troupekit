@@ -20,6 +20,14 @@ enum Kind {
 }
 
 impl Storage {
+    #[cfg(feature = "knowledge")]
+    pub(crate) fn sqlite_path(&self) -> Option<&std::path::Path> {
+        match &self.0 {
+            Kind::Sqlite(path) => Some(path),
+            _ => None,
+        }
+    }
+
     /// Keeps each run's checkpoints in memory, dropped when the run ends.
     /// Runs cannot be resumed. This is the default.
     /// Costs nothing at `build`.

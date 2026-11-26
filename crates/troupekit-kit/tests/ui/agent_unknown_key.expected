@@ -1,2 +1,2 @@
 agent_unknown_key.rs:5:
-error: unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, name, crate
+error: unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, name, crate

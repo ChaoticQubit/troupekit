@@ -21,6 +21,8 @@ pub use error::KitError;
 pub use graph::{BuiltGraph, Graph, GraphReport};
 pub use laws::Laws;
 #[cfg(feature = "knowledge")]
+pub use knowledge::Knowledge;
+#[cfg(feature = "knowledge")]
 pub use memory::AgentMemory;
 pub use output::{IntoToolOutput, Json};
 pub use storage::Storage;
@@ -33,7 +35,7 @@ pub use troupekit_tools::{Tool, ToolContext, ToolOutput};
 /// `AsTool`, `IntoToolOutput` and `Input` stay at the crate root.
 pub mod prelude {
     #[cfg(feature = "knowledge")]
-    pub use crate::AgentMemory;
+    pub use crate::{AgentMemory, Knowledge};
     pub use crate::{
         agent, tool, Agent, BuiltAgent, BuiltGraph, Graph, Json, KitError, Laws, RunOutcome,
         Storage,
