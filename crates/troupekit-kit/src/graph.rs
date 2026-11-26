@@ -208,6 +208,16 @@ impl Graph {
                 }
             }
         }
+        #[cfg(feature = "local")]
+        {
+            let mut loads = crate::local::Loads::new();
+            for (_, node) in &mut self.nodes {
+                if let Node::Agent(agent) = node {
+                    let loaded = agent.as_ref().clone().load_local(&mut loads).await?;
+                    **agent = loaded;
+                }
+            }
+        }
         let fail = |m: String| KitError::config(&owner, m);
         if self.retries > MAX_GRAPH_RETRIES {
             return Err(fail(format!(

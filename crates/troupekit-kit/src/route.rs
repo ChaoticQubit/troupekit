@@ -24,6 +24,9 @@ pub(crate) struct RouteConfig {
     network: Option<Arc<NetworkState>>,
     device: Option<Arc<DeviceState>>,
     pub(crate) on_device: Option<(Arc<dyn Model>, Price)>,
+    pub(crate) local_only: bool,
+    #[cfg(feature = "local")]
+    pub(crate) local_model: Option<Arc<dyn troupekit_local::LocalModel>>,
 }
 
 fn same_arc<T: ?Sized>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
@@ -64,6 +67,7 @@ impl RouteConfig {
             && same_arc(&self.network, &other.network)
             && same_arc(&self.device, &other.device)
             && same_local
+            && self.local_only == other.local_only
     }
 
     pub(crate) fn has_route(&self) -> bool {
@@ -119,28 +123,35 @@ impl RouteConfig {
         let mut builder = RoutedModel::builder(policy.clone());
         let mut cloud = Some(cloud);
         for target in policy.targets() {
-            builder = match target.id() {
-                LOCAL => match &self.on_device {
-                    Some((model, price)) => builder.on_device(LOCAL, model.clone(), *price),
-                    None => {
+            builder =
+                match target.id() {
+                    LOCAL => {
+                        match &self.on_device {
+                            Some((model, price)) => builder.on_device(LOCAL, model.clone(), *price),
+                            None => return Err(KitError::config(
+                                owner,
+                                "route target `local` needs an on-device model: call .local(..)",
+                            )),
+                        }
+                    }
+                    CLOUD if self.local_only => return Err(KitError::config(
+                        owner,
+                        "route target `cloud` needs a cloud model: call .model(\"vendor/model\")",
+                    )),
+                    CLOUD => {
+                        let resolve = cloud.take().expect("route target ids are unique");
+                        let handle = resolve()?;
+                        builder.remote(CLOUD, handle.model, handle.price)
+                    }
+                    other => {
                         return Err(KitError::config(
                             owner,
-                            "route target `local` needs an on-device model: call .local(..)",
-                        ))
-                    }
-                },
-                CLOUD => {
-                    let resolve = cloud.take().expect("route target ids are unique");
-                    let handle = resolve()?;
-                    builder.remote(CLOUD, handle.model, handle.price)
-                }
-                other => return Err(KitError::config(
-                    owner,
-                    format!(
+                            format!(
                         "route target `{other}` is not a kit target: name them `local` and `cloud`"
                     ),
-                )),
-            };
+                        ))
+                    }
+                };
         }
         if let Some(network) = &self.network {
             builder = builder.network(Arc::new(NetworkState::clone(network)));
@@ -172,7 +183,7 @@ impl RouteConfig {
                 "a tier needs a policy: call .route(..)",
             ));
         }
-        if !self.private {
+        if !self.private && !self.local_only {
             return cloud();
         }
         match &self.on_device {
