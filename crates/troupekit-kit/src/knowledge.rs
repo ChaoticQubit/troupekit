@@ -235,6 +235,7 @@ pub struct Knowledge {
     pub(crate) embedder: Option<Arc<dyn Embedder>>,
     pub(crate) load: LoadSettings,
     pub(crate) chunk: ChunkConfig,
+    pub(crate) allow_failed: bool,
 }
 
 impl Knowledge {
@@ -250,6 +251,7 @@ impl Knowledge {
             embedder: None,
             load: defaults.load().clone(),
             chunk: defaults.chunk(),
+            allow_failed: false,
         }
     }
 
@@ -295,6 +297,16 @@ impl Knowledge {
     }
 }
 
+impl Knowledge {
+    /// Lets `build` succeed when some files fail to ingest; the rest is
+    /// searchable and failed files are retried on the next build. Default
+    /// `false`: `build` fails and lists the failed files.
+    pub fn allow_failed(mut self, allow: bool) -> Self {
+        self.allow_failed = allow;
+        self
+    }
+}
+
 impl From<&str> for Knowledge {
     fn from(dir: &str) -> Self {
         Knowledge::dir(dir)
@@ -320,6 +332,7 @@ impl fmt::Debug for Knowledge {
             .field("index", &self.index)
             .field("store", &self.store)
             .field("embedder", &self.embedder.is_some())
+            .field("allow_failed", &self.allow_failed)
             .finish_non_exhaustive()
     }
 }

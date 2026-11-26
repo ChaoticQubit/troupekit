@@ -217,6 +217,52 @@ async fn knowledge_defaults_to_the_catalog_embedder_for_the_agent_vendor() {
     assert_eq!(built.persona().tools, ["search_knowledge".to_string()]);
 }
 
+struct Poisoned(HashingEmbedder);
+
+#[async_trait::async_trait]
+impl Embedder for Poisoned {
+    fn dims(&self) -> usize {
+        self.0.dims()
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, ContextError> {
+        if texts.iter().any(|t| t.contains("poison")) {
+            return Err(ContextError::Embed("model refused the batch".into()));
+        }
+        self.0.embed(texts).await
+    }
+}
+
+#[tokio::test]
+async fn failed_documents_fail_build_unless_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = docs(dir.path());
+    std::fs::write(docs.join("bad.md"), "poison pill").unwrap();
+    let reader = |allow: bool| {
+        Agent::new("reader")
+            .instructions("Read.")
+            .model("fake/m")
+            .model_client(echo_user_text())
+            .knowledge(
+                Knowledge::dir(&docs)
+                    .store(dir.path().join("kb.db"))
+                    .embedder(Arc::new(Poisoned(HashingEmbedder::new(32))))
+                    .allow_failed(allow),
+            )
+    };
+    let text = build_error(reader(false)).await.to_string();
+    assert!(
+        text.starts_with("agent `reader`: knowledge ingest failed for 1 file: bad.md ("),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("; fix the files or call Knowledge::allow_failed(true)"),
+        "{text}"
+    );
+    let built = reader(true).build().await.unwrap();
+    assert_eq!(built.persona().tools, ["search_knowledge".to_string()]);
+}
+
 #[tokio::test]
 async fn knowledge_text_is_fenced_external() {
     let dir = tempfile::tempdir().unwrap();

@@ -14,6 +14,7 @@ use troupekit_store_sqlite::{SqliteStore, SqliteVectors, VectorSettings};
 const DEFAULT_STORE: &str = "troupekit.db";
 const PLACEHOLDER_INDEX: &str = "troupekit_memory";
 const PLACEHOLDER_DIMS: usize = 8;
+const MAX_LISTED_FAILURES: usize = 10;
 const KNOWLEDGE_ONLY_IDENTITY: &str = "knowledge";
 const MEMORY_TOOLS: [&str; 5] = [
     REMEMBER_FACT,
@@ -115,7 +116,10 @@ pub(crate) async fn attach(mut agent: Agent) -> Result<(Agent, Option<KnowledgeK
                 Some(embedder) => embedder,
                 None => agent.default_embedder()?,
             };
-            Some((open_knowledge(k, embedder, &store_path).await?, store_path))
+            Some((
+                open_knowledge(&name, k, embedder, &store_path).await?,
+                store_path,
+            ))
         }
         None => None,
     };
@@ -189,6 +193,7 @@ struct Opened {
 }
 
 async fn open_knowledge(
+    name: &str,
     k: &Knowledge,
     embedder: Arc<dyn Embedder>,
     path: &Path,
@@ -201,13 +206,37 @@ async fn open_knowledge(
         .with_scope(k.index.clone())
         .with_chunk(k.chunk)
         .with_load(k.load.clone());
-    ingest_dir(&vectors, embedder.as_ref(), &k.dir, &settings).await?;
+    let report = ingest_dir(&vectors, embedder.as_ref(), &k.dir, &settings).await?;
+    if !report.failed.is_empty() && !k.allow_failed {
+        return Err(KitError::config(name, failed_message(&report.failed)));
+    }
     Ok(Opened {
         store,
         vectors: Arc::new(vectors),
         embedder,
         scope: k.index.clone(),
     })
+}
+
+fn failed_message(failed: &[(String, String)]) -> String {
+    assert!(!failed.is_empty(), "called only when files failed");
+    let listed: Vec<String> = failed
+        .iter()
+        .take(MAX_LISTED_FAILURES)
+        .map(|(source, error)| format!("{source} ({error})"))
+        .collect();
+    let more = failed.len().saturating_sub(MAX_LISTED_FAILURES);
+    let more = if more > 0 {
+        format!("; and {more} more")
+    } else {
+        String::new()
+    };
+    let noun = if failed.len() == 1 { "file" } else { "files" };
+    format!(
+        "knowledge ingest failed for {} {noun}: {}{more}; fix the files or call Knowledge::allow_failed(true)",
+        failed.len(),
+        listed.join("; ")
+    )
 }
 
 pub(crate) async fn prepend(
