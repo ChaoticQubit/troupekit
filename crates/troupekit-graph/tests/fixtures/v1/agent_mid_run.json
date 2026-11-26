@@ -1,0 +1,181 @@
+{
+  "run_id": "01a2169d-73e4-74fc-831a-ab8b8d857968",
+  "step": 1,
+  "state": {
+    "active_ms": 0,
+    "branches": [
+      {
+        "at": {
+          "at": "agent",
+          "call_cap": null,
+          "run": {
+            "format": 1,
+            "limits": {
+              "call": null,
+              "run": 1,
+              "scope": null,
+              "user": null
+            },
+            "messages": [
+              {
+                "parts": [
+                  {
+                    "text": "Plan the week.\n\n<untrusted source=\"workflow state\">\n{\"goal\":\"g\"}\n</untrusted>",
+                    "type": "text"
+                  }
+                ],
+                "role": "user"
+              }
+            ],
+            "model_calls": 0,
+            "repaired": false,
+            "run_id": "01a2169d-73e4-74fc-831a-ab8c65d7ff41",
+            "seq": 4,
+            "spec": {
+              "evals": [],
+              "max_tokens": 4096,
+              "max_turns": 8,
+              "model": "fake/m",
+              "output": {
+                "additionalProperties": false,
+                "properties": {
+                  "steps": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "steps"
+                ],
+                "type": "object"
+              },
+              "persona": "planner",
+              "system": "You are P. Works.\n\nGoal: Done.\n\nDo it.\n\nOutput: reply with only one JSON object that matches this JSON Schema:\n{\"additionalProperties\":false,\"properties\":{\"steps\":{\"items\":{\"type\":\"string\"},\"type\":\"array\"}},\"required\":[\"steps\"],\"type\":\"object\"}",
+              "tools": []
+            },
+            "state": {
+              "reason": {
+                "kind": "budget",
+                "limit": "run"
+              },
+              "resume": {
+                "state": "call_model"
+              },
+              "state": "paused"
+            },
+            "steps": 1,
+            "usage": {
+              "cost_usd_micros": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "run_cap": null
+        },
+        "node": "plan"
+      }
+    ],
+    "format": 1,
+    "limits": {
+      "call": null,
+      "run": 1,
+      "scope": null,
+      "user": null
+    },
+    "retries": 0,
+    "run_id": "01a2169d-73e4-74fc-831a-ab8b8d857968",
+    "seq": 4,
+    "state": {
+      "goal": "g"
+    },
+    "status": {
+      "reason": {
+        "kind": "budget",
+        "limit": "run"
+      },
+      "status": "waiting_budget"
+    },
+    "steps": 1,
+    "usage": {
+      "cost_usd_micros": 0,
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "workflow": {
+      "edges": [
+        {
+          "from": "plan",
+          "to": "save",
+          "when": null
+        },
+        {
+          "from": "save",
+          "to": "done",
+          "when": null
+        }
+      ],
+      "max_retries": 5,
+      "max_steps": 200,
+      "name": "linear",
+      "nodes": [
+        {
+          "id": "plan",
+          "kind": {
+            "persona": "planner",
+            "prompt": "Plan the week.",
+            "type": "agent"
+          },
+          "reads": [
+            "goal"
+          ],
+          "writes": "plan"
+        },
+        {
+          "id": "save",
+          "kind": {
+            "tool": "save_plan",
+            "type": "tool"
+          },
+          "reads": [
+            "plan"
+          ],
+          "writes": "note"
+        },
+        {
+          "id": "done",
+          "kind": {
+            "type": "end"
+          },
+          "reads": [],
+          "writes": null
+        }
+      ],
+      "start": "plan",
+      "state": {
+        "goal": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "plan": {
+          "additionalProperties": false,
+          "properties": {
+            "steps": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  }
+}

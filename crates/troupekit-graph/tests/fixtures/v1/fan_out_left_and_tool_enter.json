@@ -1,0 +1,144 @@
+{
+  "run_id": "01a2169d-73e2-75ab-b4a0-b49d56dc6cea",
+  "step": 2,
+  "state": {
+    "active_ms": 0,
+    "branches": [
+      {
+        "at": {
+          "at": "left"
+        },
+        "node": "ask"
+      },
+      {
+        "at": {
+          "at": "enter"
+        },
+        "node": "work"
+      }
+    ],
+    "format": 1,
+    "limits": {
+      "call": null,
+      "run": null,
+      "scope": null,
+      "user": null
+    },
+    "retries": 0,
+    "run_id": "01a2169d-73e2-75ab-b4a0-b49d56dc6cea",
+    "seq": 5,
+    "state": {
+      "answer": "more",
+      "goal": "g",
+      "seed": "seeded"
+    },
+    "status": {
+      "status": "queued"
+    },
+    "steps": 2,
+    "usage": {
+      "cost_usd_micros": 0,
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "workflow": {
+      "edges": [
+        {
+          "from": "seed",
+          "to": "ask",
+          "when": null
+        },
+        {
+          "from": "seed",
+          "to": "work",
+          "when": null
+        },
+        {
+          "from": "ask",
+          "to": "gather",
+          "when": null
+        },
+        {
+          "from": "work",
+          "to": "gather",
+          "when": null
+        },
+        {
+          "from": "gather",
+          "to": "done",
+          "when": null
+        }
+      ],
+      "max_retries": 5,
+      "max_steps": 200,
+      "name": "fan",
+      "nodes": [
+        {
+          "id": "seed",
+          "kind": {
+            "tool": "seed",
+            "type": "tool"
+          },
+          "reads": [
+            "goal"
+          ],
+          "writes": "seed"
+        },
+        {
+          "id": "ask",
+          "kind": {
+            "ask": "question",
+            "prompt": "Anything to add?",
+            "type": "human"
+          },
+          "reads": [
+            "seed"
+          ],
+          "writes": "answer"
+        },
+        {
+          "id": "work",
+          "kind": {
+            "tool": "work",
+            "type": "tool"
+          },
+          "reads": [
+            "seed"
+          ],
+          "writes": "note"
+        },
+        {
+          "id": "gather",
+          "kind": {
+            "type": "join"
+          },
+          "reads": [],
+          "writes": null
+        },
+        {
+          "id": "done",
+          "kind": {
+            "type": "end"
+          },
+          "reads": [],
+          "writes": null
+        }
+      ],
+      "start": "seed",
+      "state": {
+        "answer": {
+          "type": "string"
+        },
+        "goal": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "seed": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,173 @@
+{
+  "run_id": "01a2169d-73e3-7039-b9a1-dda3713c39bf",
+  "step": 2,
+  "state": {
+    "active_ms": 0,
+    "branches": [
+      {
+        "at": {
+          "at": "human",
+          "data": {
+            "plan": {
+              "steps": [
+                "warm up",
+                "run"
+              ]
+            }
+          }
+        },
+        "node": "approve"
+      }
+    ],
+    "format": 1,
+    "limits": {
+      "call": null,
+      "run": null,
+      "scope": null,
+      "user": null
+    },
+    "retries": 0,
+    "run_id": "01a2169d-73e3-7039-b9a1-dda3713c39bf",
+    "seq": 7,
+    "state": {
+      "goal": "g",
+      "plan": {
+        "steps": [
+          "warm up",
+          "run"
+        ]
+      }
+    },
+    "status": {
+      "reason": {
+        "kind": "approval",
+        "node": "approve"
+      },
+      "status": "waiting_human"
+    },
+    "steps": 2,
+    "usage": {
+      "cost_usd_micros": 20,
+      "input_tokens": 10,
+      "output_tokens": 5
+    },
+    "workflow": {
+      "edges": [
+        {
+          "from": "plan",
+          "to": "approve",
+          "when": null
+        },
+        {
+          "from": "approve",
+          "to": "route",
+          "when": null
+        },
+        {
+          "from": "route",
+          "to": "save",
+          "when": "true"
+        },
+        {
+          "from": "route",
+          "to": "plan",
+          "when": "false"
+        },
+        {
+          "from": "save",
+          "to": "done",
+          "when": null
+        }
+      ],
+      "max_retries": 5,
+      "max_steps": 200,
+      "name": "approve",
+      "nodes": [
+        {
+          "id": "plan",
+          "kind": {
+            "persona": "planner",
+            "prompt": "Plan.",
+            "type": "agent"
+          },
+          "reads": [
+            "goal"
+          ],
+          "writes": "plan"
+        },
+        {
+          "id": "approve",
+          "kind": {
+            "ask": "approval",
+            "prompt": "Approve?",
+            "type": "human"
+          },
+          "reads": [
+            "plan"
+          ],
+          "writes": "approved"
+        },
+        {
+          "id": "route",
+          "kind": {
+            "condition": {
+              "args": [
+                "approved"
+              ],
+              "name": "flag"
+            },
+            "type": "router"
+          },
+          "reads": [],
+          "writes": null
+        },
+        {
+          "id": "save",
+          "kind": {
+            "tool": "save_plan",
+            "type": "tool"
+          },
+          "reads": [
+            "plan"
+          ],
+          "writes": "note"
+        },
+        {
+          "id": "done",
+          "kind": {
+            "type": "end"
+          },
+          "reads": [],
+          "writes": null
+        }
+      ],
+      "start": "plan",
+      "state": {
+        "approved": {
+          "type": "boolean"
+        },
+        "goal": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "plan": {
+          "additionalProperties": false,
+          "properties": {
+            "steps": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  }
+}
