@@ -1,0 +1,35 @@
+[package]
+name = "troupekit-ffi"
+description = "UniFFI adapter over troupekit-ffi-core: the Swift and Kotlin bindings of Troupekit."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version = "1.89"
+autotests = false
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+troupekit-ffi-core = { path = "../troupekit-ffi-core", version = "0.1.0", default-features = false }
+uniffi = { version = "=0.33.0", default-features = false, features = ["macro-scaffolding"] }
+
+[features]
+default = ["sqlite", "reqwest", "knowledge"]
+sqlite = ["troupekit-ffi-core/sqlite"]
+reqwest = ["troupekit-ffi-core/reqwest"]
+knowledge = ["troupekit-ffi-core/knowledge"]
+bindgen = ["uniffi/cli", "uniffi/cargo-metadata"]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
