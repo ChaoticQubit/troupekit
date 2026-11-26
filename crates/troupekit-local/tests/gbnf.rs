@@ -317,3 +317,52 @@ fn integer_bounds_past_sixteen_digits_are_refused() {
     let edge = schema_to_gbnf(&json!({"type": "integer", "minimum": -9_999_999_999_999_998i64}));
     assert!(edge.is_ok());
 }
+
+#[test]
+fn one_of_literals_use_json_schema_equality() {
+    let overlap = [
+        json!({"oneOf": [{"const": 1}, {"const": 1.0}]}),
+        json!({"oneOf": [{"const": [1]}, {"const": [1.0]}]}),
+        json!({"oneOf": [{"const": {"a": [1, {"b": 2}]}}, {"enum": [{"a": [1.0, {"b": 2.0}]}]}]}),
+    ];
+    for schema in overlap {
+        assert!(refused(schema.clone()).contains("`anyOf`"), "{schema}");
+    }
+    let distinct = [
+        json!({"oneOf": [{"const": [1]}, {"const": [2]}]}),
+        json!({"oneOf": [{"const": 9007199254740993u64}, {"const": 9007199254740992u64}]}),
+        json!({"oneOf": [{"const": {"a": 1}}, {"const": {"a": 1, "b": 2}}]}),
+    ];
+    for schema in distinct {
+        assert!(schema_to_gbnf(&schema).is_ok(), "{schema}");
+    }
+}
+
+#[test]
+fn integer_endpoints_stay_exact() {
+    let quoted = |digits: &str| -> String {
+        digits
+            .chars()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for value in [
+        9_007_199_254_740_993i64,
+        9_999_999_999_999_999,
+        -9_999_999_999_999_999,
+    ] {
+        let schema = json!({"type": "integer", "minimum": value, "maximum": value});
+        let grammar = schema_to_gbnf(&schema).unwrap();
+        let digits = value.unsigned_abs().to_string();
+        let body = if value < 0 {
+            format!("\"-\" {}", quoted(&digits))
+        } else {
+            quoted(&digits)
+        };
+        let expected = format!("r0 ::= {body}\n");
+        assert!(grammar.gbnf().contains(&expected), "{}", grammar.gbnf());
+    }
+    let float = json!({"type": "integer", "minimum": 1e16});
+    assert!(refused(float).contains("`minimum`"));
+}

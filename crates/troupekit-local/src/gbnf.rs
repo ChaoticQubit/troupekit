@@ -122,11 +122,73 @@ fn type_allows(name: &str, value: &Value) -> bool {
     }
 }
 
+/// JSON Schema equality: numbers by mathematical value (exact for
+/// integers past 2^53), arrays element by element, objects by key set
+/// and values. Everything else compares as JSON.
 fn same_value(a: &Value, b: &Value) -> bool {
-    match (a.as_f64(), b.as_f64()) {
-        (Some(x), Some(y)) => x == y,
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => same_number(x, y),
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_value(p, q))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| same_value(v, w)))
+        }
         _ => a == b,
     }
+}
+
+fn whole_number(n: &serde_json::Number) -> Option<i128> {
+    n.as_i64()
+        .map(i128::from)
+        .or_else(|| n.as_u64().map(i128::from))
+}
+
+fn float_is(f: f64, whole: i128) -> bool {
+    f.is_finite() && f.fract() == 0.0 && f.abs() < 1.7e38 && f as i128 == whole
+}
+
+fn same_number(x: &serde_json::Number, y: &serde_json::Number) -> bool {
+    match (whole_number(x), whole_number(y)) {
+        (Some(p), Some(q)) => p == q,
+        (Some(p), None) => y.as_f64().is_some_and(|f| float_is(f, p)),
+        (None, Some(q)) => x.as_f64().is_some_and(|f| float_is(f, q)),
+        (None, None) => x.as_f64() == y.as_f64(),
+    }
+}
+
+/// Reads bound `key` as an exact integer: integer JSON numbers as they
+/// are, fractions rounded up (`round_up`) or down. Output: the bound,
+/// `None` when absent, or an error past 16 digits or for a non-number.
+fn integer_bound(
+    obj: &Map<String, Value>,
+    key: &str,
+    round_up: bool,
+) -> Result<Option<i64>, LocalError> {
+    let Some(value) = obj.get(key) else {
+        return Ok(None);
+    };
+    let bad = || {
+        fail(format!(
+            "`{key}` must be a number of at most {MAX_DIGITS} digits"
+        ))
+    };
+    let whole = match (value.as_i64(), value.as_f64()) {
+        (Some(exact), _) => exact,
+        (None, _) if value.is_u64() => return Err(bad()),
+        (None, Some(f)) if f.is_finite() && f.abs() < 1e17 => {
+            let rounded = if round_up { f.ceil() } else { f.floor() };
+            rounded as i64
+        }
+        _ => return Err(bad()),
+    };
+    if whole.unsigned_abs() > MAX_MAGNITUDE {
+        return Err(bad());
+    }
+    assert!(whole.unsigned_abs() <= MAX_MAGNITUDE);
+    Ok(Some(whole))
 }
 
 fn kind_of_name(name: &str) -> &'static str {
@@ -597,20 +659,7 @@ impl GbnfBuilder {
     }
 
     fn numeric(&mut self, obj: &Map<String, Value>, integer: bool) -> Result<String, LocalError> {
-        let bound = |key: &str| match obj.get(key) {
-            None => Ok(None),
-            Some(v) => v
-                .as_f64()
-                .filter(|f| f.is_finite() && f.abs() < 1e16)
-                .map(Some)
-                .ok_or_else(|| {
-                    fail(format!(
-                        "`{key}` must be a number of at most {MAX_DIGITS} digits"
-                    ))
-                }),
-        };
-        let (min, max) = (bound("minimum")?, bound("maximum")?);
-        if min.is_none() && max.is_none() {
+        if !obj.contains_key("minimum") && !obj.contains_key("maximum") {
             return Ok(if integer { "integer" } else { "number" }.to_string());
         }
         if !integer {
@@ -620,8 +669,8 @@ impl GbnfBuilder {
             ));
         }
         let cap = MAX_MAGNITUDE as i64;
-        let low = min.map_or(-cap, |m| m.ceil() as i64);
-        let high = max.map_or(cap, |m| m.floor() as i64);
+        let low = integer_bound(obj, "minimum", true)?.unwrap_or(-cap);
+        let high = integer_bound(obj, "maximum", false)?.unwrap_or(cap);
         if low > high {
             return Err(fail("`minimum` is above `maximum`: no integer fits"));
         }
