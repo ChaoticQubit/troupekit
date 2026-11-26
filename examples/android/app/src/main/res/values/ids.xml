@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="question" type="id" />
+    <item name="send" type="id" />
+    <item name="answer" type="id" />
+    <item name="streaming" type="id" />
+    <item name="runId" type="id" />
+    <item name="steps" type="id" />
+    <item name="progress" type="id" />
+</resources>
