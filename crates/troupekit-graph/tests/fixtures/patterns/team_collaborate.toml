@@ -1,0 +1,71 @@
+name = "panel"
+start = "brief"
+
+[state]
+brief = "string"
+input = "string"
+law_answer = "string"
+output = "string"
+tax_answer = "string"
+
+[[nodes]]
+id = "brief"
+kind = "agent"
+persona = "chair"
+prompt = "Write a short brief of the request for your team."
+reads = ["input"]
+writes = "brief"
+
+[[nodes]]
+id = "law"
+kind = "agent"
+persona = "law"
+reads = ["input", "brief"]
+writes = "law_answer"
+
+[[nodes]]
+id = "tax"
+kind = "agent"
+persona = "tax"
+reads = ["input", "brief"]
+writes = "tax_answer"
+
+[[nodes]]
+id = "gather"
+kind = "join"
+
+[[nodes]]
+id = "synthesize"
+kind = "agent"
+persona = "chair"
+prompt = "Combine your team's answers into one final answer."
+reads = ["input", "law_answer", "tax_answer"]
+writes = "output"
+
+[[nodes]]
+id = "end"
+kind = "end"
+
+[[edges]]
+from = "brief"
+to = "law"
+
+[[edges]]
+from = "law"
+to = "gather"
+
+[[edges]]
+from = "brief"
+to = "tax"
+
+[[edges]]
+from = "tax"
+to = "gather"
+
+[[edges]]
+from = "gather"
+to = "synthesize"
+
+[[edges]]
+from = "synthesize"
+to = "end"

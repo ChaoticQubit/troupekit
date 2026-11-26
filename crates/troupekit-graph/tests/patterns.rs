@@ -68,6 +68,36 @@ fn coordinate_compiles_to_leader_with_delegates() {
     assert_eq!(nodes(&table).len(), 2, "members are delegates, not nodes");
 }
 
+const PANEL: &str = "name = 'panel'\n[team]\nmode = 'collaborate'\nleader = 'chair'\n\
+                     members = ['law', 'tax']\n";
+
+#[test]
+fn collaborate_compiles_to_fan_out_join_and_synthesis() {
+    let table = compile(FILE, PANEL).unwrap();
+    assert_eq!(table, golden("team_collaborate.toml"));
+    assert_eq!(node(&table, "brief")["persona"].as_str(), Some("chair"));
+    assert_eq!(node(&table, "gather")["kind"].as_str(), Some("join"));
+    let synth = node(&table, "synthesize");
+    assert_eq!(strs(&synth["reads"]), ["input", "law_answer", "tax_answer"]);
+    assert_eq!(synth["writes"].as_str(), Some("output"));
+    refused(
+        &PANEL.replace("['law', 'tax']", "['law']"),
+        "team.members",
+        "2 or more members",
+    );
+}
+
+#[test]
+fn broadcast_compiles_to_fan_out_and_merge() {
+    let table = compile(FILE, &PANEL.replace("collaborate", "broadcast")).unwrap();
+    assert_eq!(table, golden("team_broadcast.toml"));
+    assert_eq!(table["reducers"]["answers"].as_str(), Some("append"));
+    for id in ["law", "tax"] {
+        assert_eq!(node(&table, id)["writes"].as_str(), Some("answers"));
+    }
+    assert!(nodes(&table).iter().all(|n| n["id"].as_str() != Some("synthesize")));
+}
+
 #[test]
 fn team_state_keys_reach_every_member() {
     let text = ROUTE.replace(

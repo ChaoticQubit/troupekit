@@ -8,6 +8,8 @@ const MEMBERS_MAX: usize = 32;
 const DEFAULT_MAX_ITERATIONS: i64 = 5;
 const MAX_ITERATIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=100;
 const ROUTE_PROMPT: &str = "Pick the team member who should handle the request.";
+const BRIEF_PROMPT: &str = "Write a short brief of the request for your team.";
+const SYNTHESIZE_PROMPT: &str = "Combine your team's answers into one final answer.";
 const COORDINATE_PROMPT: &str =
     "Hand parts of the request to your coworkers as needed, then give the final answer.";
 
@@ -75,10 +77,11 @@ pub fn compile(file: &str, text: &str) -> Result<Table, WorkflowError> {
     match team.mode {
         Mode::Route => route(file, &team),
         Mode::Coordinate => coordinate(file, &team),
-        Mode::Collaborate | Mode::Broadcast | Mode::Tasks => Err(WorkflowError::new(
+        Mode::Collaborate | Mode::Broadcast => fan_out(file, &team),
+        Mode::Tasks => Err(WorkflowError::new(
             file,
             "team.mode",
-            "collaborate, broadcast and tasks are not built yet",
+            "tasks is not built yet",
         )),
     }
 }
@@ -109,6 +112,12 @@ fn check(file: &str, raw: TeamFile) -> Result<Team, WorkflowError> {
         if t.members[..i].contains(m) {
             return Err(err(&field, format!("`{m}` repeats")));
         }
+    }
+    if matches!(mode, Mode::Collaborate | Mode::Broadcast) && t.members.len() < 2 {
+        return Err(err(
+            "team.members",
+            format!("mode `{}` needs 2 or more members", t.mode),
+        ));
     }
     check_approve(file, mode, &t.approve, &t.members)?;
     check_iterations(file, mode, t.max_iterations)?;
@@ -301,6 +310,72 @@ fn coordinate(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     assert!(
         !team.members.is_empty(),
         "a coordinating leader has delegates"
+    );
+    Ok(t.finish())
+}
+
+/// Compiles `collaborate` and `broadcast`. The flow needs a node to fan out
+/// from, so the leader first writes a `brief`; every member then answers
+/// in its own branch. `collaborate` writes `<id>_answer` per member and the
+/// leader combines them into `output`; `broadcast` appends every answer to
+/// `answers` in member order and ends at the join.
+fn fan_out(file: &str, team: &Team) -> Result<Table, WorkflowError> {
+    let (mut t, reads) = start(file, team, "brief")?;
+    t.state("team", "brief", Value::String("string".into()))?;
+    let brief = agent(
+        "brief",
+        &team.leader,
+        Some(BRIEF_PROMPT),
+        &reads,
+        Some("brief"),
+    );
+    t.node("team.leader", brief)?;
+    let mut member_reads = reads.clone();
+    member_reads.insert(1, "brief".to_string());
+    let broadcast = team.mode == Mode::Broadcast;
+    if broadcast {
+        t.state("team", "answers", Value::String("list".into()))?;
+        t.reducer("answers", "append");
+    }
+    let mut answers = vec!["input".to_string()];
+    for (i, m) in team.members.iter().enumerate() {
+        let field = format!("team.members[{i}]");
+        let id = node_id(m);
+        let key = if broadcast {
+            "answers".to_string()
+        } else {
+            format!("{id}_answer")
+        };
+        if !broadcast {
+            t.state(&field, &key, Value::String("string".into()))?;
+            answers.push(key.clone());
+        }
+        t.node(&field, agent(&id, m, None, &member_reads, Some(&key)))?;
+        t.edge("brief", &id);
+        t.edge(&id, "gather");
+    }
+    let mut join = Table::new();
+    join.insert("id".into(), Value::String("gather".into()));
+    join.insert("kind".into(), Value::String("join".into()));
+    t.node("team", join)?;
+    if broadcast {
+        t.edge("gather", END);
+    } else {
+        let lead = agent(
+            "synthesize",
+            &team.leader,
+            Some(SYNTHESIZE_PROMPT),
+            &answers,
+            Some("output"),
+        );
+        t.node("team.leader", lead)?;
+        t.edge("gather", "synthesize");
+        t.edge("synthesize", END);
+    }
+    t.end("team")?;
+    assert!(
+        team.members.len() >= 2,
+        "a fan-out has two or more branches"
     );
     Ok(t.finish())
 }

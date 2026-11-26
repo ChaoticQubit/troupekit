@@ -145,6 +145,14 @@ impl FlowTable {
         Ok(())
     }
 
+    /// Declares reducer `reducer` on state key `key`, so branches of one
+    /// fan-out may all write it.
+    /// The key must be declared first.
+    pub(crate) fn reducer(&mut self, key: &str, reducer: &str) {
+        assert!(self.state.contains_key(key), "a reducer names a declared key");
+        let old = self.reducers.insert(key.into(), Value::String(reducer.into()));
+        assert!(old.is_none(), "one reducer per key");
+    }
 
     /// Adds `node`, whose `id` came from pattern field `field`.
     /// Returns an error naming the field for an id already taken.
