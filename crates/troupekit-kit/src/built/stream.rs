@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use troupekit_agent::{
     AgentError, AgentIo, AgentRun, EvalRegistry, EventSink, ModelHandle, UsageLedger,
 };
@@ -35,7 +35,7 @@ impl StreamSettings {
     /// Fixed at 1 048 576 events.
     pub const MAX_CAPACITY: usize = 1_048_576;
 
-    fn check(&self, agent: &str) -> Result<(), KitError> {
+    pub(crate) fn check(&self, agent: &str) -> Result<(), KitError> {
         let range = StreamSettings::MIN_CAPACITY..=StreamSettings::MAX_CAPACITY;
         if range.contains(&self.capacity) {
             return Ok(());
@@ -61,13 +61,14 @@ impl Default for StreamSettings {
     }
 }
 
-/// A run in progress that yields its events in `seq` order. `next`
-/// returns `None` once the run has ended, been cancelled or failed;
-/// `finish` then gives the result. Dropping it cancels the run.
+/// A run in progress that yields its events in `seq` order. Every method
+/// takes `&self`, so one task may read events while another cancels or
+/// waits in `finish`. Dropping the last owner cancels the run.
 pub struct RunStream<T = RunOutcome> {
     run_id: RunId,
     queue: Arc<Queue>,
-    task: Option<JoinHandle<Result<T, KitError>>>,
+    abort: AbortHandle,
+    task: tokio::sync::Mutex<Option<JoinHandle<Result<T, KitError>>>>,
 }
 
 impl<T> RunStream<T> {
@@ -84,14 +85,15 @@ impl<T> RunStream<T> {
         RunStream {
             run_id,
             queue,
-            task: Some(task),
+            abort: task.abort_handle(),
+            task: tokio::sync::Mutex::new(Some(task)),
         }
     }
 
     /// Waits for the next event of the run.
     /// Output: the event, or `None` once the run is over and every
-    /// queued event has been read.
-    pub async fn next(&mut self) -> Option<Event> {
+    /// queued event has been read. Safe to call from several tasks.
+    pub async fn next(&self) -> Option<Event> {
         self.queue.pop().await
     }
 
@@ -109,24 +111,27 @@ impl<T> RunStream<T> {
         self.queue.dropped()
     }
 
-    /// Stops the run at its next await point. The last saved checkpoint
-    /// stays, so `resume` can continue it; `finish` returns `Cancelled`.
-    /// Calling it twice, or after the end, does nothing.
+    /// Stops the run at its next await point, also while another task
+    /// waits in `next` or `finish`. The last saved checkpoint stays, so
+    /// `resume` can continue it. Calling it twice, or after the end, is a no-op.
     pub fn cancel(&self) {
-        if let Some(task) = &self.task {
-            task.abort();
-        }
+        self.abort.abort();
     }
 
-    /// Waits for the run to end and returns its result.
-    /// Output: the outcome, the run's error, or `Cancelled` after
-    /// `cancel`. A panic in the run is resumed in the caller.
-    pub async fn finish(mut self) -> Result<T, KitError> {
-        let task = self
-            .task
-            .take()
-            .expect("a stream has its task until finish");
-        match task.await {
+    /// Waits for the run to end and returns its result, once.
+    /// Output: the outcome, the run's error, `Cancelled` after `cancel`,
+    /// or `Config` on a second call. A panic in the run resumes here.
+    pub async fn finish(&self) -> Result<T, KitError> {
+        let mut slot = self.task.lock().await;
+        let Some(task) = slot.as_mut() else {
+            return Err(KitError::config(
+                &self.run_id.to_string(),
+                "finish was already called for this stream",
+            ));
+        };
+        let joined = task.await;
+        *slot = None;
+        match joined {
             Ok(result) => result,
             Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
             Err(_) => Err(KitError::Cancelled {
@@ -137,13 +142,11 @@ impl<T> RunStream<T> {
 }
 
 impl<T> Drop for RunStream<T> {
-    /// Cancels the run when the stream is dropped before `finish`, so an
-    /// unread stream never keeps calling the model. The checkpoint stays.
-    /// Does nothing after `finish`.
+    /// Cancels the run when the stream is dropped, so an unread stream,
+    /// or a dropped `finish` future, never keeps calling the model. The
+    /// checkpoint stays. A no-op once the run has ended.
     fn drop(&mut self) {
-        if let Some(task) = &self.task {
-            task.abort();
-        }
+        self.abort.abort();
     }
 }
 
@@ -243,11 +246,15 @@ impl Queue {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.closed = true;
         drop(state);
+        self.ready.notify_waiters();
         self.ready.notify_one();
     }
 
     async fn pop(&self) -> Option<Event> {
         loop {
+            let notified = self.ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             {
                 let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
                 if let Some(event) = state.events.pop_front() {
@@ -257,7 +264,7 @@ impl Queue {
                     return None;
                 }
             }
-            self.ready.notified().await;
+            notified.await;
         }
     }
 

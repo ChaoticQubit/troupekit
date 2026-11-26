@@ -102,8 +102,19 @@ impl BuiltGraph {
         &self,
         input: impl Into<String>,
     ) -> Result<RunStream<GraphReport>, KitError> {
+        self.stream_with(input, StreamSettings::default()).await
+    }
+
+    /// Starts a streamed graph run on `input` with `settings`. Events also
+    /// reach the graph's own `.events(..)` sink. Fails with `Config` when
+    /// the capacity is out of range, else as `stream`.
+    pub async fn stream_with(
+        &self,
+        input: impl Into<String>,
+        settings: StreamSettings,
+    ) -> Result<RunStream<GraphReport>, KitError> {
         let inner = &self.inner;
-        let settings = StreamSettings::default();
+        settings.check(&inner.owner)?;
         let queue = Arc::new(Queue::new(settings.capacity));
         let io = StreamGraphIo {
             graph: self.clone(),

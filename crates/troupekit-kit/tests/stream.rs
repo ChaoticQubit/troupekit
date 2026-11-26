@@ -318,3 +318,53 @@ async fn graph_stream_builds_then_streams() {
         EventBody::RunFinished { .. }
     ));
 }
+
+#[tokio::test]
+async fn cancel_wakes_a_pending_next_on_another_task() {
+    let built = chunky(1, Duration::from_secs(600)).build().await.unwrap();
+    let stream = Arc::new(built.stream("hi").await.unwrap());
+    let reader = stream.clone();
+    let pending = tokio::spawn(async move {
+        let mut seen = 0usize;
+        while reader.next().await.is_some() {
+            seen += 1;
+            assert!(seen < 100);
+        }
+        seen
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    stream.cancel();
+    let seen = tokio::time::timeout(Duration::from_secs(10), pending)
+        .await
+        .expect("next ended after cancel")
+        .unwrap();
+    assert!(seen < 10);
+    let err = stream.finish().await.unwrap_err();
+    assert!(
+        matches!(err, troupekit::KitError::Cancelled { .. }),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn finish_twice_is_refused() {
+    let built = chunky(1, Duration::ZERO).build().await.unwrap();
+    let stream = built.stream("hi").await.unwrap();
+    stream.finish().await.unwrap();
+    let err = stream.finish().await.unwrap_err();
+    assert!(matches!(err, troupekit::KitError::Config { .. }), "{err:?}");
+    assert!(err.to_string().contains("finish"), "{err}");
+}
+
+#[tokio::test]
+async fn graph_stream_with_checks_capacity() {
+    let mut settings = troupekit::StreamSettings::default();
+    settings.capacity = 16;
+    let built = pipeline().build().await.unwrap();
+    let stream = built.stream_with("hi", settings).await.unwrap();
+    assert!(stream.finish().await.is_ok());
+    let mut bad = troupekit::StreamSettings::default();
+    bad.capacity = 15;
+    let err = built.stream_with("hi", bad).await.unwrap_err();
+    assert!(err.to_string().contains("capacity"), "{err}");
+}
