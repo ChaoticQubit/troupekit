@@ -62,5 +62,5 @@ else
   cp "$generated" "$kotlin/dev/troupekit/troupekit_ffi.kt"
 fi
 
-(cd bindings/kotlin && ./gradlew --no-daemon ${TROUPEKIT_GRADLE_FLAGS:-} :troupekit:assembleRelease)
+(cd bindings/kotlin && ./gradlew --no-daemon :troupekit:assembleRelease)
 find bindings/kotlin/troupekit/build/outputs/aar -name '*.aar'

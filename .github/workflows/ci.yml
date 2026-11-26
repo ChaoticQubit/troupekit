@@ -339,18 +339,13 @@ jobs:
         working-directory: bindings/kotlin
         run: |
           set -euo pipefail
-          flags=""
-          if [ ! -f gradle/verification-metadata.xml ]; then
-            flags="--write-verification-metadata sha256"
-          fi
-          ./gradlew --no-daemon $flags :troupekit:testDebugUnitTest
+          test -f gradle/verification-metadata.xml
+          ./gradlew --no-daemon :troupekit:testDebugUnitTest
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: kotlin-gradle-files-${{ matrix.runner }}
-          path: |
-            bindings/kotlin/gradle/verification-metadata.xml
-            bindings/kotlin/troupekit/build/reports/tests/
+          name: kotlin-test-reports-${{ matrix.runner }}
+          path: bindings/kotlin/troupekit/build/reports/tests/
           if-no-files-found: warn
 
   android-contract:
@@ -371,10 +366,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f bindings/kotlin/gradle/verification-metadata.xml ]; then
-            export TROUPEKIT_GRADLE_FLAGS="--write-verification-metadata sha256"
-            echo "TROUPEKIT_GRADLE_FLAGS=$TROUPEKIT_GRADLE_FLAGS" >> "$GITHUB_ENV"
-          fi
+          test -f bindings/kotlin/gradle/verification-metadata.xml
           rustup target add aarch64-linux-android x86_64-linux-android
           ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" sh scripts/build-aar.sh --emulator
       - uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
@@ -382,14 +374,12 @@ jobs:
           api-level: 34
           arch: x86_64
           working-directory: bindings/kotlin
-          script: ./gradlew --no-daemon ${TROUPEKIT_GRADLE_FLAGS:-} :troupekit:connectedDebugAndroidTest
+          script: ./gradlew --no-daemon :troupekit:connectedDebugAndroidTest
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: kotlin-gradle-files-android
-          path: |
-            bindings/kotlin/gradle/verification-metadata.xml
-            bindings/kotlin/troupekit/build/reports/androidTests/
+          name: kotlin-test-reports-android
+          path: bindings/kotlin/troupekit/build/reports/androidTests/
           if-no-files-found: warn
 
   swift:
