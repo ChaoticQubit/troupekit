@@ -1,3 +1,4 @@
+use crate::pending::bounded;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use troupekit_agent::{Limits, PersonaLoader, SimpleIo};
@@ -86,7 +87,10 @@ async fn run_in_order(
         }
         panic!("run did not settle in 20 steps");
     };
-    let (out, ()) = tokio::join!(drive, opener);
+    let (out, ()) = bounded("the gated run", || started(&gates), async {
+        tokio::join!(drive, opener)
+    })
+    .await;
     (out, gates.finished())
 }
 
@@ -224,6 +228,14 @@ fn map_flow(map_extra: &str, reducer: Option<&str>) -> String {
     )
 }
 
+fn started(gates: &GatedTool) -> String {
+    format!(
+        "finished: {:?}, max in flight: {}",
+        gates.finished(),
+        gates.max_in_flight()
+    )
+}
+
 fn map_io(gates: &GatedTool) -> SimpleGraphIo {
     let mut tools = ToolRegistry::new();
     tools
@@ -278,12 +290,16 @@ async fn map_runs_one_branch_per_item_in_item_order() {
     let gates = GatedTool::new();
     let io = map_io(&gates);
     let mut run = map_run(&map_flow("", None), map_input(&["a", "b", "c"], None), &io).await;
-    let (out, ()) = tokio::join!(drive_plain(&mut run, &io), async {
-        while gates.calls("w/a").len() + gates.calls("w/b").len() + gates.calls("w/c").len() < 3 {
-            tokio::task::yield_now().await;
-        }
-        open_in_order(&gates, &["c", "b", "a"]).await;
-    });
+    let (out, ()) = bounded("the map run", || started(&gates), async {
+        tokio::join!(drive_plain(&mut run, &io), async {
+            while gates.calls("w/a").len() + gates.calls("w/b").len() + gates.calls("w/c").len() < 3
+            {
+                tokio::task::yield_now().await;
+            }
+            open_in_order(&gates, &["c", "b", "a"]).await;
+        })
+    })
+    .await;
     let GraphOutcome::Done(state) = out else {
         panic!("{out:?}");
     };
@@ -319,7 +335,10 @@ async fn map_concurrency_cap_holds() {
             }
         }
     };
-    let (out, ()) = tokio::join!(drive_plain(&mut run, &io), opener);
+    let (out, ()) = bounded("the capped map run", || started(&gates), async {
+        tokio::join!(drive_plain(&mut run, &io), opener)
+    })
+    .await;
     let GraphOutcome::Done(state) = out else {
         panic!("{out:?}");
     };
@@ -347,11 +366,14 @@ async fn map_items_are_durable_one_by_one() {
             tokio::task::yield_now().await;
         }
     };
-    tokio::select! {
-        biased;
-        out = run.step_durable(&io, &store) => panic!("the step must not finish while b and c wait: {out:?}"),
-        () = a_kept => {}
-    }
+    bounded("the first map mark", || started(&gates), async {
+        tokio::select! {
+            biased;
+            out = run.step_durable(&io, &store) => panic!("the step must not finish while b and c wait: {out:?}"),
+            () = a_kept => {}
+        }
+    })
+    .await;
     let mut run = GraphRun::restore(&store, id).await.unwrap();
     gates.open("w/b");
     gates.open("w/c");
@@ -413,12 +435,16 @@ async fn map_with_reducer_reduces_in_item_order() {
     let io = map_io(&gates);
     let input = map_input(&["a", "b", "c"], Some(json!(["z"])));
     let mut run = map_run(&map_flow("", Some("append")), input, &io).await;
-    let (out, ()) = tokio::join!(drive_plain(&mut run, &io), async {
-        while gates.calls("w/a").len() + gates.calls("w/b").len() + gates.calls("w/c").len() < 3 {
-            tokio::task::yield_now().await;
-        }
-        open_in_order(&gates, &["b", "c", "a"]).await;
-    });
+    let (out, ()) = bounded("the reduced map run", || started(&gates), async {
+        tokio::join!(drive_plain(&mut run, &io), async {
+            while gates.calls("w/a").len() + gates.calls("w/b").len() + gates.calls("w/c").len() < 3
+            {
+                tokio::task::yield_now().await;
+            }
+            open_in_order(&gates, &["b", "c", "a"]).await;
+        })
+    })
+    .await;
     let GraphOutcome::Done(state) = out else {
         panic!("{out:?}");
     };
@@ -447,4 +473,117 @@ async fn item_key_is_branch_local() {
     );
     assert_eq!(gates.calls("w/a").len(), 1);
     assert_eq!(gates.calls("w/b").len(), 1);
+}
+
+#[tokio::test]
+async fn reduced_write_survives_a_transient_sibling_failure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use troupekit_graph::testing::FnTool;
+    use troupekit_tools::ToolError;
+    let text = "name = 'sum'\nstart = 's'\n[state]\nseed = 'string'\nn = 'number'\n[reducers]\nn = 'sum'\n[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 's'\nwrites = 'seed'\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 'a'\nwrites = 'n'\n[[nodes]]\nid = 'b'\nkind = 'tool'\ntool = 'b'\nwrites = 'n'\n[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 's'\nto = 'a'\n[[edges]]\nfrom = 's'\nto = 'b'\n[[edges]]\nfrom = 'a'\nto = 'j'\n[[edges]]\nfrom = 'b'\nto = 'j'\n[[edges]]\nfrom = 'j'\nto = 'e'\n";
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(FnTool::new("s", |_, _| async {
+            Ok(ToolOutput::text("seeded"))
+        }))
+        .unwrap();
+    tools
+        .register(FnTool::new("a", |_, _| async { Ok(ToolOutput::text("2")) }))
+        .unwrap();
+    let b_calls = Arc::new(AtomicUsize::new(0));
+    tools
+        .register(FnTool::new("b", move |_, _| {
+            let first = b_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            async move {
+                if first {
+                    Err(ToolError::Failed("database: max clients reached".into()))
+                } else {
+                    Ok(ToolOutput::text("3"))
+                }
+            }
+        }))
+        .unwrap();
+    let io = SimpleGraphIo::new(Arc::new(SimpleIo::new(tools)), PersonaLoader::new(vec![]));
+    let mut input = Map::new();
+    input.insert("n".into(), json!(10));
+    let flow = Flow::parse("test/sum.toml", text).unwrap();
+    let mut run = GraphRun::start(flow, input, Limits::default(), &io)
+        .await
+        .unwrap();
+    let GraphOutcome::Failed(_) = drive_plain(&mut run, &io).await else {
+        panic!("b's first call fails the run");
+    };
+    assert!(run.retryable(), "a store failure is retryable");
+    run.retry(None).unwrap();
+    let GraphOutcome::Done(state) = drive_plain(&mut run, &io).await else {
+        panic!("the retried run finishes");
+    };
+    assert_eq!(
+        state["n"],
+        json!(15),
+        "a's 2 and b's 3 both reach the total"
+    );
+}
+
+#[tokio::test]
+async fn merge_from_a_map_and_a_sibling_in_one_step_refuses_a_shared_field() {
+    let text = "name = 'mm'\nstart = 's'\n[state]\nseed = 'string'\nxs = 'list'\nx = 'string'\ny = '{a: string}'\nobj = '{a: string}'\n[reducers]\nobj = 'merge'\n[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 's'\nwrites = 'seed'\n[[nodes]]\nid = 'm'\nkind = 'map'\nover = 'xs'\nitem = 'x'\nbody = 'w'\nwrites = 'obj'\n[[nodes]]\nid = 'w'\nkind = 'tool'\ntool = 'w'\nreads = ['x']\nwrites = 'y'\n[[nodes]]\nid = 't'\nkind = 'tool'\ntool = 't'\nwrites = 'obj'\n[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 's'\nto = 'm'\n[[edges]]\nfrom = 's'\nto = 't'\n[[edges]]\nfrom = 'm'\nto = 'j'\n[[edges]]\nfrom = 't'\nto = 'j'\n[[edges]]\nfrom = 'j'\nto = 'e'\n";
+    let gates = GatedTool::new();
+    for name in ["s", "t", "w/one"] {
+        gates.open(name);
+    }
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(gates.tool("s", |_| ToolOutput::text("seeded")))
+        .unwrap();
+    tools
+        .register(gates.tool("t", |_| ToolOutput::text(r#"{"a":"sibling"}"#)))
+        .unwrap();
+    tools
+        .register(gates.tool_per_item("w", "x", |_| ToolOutput::text(r#"{"a":"item"}"#)))
+        .unwrap();
+    let io = SimpleGraphIo::new(Arc::new(SimpleIo::new(tools)), PersonaLoader::new(vec![]));
+    let mut run = map_run(text, map_input(&["one"], None), &io).await;
+    let out = bounded(
+        "the merge run",
+        || started(&gates),
+        drive_plain(&mut run, &io),
+    )
+    .await;
+    let GraphOutcome::Failed(e) = out else {
+        panic!("a field written twice in one step fails the run: {out:?}");
+    };
+    assert!(e.contains("both write `a` in one step"), "{e}");
+}
+
+#[tokio::test]
+async fn map_item_that_breaks_the_item_type_fails_the_run() {
+    let gates = GatedTool::new();
+    let io = map_io(&gates);
+    let mut input = Map::new();
+    input.insert("xs".into(), json!(["a", 7]));
+    let mut run = map_run(&map_flow("", None), input, &io).await;
+    let GraphOutcome::Failed(e) = run.step(&io).await else {
+        panic!("an item of the wrong type fails the run");
+    };
+    assert!(
+        e.contains("node `m`") && e.contains("item 1") && e.contains("`x`"),
+        "{e}"
+    );
+    assert!(gates.calls("w/a").is_empty(), "no item runs");
+}
+
+#[tokio::test]
+async fn shared_budget_split_is_refused_until_it_is_run() {
+    let gates = GatedTool::new();
+    let io = map_io(&gates);
+    let text = "name = 'b'\nstart = 't'\n[budget]\nsplit = 'shared'\n[state]\ny = 'string'\n[[nodes]]\nid = 't'\nkind = 'tool'\ntool = 'w'\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 't'\nto = 'e'\n";
+    let flow = Flow::parse("test/b.toml", text).unwrap();
+    let err = GraphRun::start(flow, Map::new(), Limits::default(), &io)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, troupekit_graph::GraphError::Setup(m) if m.contains("shared budget split")),
+        "{err}"
+    );
 }

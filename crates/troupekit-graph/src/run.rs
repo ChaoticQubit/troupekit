@@ -1,5 +1,5 @@
 use crate::error::GraphError;
-use crate::flow::{Flow, FlowKind, GRAPH_FORMAT_FLOW};
+use crate::flow::{BudgetSplit, Flow, FlowKind, GRAPH_FORMAT_FLOW};
 use crate::io::{Emitter, GraphIo, NodeIo};
 use crate::workflow::{Ask, Node, NodeKind, Workflow};
 use futures_util::future::join_all;
@@ -213,6 +213,16 @@ enum Finished {
     },
 }
 
+/// One branch write as stored: the finished unit and the run's event `seq`
+/// when it was kept. `restore` moves the run's `seq` past every kept one,
+/// so events of the re-run never reuse a number an observer already saw.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Kept {
+    seq: u64,
+    unit: Finished,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 enum AgentDone {
@@ -283,6 +293,8 @@ pub struct GraphRun {
     flow: Option<Box<Flow>>,
     #[serde(skip)]
     marks: Option<Marks>,
+    #[serde(skip)]
+    merged: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 struct Reduced {
@@ -375,6 +387,7 @@ impl GraphRun {
             failure: None,
             flow: None,
             marks: None,
+            merged: BTreeMap::new(),
         })
     }
 
@@ -728,8 +741,9 @@ impl GraphRun {
         for w in store.branch_writes(run_id, step).await? {
             let bad = |m: String| GraphError::Checkpoint(format!("branch write {} of step {step}: {m}", w.branch()));
             let index = usize::try_from(w.branch()).map_err(|e| bad(e.to_string()))?;
-            let finished: Finished = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
-            if done.insert(index, (w.node().to_string(), finished)).is_some() {
+            let kept: Kept = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
+            run.seq = run.seq.max(kept.seq);
+            if done.insert(index, (w.node().to_string(), kept.unit)).is_some() {
                 return Err(bad("the branch has two writes".into()));
             }
         }
@@ -756,6 +770,7 @@ impl GraphRun {
         }
         self.steps += 1;
         self.status = GraphStatus::Running;
+        self.merged.clear();
         let seq = AtomicU64::new(self.seq);
         let em = Emitter {
             run_id: self.run_id,
@@ -849,6 +864,7 @@ impl GraphRun {
         done: BTreeMap<usize, (String, Finished)>,
     ) -> Result<BTreeMap<usize, Finished>, GraphError> {
         let mut out = BTreeMap::new();
+        let workers = self.workers();
         for (i, (node, finished)) in done {
             let bad = |m: String| GraphError::Checkpoint(format!("branch write {i} of step {}: {m}", self.steps));
             let Some(b) = self.branches.get(i) else {
@@ -857,7 +873,7 @@ impl GraphRun {
             if b.node != node {
                 return Err(bad(format!("it is for node `{node}`, but the branch is at `{}`", b.node)));
             }
-            if !self.can_work(b) {
+            if !workers[i] {
                 return Err(bad(format!("the branch at `{node}` has no work this step")));
             }
             match (&finished, &b.at) {
@@ -886,13 +902,13 @@ impl GraphRun {
                     retry.get_or_insert((error, retry_after_ms));
                 }
                 Work::Agent(StepOutcome::Failed(e)) => {
-                    return GraphOutcome::Failed(format!("node `{}`: {e}", node.id))
+                    return self.fail_after(reduced, format!("node `{}`: {e}", node.id));
                 }
                 Work::Tool(Err(f)) => {
                     if f.transient {
                         self.failure = Some(Failure::Tool);
                     }
-                    return GraphOutcome::Failed(format!("node `{}`: {}", node.id, f.message));
+                    return self.fail_after(reduced, format!("node `{}`: {}", node.id, f.message));
                 }
                 Work::Agent(StepOutcome::Done(output)) => {
                     let At::Agent { run, .. } = &self.branches[i].at else {
@@ -938,8 +954,18 @@ impl GraphRun {
         self.wait_or_continue()
     }
 
+    fn fail_after(&mut self, reduced: Vec<Reduced>, error: String) -> GraphOutcome {
+        match self.reduce(reduced) {
+            Ok(()) => GraphOutcome::Failed(error),
+            Err(e) => {
+                self.failure = None;
+                GraphOutcome::Failed(e)
+            }
+        }
+    }
+
     fn wait_or_continue(&self) -> GraphOutcome {
-        if self.branches.iter().any(|b| self.can_work(b)) {
+        if self.workers().into_iter().any(|w| w) {
             return GraphOutcome::Continue;
         }
         if let Some(b) = self
@@ -964,33 +990,32 @@ impl GraphRun {
         GraphOutcome::Waiting(reason.clone())
     }
 
-    fn can_work(&self, b: &Branch) -> bool {
-        let works = match &b.at {
+    fn has_work(&self, b: &Branch) -> bool {
+        match &b.at {
             At::Agent { .. } => b.budget_paused().is_none(),
             At::Enter => matches!(self.node(&b.node).kind, NodeKind::Tool { .. }),
             At::Human { .. } | At::Joined | At::Left => false,
-        };
-        works && self.in_window(b)
+        }
+    }
+
+    fn workers(&self) -> Vec<bool> {
+        let window = self.windows();
+        self.branches
+            .iter()
+            .zip(window)
+            .map(|(b, open)| open && self.has_work(b))
+            .collect()
     }
 
     fn flow_kind(&self, id: &str) -> Option<&FlowKind> {
         self.flow.as_ref()?.kind(id)
     }
 
-    fn in_window(&self, b: &Branch) -> bool {
-        let Some(it) = &b.item else {
-            return true;
-        };
-        let Some(FlowKind::Map { concurrency, .. }) = self.flow_kind(&it.map) else {
-            unreachable!("item branches belong to map nodes");
-        };
-        let ahead = self
-            .branches
-            .iter()
-            .filter(|o| o.of_map(&it.map) && o.at != At::Left)
-            .filter(|o| o.item.as_ref().is_some_and(|x| x.index < it.index))
-            .count();
-        ahead < *concurrency as usize
+    fn windows(&self) -> Vec<bool> {
+        windows(&self.branches, |map| match self.flow_kind(map) {
+            Some(FlowKind::Map { concurrency, .. }) => *concurrency as usize,
+            _ => unreachable!("item branches belong to map nodes"),
+        })
     }
 
     fn expand_map(&mut self, i: usize) -> Result<(), String> {
@@ -1023,6 +1048,12 @@ impl GraphRun {
             self.branches[i].at = At::Left;
             return Ok(());
         }
+        for (index, value) in list.iter().enumerate() {
+            let errs = self.workflow.check_value(&item, value);
+            if !errs.is_empty() {
+                return Err(fail(format!("item {index} does not match `{item}`: {}", errs.join("; "))));
+            }
+        }
         let items: Vec<Branch> = list
             .into_iter()
             .enumerate()
@@ -1047,9 +1078,13 @@ impl GraphRun {
         let key = node.writes.clone().expect("map nodes write");
         let value = match self.reducer(&key) {
             Some(_) if results.is_empty() => return Ok(()),
-            Some(reducer) => reducer
-                .reduce(self.state.get(&key), &results)
-                .map_err(|m| format!("node `{}`: reducing `{key}`: {m}", node.id))?,
+            Some(reducer) => {
+                let fail = |m: String| format!("node `{}`: reducing `{key}`: {m}", node.id);
+                let value = reducer.reduce(self.state.get(&key), &results).map_err(fail)?;
+                let writes: Vec<(&str, &Value)> = results.iter().map(|(_, v)| (node.id.as_str(), v)).collect();
+                self.note_merge(&key, &writes).map_err(fail)?;
+                value
+            }
             None => Value::Array(results.into_iter().map(|(_, v)| v).collect()),
         };
         let errs = self.workflow.check_value(&key, &value);
@@ -1065,19 +1100,9 @@ impl GraphRun {
     }
 
     fn collect_maps(&mut self) -> Result<bool, String> {
-        let ready = self
-            .branches
-            .iter()
-            .filter_map(|b| b.item.as_ref().map(|it| it.map.clone()))
-            .find(|map| self.branches.iter().filter(|b| b.of_map(map)).all(|b| b.at == At::Left));
-        let Some(map) = ready else {
+        let Some((map, first)) = ready_map(&self.branches) else {
             return Ok(false);
         };
-        let first = self
-            .branches
-            .iter()
-            .position(|b| b.of_map(&map))
-            .expect("a ready map has item branches");
         let mut results: Vec<(usize, Value)> = self
             .branches
             .iter()
@@ -1112,7 +1137,7 @@ impl GraphRun {
         store: Option<&dyn CheckpointStore>,
         mut done: BTreeMap<usize, Finished>,
     ) -> (Vec<Work>, Option<CoreError>) {
-        let workers: Vec<bool> = self.branches.iter().map(|b| self.can_work(b)).collect();
+        let workers = self.workers();
         let (wf, state, run_id, step) = (&self.workflow, &self.state, self.run_id, self.steps);
         let futures = self
             .branches
@@ -1154,7 +1179,11 @@ impl GraphRun {
                         return (work, None);
                     };
                     let branch = u32::try_from(i).expect("a step has far fewer than 2^32 branches");
-                    let value = serde_json::to_value(&finished).expect("a finished unit serializes");
+                    let kept = Kept {
+                        seq: em.seq.load(Ordering::SeqCst),
+                        unit: finished,
+                    };
+                    let value = serde_json::to_value(&kept).expect("a kept unit serializes");
                     let saved = store.save_branch(run_id, step, BranchWrite::new(branch, &node.id, value)).await;
                     (work, saved.err())
                 }
@@ -1218,6 +1247,26 @@ impl GraphRun {
         self.flow.as_ref().and_then(|f| f.reducer(key))
     }
 
+    fn note_merge(&mut self, key: &str, writes: &[(&str, &Value)]) -> Result<(), String> {
+        if !matches!(self.reducer(key), Some(crate::flow::Reducer::Merge)) {
+            return Ok(());
+        }
+        let seen = self.merged.entry(key.to_string()).or_default();
+        let mut fresh = Vec::new();
+        for (node, value) in writes {
+            for field in value.as_object().into_iter().flat_map(|o| o.keys()) {
+                if let Some(other) = seen.get(field) {
+                    return Err(format!(
+                        "`merge`: nodes `{other}` and `{node}` both write `{field}` in one step; use `last` to keep the later write"
+                    ));
+                }
+                fresh.push((field.clone(), node.to_string()));
+            }
+        }
+        seen.extend(fresh);
+        Ok(())
+    }
+
     fn reduce(&mut self, reduced: Vec<Reduced>) -> Result<(), String> {
         assert!(
             reduced.windows(2).all(|w| w[0].branch < w[1].branch),
@@ -1236,6 +1285,8 @@ impl GraphRun {
             let writes: Vec<(usize, Value)> = group.iter().map(|r| (r.branch, r.value.clone())).collect();
             let fail = |m: String| format!("node `{}`: reducing `{key}`: {m}", last.node);
             let value = reducer.reduce(self.state.get(&key), &writes).map_err(fail)?;
+            let noted: Vec<(&str, &Value)> = group.iter().map(|r| (r.node.as_str(), &r.value)).collect();
+            self.note_merge(&key, &noted).map_err(fail)?;
             let errs = self.workflow.check_value(&key, &value);
             if !errs.is_empty() {
                 return Err(fail(format!("result does not match `{key}`: {}", errs.join("; "))));
@@ -1261,6 +1312,7 @@ impl GraphRun {
                 next.extend(out.into_iter().map(|e| Branch::enter(&e.to)));
             }
             self.branches = next;
+            let window = self.windows();
             for i in 0..self.branches.len() {
                 if self.branches[i].at != At::Enter {
                     continue;
@@ -1298,7 +1350,7 @@ impl GraphRun {
                         self.branches[i].at = At::Human { data };
                     }
                     NodeKind::Agent { persona, prompt } => {
-                        if !self.in_window(&self.branches[i]) {
+                        if !window[i] {
                             continue;
                         }
                         let data = reads(&self.workflow, &self.state, &node.reads, item.as_deref()).map_err(fail)?;
@@ -1384,6 +1436,9 @@ fn apply_finished(b: &mut Branch, finished: Finished) -> Work {
 }
 
 fn unsupported(flow: &Flow) -> Option<String> {
+    if flow.budget_split() == BudgetSplit::Shared {
+        return Some("a shared budget split".into());
+    }
     if flow.nested() {
         return Some("a nested fan-out".into());
     }
@@ -1489,5 +1544,100 @@ async fn call_tool(
             message: format!("tool `{tool}`: {e}"),
             transient: matches!(e, ToolError::Failed(_) | ToolError::Http(_)),
         }),
+    }
+}
+
+fn windows(branches: &[Branch], cap: impl Fn(&str) -> usize) -> Vec<bool> {
+    let mut open = vec![true; branches.len()];
+    let mut maps: BTreeMap<&str, Vec<(usize, usize, bool)>> = BTreeMap::new();
+    for (pos, b) in branches.iter().enumerate() {
+        if let Some(it) = &b.item {
+            maps.entry(it.map.as_str())
+                .or_default()
+                .push((it.index, pos, b.at != At::Left));
+        }
+    }
+    for (map, mut items) in maps {
+        let cap = cap(map);
+        items.sort_unstable_by_key(|(index, ..)| *index);
+        assert!(
+            items.windows(2).all(|w| w[0].0 < w[1].0),
+            "a map has one branch per item"
+        );
+        let mut ahead = 0usize;
+        for (_, pos, unfinished) in items {
+            open[pos] = ahead < cap;
+            ahead += usize::from(unfinished);
+        }
+    }
+    open
+}
+
+fn ready_map(branches: &[Branch]) -> Option<(String, usize)> {
+    let mut maps: Vec<(&str, usize, bool)> = Vec::new();
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for (pos, b) in branches.iter().enumerate() {
+        let Some(it) = &b.item else {
+            continue;
+        };
+        let left = b.at == At::Left;
+        match seen.get(it.map.as_str()) {
+            Some(&k) => maps[k].2 &= left,
+            None => {
+                seen.insert(it.map.as_str(), maps.len());
+                maps.push((it.map.as_str(), pos, left));
+            }
+        }
+    }
+    maps.into_iter()
+        .find(|(_, _, ready)| *ready)
+        .map(|(map, first, _)| (map.to_string(), first))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(map: &str, index: usize, at: At) -> Branch {
+        Branch {
+            node: "w".into(),
+            at,
+            call: None,
+            item: Some(Box::new(Item {
+                map: map.into(),
+                index,
+                key: "x".into(),
+                value: Value::Null,
+                result: None,
+            })),
+        }
+    }
+
+    #[test]
+    fn window_counts_unfinished_lower_items_in_item_order() {
+        let branches = vec![
+            item("m", 3, At::Enter),
+            Branch::enter("t"),
+            item("m", 1, At::Left),
+            item("m", 2, At::Enter),
+            item("m", 0, At::Joined),
+            item("n", 0, At::Enter),
+        ];
+        let open = windows(&branches, |map| if map == "m" { 2 } else { 1 });
+        assert_eq!(open, vec![false, true, true, true, true, true]);
+    }
+
+    #[test]
+    fn ready_map_is_the_first_map_whose_items_all_left() {
+        let branches = vec![
+            Branch::enter("t"),
+            item("m", 0, At::Left),
+            item("n", 0, At::Left),
+            item("m", 1, At::Enter),
+            item("n", 1, At::Left),
+        ];
+        assert_eq!(ready_map(&branches), Some(("n".to_string(), 2)));
+        assert_eq!(ready_map(&branches[..2]), Some(("m".to_string(), 1)));
+        assert_eq!(ready_map(&branches[..1]), None);
     }
 }

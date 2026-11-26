@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use troupekit_agent::{Limits, MemorySource, PersonaLoader, SimpleIo};
+use std::time::Duration;
+use troupekit_agent::{Limits, MemorySource, PersonaLoader, SimpleIo, VecSink};
 use troupekit_core::error::CoreError;
 use troupekit_core::ids::RunId;
 use troupekit_core::store::{BranchWrite, Checkpoint, CheckpointStore};
@@ -128,7 +130,25 @@ const FAN: &str = "name = 'fan'\nstart = 's'\n[state]\nseed = 'string'\nx = 'str
 
 const AGENT_FAN: &str = "name = 'fan'\nstart = 's'\n[state]\nseed = 'string'\nx = 'string'\ny = 'string'\n[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 's'\nwrites = 'seed'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nreads = ['seed']\nwrites = 'x'\n[[nodes]]\nid = 'b'\nkind = 'tool'\ntool = 'b'\nwrites = 'y'\n[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 's'\nto = 'a'\n[[edges]]\nfrom = 's'\nto = 'b'\n[[edges]]\nfrom = 'a'\nto = 'j'\n[[edges]]\nfrom = 'b'\nto = 'j'\n[[edges]]\nfrom = 'j'\nto = 'e'\n";
 
+/// Awaits `f` for at most 10 seconds. On timeout panics with `what` and
+/// the state `report` describes, so a lost wake-up fails the test with a
+/// reason instead of hanging it. Returns the output of `f`.
+pub(crate) async fn bounded<F: Future>(
+    what: &str,
+    report: impl FnOnce() -> String,
+    f: F,
+) -> F::Output {
+    match tokio::time::timeout(Duration::from_secs(10), f).await {
+        Ok(out) => out,
+        Err(_) => panic!("{what} did not finish in 10s: {}", report()),
+    }
+}
+
 fn io(gates: &GatedTool, model: Arc<FnModel>) -> SimpleGraphIo {
+    io_events(gates, model).0
+}
+
+fn io_events(gates: &GatedTool, model: Arc<FnModel>) -> (SimpleGraphIo, Arc<VecSink>) {
     let mut tools = ToolRegistry::new();
     tools
         .register(gates.tool("s", |_| ToolOutput::text("seeded")))
@@ -143,7 +163,9 @@ fn io(gates: &GatedTool, model: Arc<FnModel>) -> SimpleGraphIo {
     tools
         .register(gates.tool("b", |_| ToolOutput::text("b")))
         .unwrap();
-    let agent = SimpleIo::new(tools).with_model("fake/m", model, PRICE);
+    let sink = Arc::new(VecSink::default());
+    let mut agent = SimpleIo::new(tools).with_model("fake/m", model, PRICE);
+    agent.events = sink.clone();
     let personas = PersonaLoader::new(vec![Arc::new(MemorySource::new(
         "test",
         [(
@@ -151,7 +173,7 @@ fn io(gates: &GatedTool, model: Arc<FnModel>) -> SimpleGraphIo {
             "name = 'writer'\ndisplay_name = 'W'\nrole = 'Writes.'\ngoal = 'Done.'\ninstructions = 'Do it.'\nmodel = 'fake/m'\n".to_string(),
         )],
     ))]);
-    SimpleGraphIo::new(Arc::new(agent), personas)
+    (SimpleGraphIo::new(Arc::new(agent), personas), sink)
 }
 
 fn model() -> Arc<FnModel> {
@@ -188,11 +210,18 @@ async fn crash_after_branch_a(
             tokio::task::yield_now().await;
         }
     };
-    tokio::select! {
-        biased;
-        out = run.step_durable(io, store) => panic!("the step must not finish while b waits: {out:?}"),
-        () = a_kept => {}
-    }
+    let report = || {
+        let marks: Vec<_> = store.writes.lock().unwrap().keys().copied().collect();
+        format!("a finished: {:?}, marks: {marks:?}", gates.finished())
+    };
+    bounded("the first durable mark", report, async {
+        tokio::select! {
+            biased;
+            out = run.step_durable(io, store) => panic!("the step must not finish while b waits: {out:?}"),
+            () = a_kept => {}
+        }
+    })
+    .await;
     assert!(!store.has(id, 2, 1), "b never finished");
     id
 }
@@ -234,7 +263,11 @@ async fn finished_branch_is_written_before_siblings_finish() {
         assert!(!store.has(id, 2, 1));
         gates.open("b");
     };
-    let (out, ()) = tokio::join!(drive(&mut run, &io, &store), opener);
+    let report = || format!("finished: {:?}", gates.finished());
+    let (out, ()) = bounded("the early-save run", report, async {
+        tokio::join!(drive(&mut run, &io, &store), opener)
+    })
+    .await;
     let state = done(out);
     assert_eq!((&state["x"], &state["y"]), (&json!("a1"), &json!("b")));
     assert!(store.has(id, 2, 1));
@@ -308,7 +341,11 @@ async fn write_for_another_node_is_refused() {
     store.put(
         id,
         2,
-        BranchWrite::new(1, "zz", json!({"kind": "tool", "output": "forged"})),
+        BranchWrite::new(
+            1,
+            "zz",
+            json!({"seq": 0, "unit": {"kind": "tool", "output": "forged"}}),
+        ),
     );
     let mut run = GraphRun::restore(&store, id).await.unwrap();
     gates.open("b");
@@ -353,15 +390,15 @@ async fn store_without_branch_writes_falls_back_to_whole_steps() {
     for name in ["s", "a", "b"] {
         gates.open(name);
     }
-    let io = io(&gates, model());
+    let (plain_io, durable_io) = (io(&gates, model()), io(&gates, model()));
     let workflow = Workflow::parse("test/fan.toml", FAN).unwrap();
-    let mut plain = GraphRun::new(workflow, Map::new(), Limits::default(), &io)
+    let mut plain = GraphRun::new(workflow, Map::new(), Limits::default(), &plain_io)
         .await
         .unwrap();
     let mut durable = plain.clone();
-    loop {
-        let a = plain.step(&io).await;
-        let b = durable.step_durable(&io, &store).await.unwrap();
+    for _ in 0..30 {
+        let a = plain.step(&plain_io).await;
+        let b = durable.step_durable(&durable_io, &store).await.unwrap();
         assert_eq!(a, b);
         assert_eq!(plain.checkpoint(), durable.checkpoint());
         if a != GraphOutcome::Continue {
@@ -455,5 +492,27 @@ async fn plain_step_drops_kept_writes() {
         gates.calls("a").len(),
         2,
         "plain step keeps the 0.1 behaviour"
+    );
+}
+
+#[tokio::test]
+async fn restored_step_never_reuses_an_emitted_seq() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let (io, sink) = io_events(&gates, model());
+    let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
+    let seen = sink.events();
+    let seen_max = seen
+        .iter()
+        .map(|e| e.seq)
+        .max()
+        .expect("the crashed step emitted events");
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    gates.open("b");
+    done(drive(&mut run, &io, &store).await);
+    let after: Vec<u64> = sink.events()[seen.len()..].iter().map(|e| e.seq).collect();
+    assert!(!after.is_empty());
+    assert!(
+        after.iter().all(|seq| *seq > seen_max),
+        "events after restore {after:?} reuse a seq up to {seen_max}"
     );
 }
