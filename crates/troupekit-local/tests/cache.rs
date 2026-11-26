@@ -160,3 +160,54 @@ async fn concurrent_fetches_of_one_row_both_publish_a_checked_file() {
     assert_eq!(pa, pb);
     assert_eq!(std::fs::read(&pa).expect("read"), BODY);
 }
+
+struct Stall;
+
+#[async_trait::async_trait]
+impl troupekit_providers::transport::Body for Stall {
+    async fn chunk(
+        &mut self,
+    ) -> Result<Option<Vec<u8>>, troupekit_providers::transport::HttpError> {
+        std::future::pending().await
+    }
+}
+
+struct StallingTransport;
+
+#[async_trait::async_trait]
+impl troupekit_providers::transport::Transport for StallingTransport {
+    async fn send(
+        &self,
+        req: troupekit_providers::transport::HttpRequest,
+    ) -> Result<
+        troupekit_providers::transport::HttpResponse,
+        troupekit_providers::transport::HttpError,
+    > {
+        Ok(troupekit_providers::transport::HttpResponse {
+            status: 200,
+            url: req.url,
+            headers: Vec::new(),
+            body: Box::new(Stall),
+            truncated: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn cancelled_fetch_removes_its_part_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = ModelCache::new(dir.path());
+    let spec = spec_for(BODY);
+    let timed = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        cache.fetch(&spec, &StallingTransport),
+    )
+    .await;
+    assert!(timed.is_err(), "the fetch was still downloading");
+    let left: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("list")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(left.is_empty(), "part file left behind: {left:?}");
+}

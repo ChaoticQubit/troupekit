@@ -86,15 +86,13 @@ impl ModelCache {
         }
         create_private_dir(&self.dir)?;
         let (part, file) = create_part_file(&self.dir, spec.id())?;
-        if let Err(e) = self.download(spec, transport, file).await {
-            let _ = std::fs::remove_file(&part);
-            return Err(e);
-        }
+        let mut guard = PartGuard(Some(part));
+        self.download(spec, transport, file).await?;
         let path = self.file_of(spec);
-        std::fs::rename(&part, &path).map_err(|e| {
-            let _ = std::fs::remove_file(&part);
-            LocalError::Cache(format!("model {}: rename failed: {e}", spec.id()))
-        })?;
+        let part = guard.0.as_ref().expect("the guard holds the part path");
+        std::fs::rename(part, &path)
+            .map_err(|e| LocalError::Cache(format!("model {}: rename failed: {e}", spec.id())))?;
+        guard.0 = None;
         if self.path(spec).is_none() {
             return Err(LocalError::Cache(format!(
                 "model {}: file changed after it was published",
@@ -174,6 +172,16 @@ fn create_private_dir(dir: &Path) -> Result<(), LocalError> {
     builder
         .create(dir)
         .map_err(|e| LocalError::Cache(format!("cannot create {}: {e}", dir.display())))
+}
+
+struct PartGuard(Option<PathBuf>);
+
+impl Drop for PartGuard {
+    fn drop(&mut self) {
+        if let Some(part) = self.0.take() {
+            let _ = std::fs::remove_file(part);
+        }
+    }
 }
 
 fn create_part_file(dir: &Path, id: &str) -> Result<(PathBuf, File), LocalError> {
