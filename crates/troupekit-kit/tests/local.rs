@@ -277,3 +277,49 @@ async fn graph_private_runs_local_nodes() {
         .unwrap();
     assert_eq!(text, "from the device");
 }
+
+#[tokio::test]
+async fn graph_nodes_share_one_local_agent() {
+    let agent = Agent::new("helper")
+        .instructions("Answer.")
+        .local(on_device("from the device", 0));
+    let text = Graph::new("pipe")
+        .agent("first", agent.clone())
+        .agent("second", agent)
+        .edge("first", "second")
+        .run("hi")
+        .await
+        .unwrap();
+    assert_eq!(text, "from the device");
+}
+
+#[tokio::test]
+async fn private_route_needs_no_cloud_key() {
+    let both = RoutePolicy::parse(
+        "office.toml",
+        "name = \"office\"\ndefault = \"cloud\"\n[[target]]\nid = \"local\"\n[[target]]\nid = \"cloud\"\n",
+    )
+    .unwrap();
+    let keyless = || {
+        Agent::new("keyless")
+            .instructions("Answer.")
+            .model("openai/gpt-6-luna")
+            .api_key_env("TROUPEKIT_TEST_KEY_THAT_IS_NEVER_SET")
+            .route(both.clone())
+    };
+    let text = keyless()
+        .local(on_device("from the device", 0))
+        .private(true)
+        .run("hi")
+        .await
+        .unwrap();
+    assert_eq!(text, "from the device");
+    let text = config_error(keyless().private(true)).await;
+    assert!(text.contains(".local("), "{text}");
+    let err = keyless()
+        .local(on_device("from the device", 0))
+        .build()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KitError::MissingKey { .. }), "{err}");
+}

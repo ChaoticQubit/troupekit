@@ -1,6 +1,6 @@
 use crate::{Grammar, LocalError};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 const ROOT: &str = "root";
@@ -9,7 +9,8 @@ const MAX_REF_DEPTH: usize = 16;
 const MAX_ITEMS: u64 = 64;
 const MAX_LENGTH: u64 = 1024;
 const MAX_ALTERNATIVES: usize = 64;
-const MAX_DIGITS: usize = 16;
+const MAX_DIGITS: u32 = 16;
+const MAX_MAGNITUDE: u64 = 10u64.pow(MAX_DIGITS) - 1;
 const SEP: &str = " ws \",\" ws ";
 const SUPPORTED: [&str; 16] = [
     "type",
@@ -102,16 +103,234 @@ fn json_literal(value: &Value) -> String {
     literal(&serde_json::to_string(value).expect("a JSON value serializes"))
 }
 
-fn digits(bound: f64) -> usize {
-    assert!(bound.is_finite());
-    let whole = bound.abs().trunc();
-    let count = if whole >= 1e16 {
-        MAX_DIGITS
-    } else {
-        whole.to_string().len().min(MAX_DIGITS)
+fn kind_of(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn type_allows(name: &str, value: &Value) -> bool {
+    match name {
+        "integer" => value.as_f64().is_some_and(|f| f.fract() == 0.0),
+        "number" => value.is_number(),
+        other => kind_of(value) == other,
+    }
+}
+
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+fn kind_of_name(name: &str) -> &'static str {
+    match name {
+        "null" => "null",
+        "boolean" => "boolean",
+        "string" => "string",
+        "array" => "array",
+        "object" => "object",
+        _ => "number",
+    }
+}
+
+fn def_name(path: &str) -> Option<String> {
+    let name = path.strip_prefix("#/$defs/")?;
+    Some(name.replace("~1", "/").replace("~0", "~"))
+}
+
+/// Refuses a keyword next to `form` that the grammar cannot apply as
+/// well: every supported constraint except `$defs` and `allowed`.
+/// Annotations are always accepted.
+fn only_with(obj: &Map<String, Value>, form: &str, allowed: &[&str]) -> Result<(), LocalError> {
+    assert!(SUPPORTED.contains(&form));
+    let extra = obj
+        .keys()
+        .map(String::as_str)
+        .find(|k| SUPPORTED.contains(k) && *k != "$defs" && *k != form && !allowed.contains(k));
+    match extra {
+        Some(key) => Err(fail(format!(
+            "`{key}` next to `{form}` is not supported: the grammar cannot apply both"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Checks that literal `value` (from `const` or `enum`) has a type the
+/// sibling `type` keyword allows. Output: `Ok`, or an error naming
+/// `type`.
+fn check_literal(obj: &Map<String, Value>, form: &str, value: &Value) -> Result<(), LocalError> {
+    let names: Vec<&str> = match obj.get("type") {
+        None => return Ok(()),
+        Some(Value::String(name)) => vec![name.as_str()],
+        Some(Value::Array(names)) => names.iter().filter_map(Value::as_str).collect(),
+        Some(_) => return Err(fail("`type` must be a string or a list of strings")),
     };
-    assert!((1..=MAX_DIGITS).contains(&count));
-    count
+    if names.iter().any(|name| type_allows(name, value)) {
+        return Ok(());
+    }
+    Err(fail(format!(
+        "`{form}` value {value} does not match `type`"
+    )))
+}
+
+/// Writes the fixed-width digit strings from `low` to `high` (ASCII
+/// digits, same length, `low <= high`) as one GBNF expression that
+/// matches exactly the strings in that range, leading zeros included.
+fn fixed(low: &[u8], high: &[u8]) -> String {
+    assert_eq!(low.len(), high.len());
+    assert!(!low.is_empty() && low <= high);
+    let (a, b) = (low[0], high[0]);
+    if low.len() == 1 {
+        return class(a, b);
+    }
+    let (low_rest, high_rest) = (&low[1..], &high[1..]);
+    if a == b {
+        return format!("{} {}", class(a, a), fixed(low_rest, high_rest));
+    }
+    let mut alts = Vec::new();
+    let mut first = a;
+    if low_rest.iter().any(|d| *d != b'0') {
+        let nines = vec![b'9'; low_rest.len()];
+        alts.push(format!("{} {}", class(a, a), fixed(low_rest, &nines)));
+        first = a + 1;
+    }
+    let mut last = b;
+    let mut tail = None;
+    if high_rest.iter().any(|d| *d != b'9') {
+        let zeros = vec![b'0'; high_rest.len()];
+        tail = Some(format!("{} {}", class(b, b), fixed(&zeros, high_rest)));
+        last = b - 1;
+    }
+    if first <= last {
+        alts.push(format!(
+            "{} {}",
+            class(first, last),
+            any_digits(low_rest.len())
+        ));
+    }
+    alts.extend(tail);
+    group(alts)
+}
+
+fn class(a: u8, b: u8) -> String {
+    assert!(a.is_ascii_digit() && b.is_ascii_digit() && a <= b);
+    if a == b {
+        format!("\"{}\"", char::from(a))
+    } else {
+        format!("[{}-{}]", char::from(a), char::from(b))
+    }
+}
+
+fn any_digits(count: usize) -> String {
+    assert!(count >= 1);
+    if count == 1 {
+        "[0-9]".to_string()
+    } else {
+        format!("[0-9]{{{count}}}")
+    }
+}
+
+fn group(mut parts: Vec<String>) -> String {
+    assert!(!parts.is_empty());
+    if parts.len() == 1 {
+        return parts.pop().expect("one part");
+    }
+    format!("( {} )", parts.join(" | "))
+}
+
+fn digit_count(value: u64) -> usize {
+    value.to_string().len()
+}
+
+/// Alternatives matching exactly the integers `low..=high` written without
+/// leading zeros; `high == MAX_MAGNITUDE` stands for "no upper bound" and
+/// folds every longer length into one alternative.
+fn non_negative(low: u64, high: u64) -> Vec<String> {
+    assert!(low <= high && high <= MAX_MAGNITUDE);
+    let (low_len, high_len) = (digit_count(low), digit_count(high));
+    let mut parts = Vec::new();
+    for len in low_len..=high_len {
+        if high == MAX_MAGNITUDE && len > low_len {
+            parts.push(format!("[1-9] [0-9]{{{},{}}}", len - 1, MAX_DIGITS - 1));
+            break;
+        }
+        let from = if len == low_len {
+            low
+        } else {
+            10u64.pow(len as u32 - 1)
+        };
+        let to = if len == high_len {
+            high
+        } else {
+            10u64.pow(len as u32) - 1
+        };
+        parts.push(fixed(
+            from.to_string().as_bytes(),
+            to.to_string().as_bytes(),
+        ));
+    }
+    assert!(!parts.is_empty());
+    parts
+}
+
+/// What a `oneOf` branch can match, read without building rules: JSON
+/// kinds, the literal values of a `const` or `enum`, and required
+/// properties fixed by `const` (tags). Unknown shapes match anything.
+struct Shape {
+    kinds: BTreeSet<&'static str>,
+    literals: Option<Vec<Value>>,
+    tags: BTreeMap<String, Value>,
+}
+
+impl Shape {
+    fn any() -> Self {
+        let kinds = ["null", "boolean", "number", "string", "array", "object"];
+        Shape {
+            kinds: kinds.into_iter().collect(),
+            literals: None,
+            tags: BTreeMap::new(),
+        }
+    }
+
+    fn disjoint(&self, other: &Shape) -> bool {
+        let common: Vec<&str> = self.kinds.intersection(&other.kinds).copied().collect();
+        if common.is_empty() {
+            return true;
+        }
+        if let (Some(a), Some(b)) = (&self.literals, &other.literals) {
+            return a.iter().all(|x| !b.iter().any(|y| same_value(x, y)));
+        }
+        common == ["object"]
+            && self
+                .tags
+                .iter()
+                .any(|(key, value)| other.tags.get(key).is_some_and(|w| !same_value(value, w)))
+    }
+}
+
+fn tags_of(obj: &Map<String, Value>) -> BTreeMap<String, Value> {
+    let required: Vec<&str> = obj
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut tags = BTreeMap::new();
+    if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+        for (key, sub) in props.iter().filter(|(k, _)| required.contains(&k.as_str())) {
+            if let Some(value) = sub.get("const") {
+                tags.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    assert!(tags.keys().all(|k| required.contains(&k.as_str())));
+    tags
 }
 
 /// Collects GBNF rules for one or more schemas into one grammar, sharing
@@ -209,19 +428,35 @@ impl GbnfBuilder {
             )));
         }
         if let Some(target) = obj.get("$ref") {
+            only_with(obj, "$ref", &[])?;
             return self.reference(target, depth);
         }
-        if let Some(value) = obj.get("const") {
-            return Ok(json_literal(value));
-        }
-        if let Some(values) = obj.get("enum") {
-            return self.enumeration(values);
+        match (obj.get("const"), obj.get("enum")) {
+            (Some(_), Some(_)) => return Err(fail("a schema cannot hold both `const` and `enum`")),
+            (Some(value), None) => {
+                only_with(obj, "const", &["type"])?;
+                check_literal(obj, "const", value)?;
+                return Ok(json_literal(value));
+            }
+            (None, Some(values)) => {
+                only_with(obj, "enum", &["type"])?;
+                return self.enumeration(obj, values);
+            }
+            (None, None) => {}
         }
         match (obj.get("anyOf"), obj.get("oneOf")) {
             (Some(_), Some(_)) => {
                 return Err(fail("a schema cannot hold both `anyOf` and `oneOf`"))
             }
-            (Some(list), None) | (None, Some(list)) => return self.alternatives(list, depth),
+            (Some(list), None) => {
+                only_with(obj, "anyOf", &[])?;
+                return self.alternatives(list, depth);
+            }
+            (None, Some(list)) => {
+                only_with(obj, "oneOf", &[])?;
+                self.check_exclusive(list)?;
+                return self.alternatives(list, depth);
+            }
             (None, None) => {}
         }
         match obj.get("type") {
@@ -274,11 +509,18 @@ impl GbnfBuilder {
         self.rule(alts.join(" | "))
     }
 
-    fn enumeration(&mut self, values: &Value) -> Result<String, LocalError> {
+    fn enumeration(
+        &mut self,
+        obj: &Map<String, Value>,
+        values: &Value,
+    ) -> Result<String, LocalError> {
         let values = values
             .as_array()
             .filter(|v| !v.is_empty())
             .ok_or_else(|| fail("`enum` must be a non-empty list"))?;
+        for value in values {
+            check_literal(obj, "enum", value)?;
+        }
         let alts: Vec<String> = values.iter().map(json_literal).collect();
         assert_eq!(alts.len(), values.len());
         match alts.as_slice() {
@@ -308,12 +550,11 @@ impl GbnfBuilder {
         let path = target
             .as_str()
             .ok_or_else(|| fail("`$ref` must be a string"))?;
-        let Some(name) = path.strip_prefix("#/$defs/") else {
+        let Some(name) = def_name(path) else {
             return Err(fail(format!(
                 "`$ref` `{path}` is not supported; use #/$defs/<name>"
             )));
         };
-        let name = name.replace("~1", "/").replace("~0", "~");
         if let Some(done) = self.refs.get(&name) {
             return Ok(done.clone());
         }
@@ -360,41 +601,115 @@ impl GbnfBuilder {
             None => Ok(None),
             Some(v) => v
                 .as_f64()
-                .filter(|f| f.is_finite())
+                .filter(|f| f.is_finite() && f.abs() < 1e16)
                 .map(Some)
-                .ok_or_else(|| fail(format!("`{key}` must be a number"))),
+                .ok_or_else(|| {
+                    fail(format!(
+                        "`{key}` must be a number of at most {MAX_DIGITS} digits"
+                    ))
+                }),
         };
         let (min, max) = (bound("minimum")?, bound("maximum")?);
         if min.is_none() && max.is_none() {
             return Ok(if integer { "integer" } else { "number" }.to_string());
         }
-        if let (Some(low), Some(high)) = (min, max) {
-            if low > high {
-                return Err(fail("`minimum` is above `maximum`"));
+        if !integer {
+            return Err(fail(
+                "`minimum` and `maximum` work only on type integer: \
+                 the grammar cannot bound a fraction exactly",
+            ));
+        }
+        let cap = MAX_MAGNITUDE as i64;
+        let low = min.map_or(-cap, |m| m.ceil() as i64);
+        let high = max.map_or(cap, |m| m.floor() as i64);
+        if low > high {
+            return Err(fail("`minimum` is above `maximum`: no integer fits"));
+        }
+        assert!(
+            low >= -cap && high <= cap,
+            "bounds stay within {MAX_DIGITS} digits"
+        );
+        let mut alts = Vec::new();
+        if high >= 0 {
+            alts.extend(non_negative(low.max(0) as u64, high as u64));
+        }
+        if low < 0 {
+            let from = if high < 0 { high.unsigned_abs() } else { 1 };
+            alts.push(format!(
+                "\"-\" {}",
+                group(non_negative(from, low.unsigned_abs()))
+            ));
+        }
+        assert!(!alts.is_empty(), "low <= high leaves a value");
+        self.rule(alts.join(" | "))
+    }
+
+    fn check_exclusive(&self, list: &Value) -> Result<(), LocalError> {
+        let Some(branches) = list.as_array() else {
+            return Ok(());
+        };
+        let shapes: Vec<Shape> = branches.iter().map(|b| self.shape(b, 0)).collect();
+        assert_eq!(shapes.len(), branches.len());
+        for (i, first) in shapes.iter().enumerate() {
+            for (j, second) in shapes.iter().enumerate().skip(i + 1) {
+                if !first.disjoint(second) {
+                    return Err(fail(format!(
+                        "`oneOf` branches {i} and {j} can match the same value, which the \
+                         grammar cannot exclude; use `anyOf` if either may match"
+                    )));
+                }
             }
         }
-        let mut alts = Vec::new();
-        if max.is_none_or(|m| m >= 0.0) {
-            let count = max.filter(|m| *m >= 0.0).map_or(MAX_DIGITS, digits);
-            alts.push(match count {
-                1 => "[0-9]".to_string(),
-                n => format!(r#""0" | [1-9] [0-9]{{0,{}}}"#, n - 1),
-            });
+        Ok(())
+    }
+
+    fn shape(&self, node: &Value, hops: usize) -> Shape {
+        let Some(obj) = node.as_object() else {
+            return Shape::any();
+        };
+        if let Some(path) = obj.get("$ref").and_then(Value::as_str) {
+            let def = def_name(path)
+                .filter(|_| hops < MAX_REF_DEPTH)
+                .and_then(|name| self.defs.as_ref()?.get(&name).cloned());
+            return def.map_or_else(Shape::any, |d| self.shape(&d, hops + 1));
         }
-        if min.is_none_or(|m| m < 0.0) {
-            let count = min.filter(|m| *m < 0.0).map_or(MAX_DIGITS, digits);
-            alts.push(match count {
-                1 => r#""-" [1-9]"#.to_string(),
-                n => format!(r#""-" [1-9] [0-9]{{0,{}}}"#, n - 1),
-            });
+        let literals = match (obj.get("const"), obj.get("enum").and_then(Value::as_array)) {
+            (Some(value), _) => Some(vec![value.clone()]),
+            (None, Some(values)) => Some(values.clone()),
+            (None, None) => None,
+        };
+        if let Some(values) = literals {
+            return Shape {
+                kinds: values.iter().map(kind_of).collect(),
+                literals: Some(values),
+                tags: BTreeMap::new(),
+            };
         }
-        assert!(!alts.is_empty(), "minimum <= maximum leaves a sign");
-        let body = alts.join(" | ");
-        self.rule(if integer {
-            body
+        let names: Vec<&str> = match obj.get("type") {
+            Some(Value::String(name)) => vec![name.as_str()],
+            Some(Value::Array(names)) => names.iter().filter_map(Value::as_str).collect(),
+            _ => return Shape::any(),
+        };
+        let kinds: BTreeSet<&'static str> = names
+            .iter()
+            .map(|n| {
+                if *n == "integer" {
+                    "number"
+                } else {
+                    kind_of_name(n)
+                }
+            })
+            .collect();
+        let tags = if kinds.contains("object") {
+            tags_of(obj)
         } else {
-            format!(r#"( {body} ) ( "." [0-9]{{1,16}} )?"#)
-        })
+            BTreeMap::new()
+        };
+        Shape {
+            kinds,
+            literals: None,
+            tags,
+        }
     }
 
     fn object(&mut self, obj: &Map<String, Value>, depth: usize) -> Result<String, LocalError> {

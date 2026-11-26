@@ -5,6 +5,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use troupekit_agent::{ModelHandle, Persona};
+use troupekit_core::error::{ProviderError, ProviderErrorKind};
+use troupekit_providers::request::{CompletionRequest, CompletionResponse, Delta};
 use troupekit_providers::route::{
     DeviceState, NetworkState, RouteError, RoutePolicy, RouteTags, RoutedModel,
 };
@@ -57,7 +59,9 @@ impl RouteConfig {
     pub(crate) fn same(&self, other: &RouteConfig) -> bool {
         let same_local = match (&self.on_device, &other.on_device) {
             (None, None) => true,
-            (Some((a, pa)), Some((b, pb))) => Arc::ptr_eq(a, b) && pa == pb,
+            (Some((a, pa)), Some((b, pb))) => {
+                (Arc::ptr_eq(a, b) || self.same_loaded(other)) && pa == pb
+            }
             _ => false,
         };
         self.policy == other.policy
@@ -68,6 +72,19 @@ impl RouteConfig {
             && same_arc(&self.device, &other.device)
             && same_local
             && self.local_only == other.local_only
+    }
+
+    #[cfg(feature = "local")]
+    fn same_loaded(&self, other: &RouteConfig) -> bool {
+        match (&self.local_model, &other.local_model) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    #[cfg(not(feature = "local"))]
+    fn same_loaded(&self, _other: &RouteConfig) -> bool {
+        false
     }
 
     pub(crate) fn has_route(&self) -> bool {
@@ -123,35 +140,37 @@ impl RouteConfig {
         let mut builder = RoutedModel::builder(policy.clone());
         let mut cloud = Some(cloud);
         for target in policy.targets() {
-            builder =
-                match target.id() {
-                    LOCAL => {
-                        match &self.on_device {
-                            Some((model, price)) => builder.on_device(LOCAL, model.clone(), *price),
-                            None => return Err(KitError::config(
-                                owner,
-                                "route target `local` needs an on-device model: call .local(..)",
-                            )),
-                        }
-                    }
-                    CLOUD if self.local_only => return Err(KitError::config(
-                        owner,
-                        "route target `cloud` needs a cloud model: call .model(\"vendor/model\")",
-                    )),
-                    CLOUD => {
-                        let resolve = cloud.take().expect("route target ids are unique");
-                        let handle = resolve()?;
-                        builder.remote(CLOUD, handle.model, handle.price)
-                    }
-                    other => {
+            builder = match target.id() {
+                LOCAL => match &self.on_device {
+                    Some((model, price)) => builder.on_device(LOCAL, model.clone(), *price),
+                    None => {
                         return Err(KitError::config(
                             owner,
-                            format!(
-                        "route target `{other}` is not a kit target: name them `local` and `cloud`"
-                    ),
+                            "route target `local` needs an on-device model: call .local(..)",
                         ))
                     }
-                };
+                },
+                CLOUD if self.local_only => {
+                    return Err(KitError::config(
+                        owner,
+                        "route target `cloud` needs a cloud model: call .model(\"vendor/model\")",
+                    ))
+                }
+                CLOUD if self.private => builder.remote(CLOUD, Arc::new(Unreachable), Price::FREE),
+                CLOUD => {
+                    let resolve = cloud.take().expect("route target ids are unique");
+                    let handle = resolve()?;
+                    builder.remote(CLOUD, handle.model, handle.price)
+                }
+                other => {
+                    return Err(KitError::config(
+                        owner,
+                        format!(
+                        "route target `{other}` is not a kit target: name them `local` and `cloud`"
+                    ),
+                    ))
+                }
+            };
         }
         if let Some(network) = &self.network {
             builder = builder.network(Arc::new(NetworkState::clone(network)));
@@ -194,6 +213,40 @@ impl RouteConfig {
             None => Err(KitError::config(owner, NO_ON_DEVICE)),
         }
     }
+}
+
+/// Stand-in for route target `cloud` in a private agent's route. The
+/// private view never plans a remote target, so no call reaches it;
+/// binding it this way needs no cloud key. Every call returns an error.
+struct Unreachable;
+
+#[async_trait::async_trait]
+impl Model for Unreachable {
+    fn id(&self) -> &str {
+        "route/unreachable-cloud"
+    }
+
+    async fn complete(
+        &self,
+        _req: &CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        Err(unreachable_call())
+    }
+
+    async fn stream(
+        &self,
+        _req: &CompletionRequest,
+        _on_delta: &mut (dyn for<'d> FnMut(&'d Delta) + Send),
+    ) -> Result<CompletionResponse, ProviderError> {
+        Err(unreachable_call())
+    }
+}
+
+fn unreachable_call() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Network,
+        "a private agent never calls route target `cloud`",
+    )
 }
 
 impl From<RouteError> for KitError {
