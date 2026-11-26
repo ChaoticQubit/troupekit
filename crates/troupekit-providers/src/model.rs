@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use troupekit_core::error::{ProviderError, ProviderErrorKind};
 use troupekit_core::secret::Secret;
+use troupekit_trace::{trace_span, url_for_trace, Span, Trace};
 
 /// Largest reply body or stream, in bytes, a model reads before failing
 /// with `Decode`. Bounds memory against a runaway or hostile server.
@@ -161,9 +162,71 @@ impl Model for HttpModel {
     }
 
     async fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        let mut span = self.http_span(false);
+        let mut stats = HttpStats::default();
+        let result = span.instrument(self.complete_http(req, &mut stats)).await;
+        stats.finish(&mut span, &result);
+        result
+    }
+
+    async fn stream(
+        &self,
+        req: &CompletionRequest,
+        on_delta: &mut (dyn for<'d> FnMut(&'d Delta) + Send),
+    ) -> Result<CompletionResponse, ProviderError> {
+        let mut span = self.http_span(true);
+        let mut stats = HttpStats::default();
+        let result = span
+            .instrument(self.stream_http(req, on_delta, &mut stats))
+            .await;
+        stats.finish(&mut span, &result);
+        result
+    }
+}
+
+#[derive(Default)]
+struct HttpStats {
+    status: Option<u16>,
+    reply_bytes: usize,
+}
+
+impl HttpStats {
+    fn finish(&self, span: &mut Span, result: &Result<CompletionResponse, ProviderError>) {
+        if !span.is_enabled() {
+            return;
+        }
+        if let Some(status) = self.status {
+            span.record("status", status);
+        }
+        span.record("reply_bytes", self.reply_bytes);
+        if let Err(e) = result {
+            span.fail("http call failed");
+            span.record("kind", format!("{:?}", e.kind));
+        }
+    }
+}
+
+impl HttpModel {
+    fn http_span(&self, stream: bool) -> Span {
+        trace_span!(
+            Trace::Models,
+            "model.http",
+            model = self.id.as_str(),
+            url = url_for_trace(&self.endpoint.base_url),
+            stream = stream,
+        )
+    }
+
+    async fn complete_http(
+        &self,
+        req: &CompletionRequest,
+        stats: &mut HttpStats,
+    ) -> Result<CompletionResponse, ProviderError> {
         let request = self.prepare(req, false)?;
         let mut reply = self.transport.send(request).await?;
+        stats.status = Some(reply.status);
         let body = read_body(reply.body.as_mut(), MAX_REPLY_BYTES).await?;
+        stats.reply_bytes = body.len();
         if !(200..300).contains(&reply.status) {
             return Err(status_error(reply.status, &reply.headers, &body));
         }
@@ -176,17 +239,20 @@ impl Model for HttpModel {
         fold.finish()
     }
 
-    async fn stream(
+    async fn stream_http(
         &self,
         req: &CompletionRequest,
         on_delta: &mut (dyn for<'d> FnMut(&'d Delta) + Send),
+        stats: &mut HttpStats,
     ) -> Result<CompletionResponse, ProviderError> {
         let request = self.prepare(req, true)?;
         let mut reply = self.transport.send(request).await?;
+        stats.status = Some(reply.status);
         if !(200..300).contains(&reply.status) {
             let body = read_body(reply.body.as_mut(), MAX_REPLY_BYTES)
                 .await
                 .unwrap_or_default();
+            stats.reply_bytes = body.len();
             return Err(status_error(reply.status, &reply.headers, &body));
         }
         let mut parser = SseParser::new();
@@ -195,6 +261,7 @@ impl Model for HttpModel {
         let mut received = 0usize;
         while let Some(chunk) = reply.body.chunk().await? {
             received += chunk.len();
+            stats.reply_bytes = received;
             if received > MAX_REPLY_BYTES {
                 return Err(decode_error("reply stream is too large"));
             }

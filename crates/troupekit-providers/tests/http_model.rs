@@ -236,3 +236,74 @@ async fn rejects_invalid_or_mismatched_requests_before_sending() {
     );
     assert_eq!(transport.sent().len(), 1);
 }
+
+#[tokio::test]
+async fn http_model_span_has_no_headers_or_query() {
+    let query_canary = "sk-QUERY-CANARY-0123456789";
+    let header_canary = "sk-HEADER-CANARY-0123456789";
+    for stream in [false, true] {
+        let fixture = if stream {
+            "openai_stream.sse"
+        } else {
+            "openai_reply.json"
+        };
+        let transport = Arc::new(ScriptedTransport::new(vec![Scripted::body(
+            200,
+            golden_text(fixture),
+        )]));
+        let endpoint = Endpoint {
+            protocol: Protocol::OpenAi,
+            base_url: format!("https://h.test/v1?key={query_canary}"),
+            auth: AuthStyle::Bearer,
+            quirks: Quirks::default(),
+        };
+        let key = troupekit_core::secret::Secret::new(header_canary.into()).unwrap();
+        let model = HttpModel::new("vendor/m-1", "m-1", endpoint, Some(key), transport).unwrap();
+        let sink = Arc::new(troupekit_trace::MemorySink::default());
+        let tracer = troupekit_trace::Tracer::builder()
+            .content(true)
+            .sink(sink.clone())
+            .build()
+            .unwrap();
+        let req = CompletionRequest::user("hi", 10);
+        let reply = if stream {
+            tracer
+                .in_scope(model.stream(&req, &mut |_: &Delta| {}))
+                .await
+        } else {
+            tracer.in_scope(model.complete(&req)).await
+        };
+        reply.unwrap();
+        drop(tracer);
+        let lines = sink.lines();
+        let records: Vec<Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let start = records
+            .iter()
+            .find(|r| r["t"] == "start" && r["name"] == "model.http")
+            .expect("a model.http span");
+        assert_eq!(start["cat"], "models");
+        assert_eq!(start["fields"]["model"], "vendor/m-1");
+        assert_eq!(start["fields"]["stream"], stream);
+        let url = start["fields"]["url"].as_str().unwrap();
+        assert!(url.starts_with("https://h.test/v1"));
+        let span = start["span"].clone();
+        let end = records
+            .iter()
+            .find(|r| r["t"] == "end" && r["span"] == span)
+            .expect("the span ends");
+        assert_eq!(end["ok"], true);
+        assert_eq!(end["fields"]["status"], 200);
+        assert!(end["fields"]["reply_bytes"].as_u64().unwrap() > 0);
+        for line in &lines {
+            assert!(!line.contains(query_canary), "query key leaked: {line}");
+            assert!(!line.contains(header_canary), "header key leaked: {line}");
+            assert!(
+                !line.to_ascii_lowercase().contains("authorization"),
+                "header leaked: {line}"
+            );
+        }
+    }
+}

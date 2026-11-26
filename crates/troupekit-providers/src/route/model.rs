@@ -12,6 +12,7 @@ use troupekit_core::clock::{Clock, SystemClock};
 use troupekit_core::error::{CoreError, ProviderError, ProviderErrorKind};
 use troupekit_core::event::Usage;
 use troupekit_core::store::UsageLedger;
+use troupekit_trace::{trace, trace_span, Span, Trace};
 
 const DAY_MS: i64 = 86_400_000;
 
@@ -316,7 +317,11 @@ impl RoutedModel {
         }
     }
 
-    async fn plan(&self, req: &CompletionRequest) -> Result<RoutePlan, ProviderError> {
+    async fn plan(
+        &self,
+        req: &CompletionRequest,
+        stats: &mut RouteStats,
+    ) -> Result<RoutePlan, ProviderError> {
         let shared = &self.shared;
         let spent = match shared.policy.budget().cloud_usd_micros_per_day() {
             None => 0,
@@ -337,12 +342,97 @@ impl RoutedModel {
                 .with_thermal(device.thermal());
         }
         let plan = decide(&shared.policy, &shared.targets, &self.tags, &signals);
+        let held = !self.tags.private || plan.targets().iter().all(BoundTarget::is_on_device);
+        trace!(
+            Trace::Laws,
+            "law.check",
+            law = "private_plan_has_only_on_device_targets",
+            held = held,
+            private = self.tags.private,
+            targets = plan.targets().len(),
+        );
         plan.assert_lawful(&self.tags);
+        stats.planned(&plan, signals);
         if plan.is_empty() {
             let message = format!("no route: {}", plan.reason());
             return Err(ProviderError::new(ProviderErrorKind::Network, message));
         }
         Ok(plan)
+    }
+
+    fn decide_span(&self) -> Span {
+        let mut span = trace_span!(
+            Trace::Routing,
+            "route.decide",
+            model = self.id.as_str(),
+            private = self.tags.private,
+        );
+        if let Some(tier) = &self.tags.tier {
+            span.record("tier", tier.as_str());
+        }
+        span
+    }
+
+    async fn complete_routed(
+        &self,
+        req: &CompletionRequest,
+        stats: &mut RouteStats,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let plan = self.plan(req, stats).await?;
+        let fallback = self.shared.policy.fallback().on_error();
+        let mut last = None;
+        for target in plan.targets() {
+            let b = self.bound(target);
+            let result = b.model.complete(req).await;
+            self.settle(b, &result).await;
+            match result {
+                Ok(reply) => {
+                    stats.chosen = Some(target.id().to_owned());
+                    return Ok(reply);
+                }
+                Err(err) if !fallback => return Err(err),
+                Err(err) => {
+                    trace_fallback(target, &err);
+                    last = Some(err);
+                }
+            }
+        }
+        Err(last.expect("a non-empty plan tried a target"))
+    }
+
+    async fn stream_routed(
+        &self,
+        req: &CompletionRequest,
+        on_delta: &mut (dyn for<'d> FnMut(&'d Delta) + Send),
+        stats: &mut RouteStats,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let plan = self.plan(req, stats).await?;
+        let fallback = self.shared.policy.fallback().on_error();
+        let mut last = None;
+        for target in plan.targets() {
+            let b = self.bound(target);
+            let mut emitted = false;
+            let result = b
+                .model
+                .stream(req, &mut |d: &Delta| {
+                    emitted = true;
+                    on_delta(d);
+                })
+                .await;
+            self.settle(b, &result).await;
+            match result {
+                Ok(reply) => {
+                    stats.chosen = Some(target.id().to_owned());
+                    return Ok(reply);
+                }
+                Err(err) if emitted || !fallback => return Err(err),
+                Err(err) => {
+                    trace_fallback(target, &err);
+                    last = Some(err);
+                }
+            }
+        }
+        Err(last.expect("a non-empty plan tried a target"))
     }
 
     fn bound(&self, target: &BoundTarget) -> &Bound {
@@ -396,6 +486,65 @@ impl RoutedModel {
     }
 }
 
+fn trace_fallback(target: &BoundTarget, err: &ProviderError) {
+    trace!(
+        Trace::Routing,
+        "route.fallback",
+        from = target.id(),
+        on_device = target.is_on_device(),
+        kind = format!("{:?}", err.kind),
+    );
+}
+
+#[derive(Default)]
+struct RouteStats {
+    plan: String,
+    reason: String,
+    signals: Option<Signals>,
+    chosen: Option<String>,
+}
+
+impl RouteStats {
+    fn planned(&mut self, plan: &RoutePlan, signals: Signals) {
+        let ids: Vec<&str> = plan.targets().iter().map(BoundTarget::id).collect();
+        self.plan = ids.join(",");
+        self.reason = plan.reason().to_owned();
+        self.signals = Some(signals);
+    }
+
+    fn finish(&self, span: &mut Span, result: &Result<CompletionResponse, ProviderError>) {
+        if !span.is_enabled() {
+            return;
+        }
+        span.record("plan", self.plan.as_str());
+        span.record("reason", self.reason.as_str());
+        if let Some(signals) = &self.signals {
+            if let Some(online) = signals.online {
+                span.record("online", online);
+            }
+            if let Some(battery) = signals.battery_percent {
+                span.record("battery_percent", battery);
+            }
+            if let Some(thermal) = signals.thermal {
+                span.record("thermal", format!("{thermal:?}").to_ascii_lowercase());
+            }
+            span.record(
+                "spent_today_usd_micros",
+                signals.cloud_spent_today_usd_micros,
+            );
+            span.record("prompt_tokens", signals.prompt_tokens);
+            span.record("max_tokens", signals.max_tokens);
+        }
+        if let Some(chosen) = &self.chosen {
+            span.record("chosen", chosen.as_str());
+        }
+        if let Err(e) = result {
+            span.fail("no route target answered");
+            span.record("kind", format!("{:?}", e.kind));
+        }
+    }
+}
+
 #[async_trait]
 impl Model for RoutedModel {
     fn id(&self) -> &str {
@@ -403,20 +552,11 @@ impl Model for RoutedModel {
     }
 
     async fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        let plan = self.plan(req).await?;
-        let fallback = self.shared.policy.fallback().on_error();
-        let mut last = None;
-        for target in plan.targets() {
-            let b = self.bound(target);
-            let result = b.model.complete(req).await;
-            self.settle(b, &result).await;
-            match result {
-                Ok(reply) => return Ok(reply),
-                Err(err) if !fallback => return Err(err),
-                Err(err) => last = Some(err),
-            }
-        }
-        Err(last.expect("a non-empty plan tried a target"))
+        let mut span = self.decide_span();
+        let mut stats = RouteStats::default();
+        let result = span.instrument(self.complete_routed(req, &mut stats)).await;
+        stats.finish(&mut span, &result);
+        result
     }
 
     async fn stream(
@@ -424,26 +564,12 @@ impl Model for RoutedModel {
         req: &CompletionRequest,
         on_delta: &mut (dyn for<'d> FnMut(&'d Delta) + Send),
     ) -> Result<CompletionResponse, ProviderError> {
-        let plan = self.plan(req).await?;
-        let fallback = self.shared.policy.fallback().on_error();
-        let mut last = None;
-        for target in plan.targets() {
-            let b = self.bound(target);
-            let mut emitted = false;
-            let result = b
-                .model
-                .stream(req, &mut |d: &Delta| {
-                    emitted = true;
-                    on_delta(d);
-                })
-                .await;
-            self.settle(b, &result).await;
-            match result {
-                Ok(reply) => return Ok(reply),
-                Err(err) if emitted || !fallback => return Err(err),
-                Err(err) => last = Some(err),
-            }
-        }
-        Err(last.expect("a non-empty plan tried a target"))
+        let mut span = self.decide_span();
+        let mut stats = RouteStats::default();
+        let result = span
+            .instrument(self.stream_routed(req, on_delta, &mut stats))
+            .await;
+        stats.finish(&mut span, &result);
+        result
     }
 }

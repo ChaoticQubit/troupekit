@@ -792,3 +792,73 @@ async fn network_errors_flip_passive_probe_offline() {
     assert_eq!(cloud_wire.sent().len(), 2);
     assert_eq!(local_wire.sent().len(), 3);
 }
+
+fn traced_records(sink: &troupekit_trace::MemorySink) -> Vec<serde_json::Value> {
+    sink.lines()
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn tracer_into(sink: &Arc<troupekit_trace::MemorySink>) -> troupekit_trace::Tracer {
+    troupekit_trace::Tracer::builder()
+        .sink(sink.clone())
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn route_decide_emits_routing_span() {
+    let (local, _) = scripted("local", vec![Step::Reply(0)]);
+    let (cloud, _) = scripted("cloud", vec![Step::Fail(ProviderErrorKind::Server)]);
+    let model = routed(pair_policy(""), local, cloud);
+    let sink = Arc::new(troupekit_trace::MemorySink::default());
+    let tracer = tracer_into(&sink);
+    tracer.in_scope(model.complete(&req())).await.unwrap();
+    drop(tracer);
+    let records = traced_records(&sink);
+    let start = records
+        .iter()
+        .find(|r| r["t"] == "start" && r["name"] == "route.decide")
+        .expect("a route.decide span");
+    assert_eq!(start["cat"], "routing");
+    assert_eq!(start["fields"]["private"], false);
+    assert_eq!(start["fields"]["plan"], "cloud,local");
+    let end = records
+        .iter()
+        .find(|r| r["t"] == "end" && r["span"] == start["span"])
+        .expect("the span ends");
+    assert_eq!(end["ok"], true);
+    assert_eq!(end["fields"]["chosen"], "local");
+    let fallback = records
+        .iter()
+        .find(|r| r["t"] == "event" && r["name"] == "route.fallback")
+        .expect("a route.fallback event");
+    assert_eq!(fallback["cat"], "routing");
+    assert_eq!(fallback["fields"]["from"], "cloud");
+    assert_eq!(fallback["fields"]["kind"], "Server");
+}
+
+#[tokio::test]
+async fn private_law_event_is_emitted() {
+    let (local, _) = scripted("local", vec![Step::Reply(0)]);
+    let (cloud, cloud_calls) = scripted("cloud", vec![]);
+    let model = routed(pair_policy(""), local, cloud).view(RouteTags::default().with_private(true));
+    let sink = Arc::new(troupekit_trace::MemorySink::default());
+    let tracer = tracer_into(&sink);
+    tracer.in_scope(model.complete(&req())).await.unwrap();
+    drop(tracer);
+    let records = traced_records(&sink);
+    let law = records
+        .iter()
+        .find(|r| r["t"] == "event" && r["name"] == "law.check")
+        .expect("a law.check event");
+    assert_eq!(law["cat"], "laws");
+    assert_eq!(
+        law["fields"]["law"],
+        "private_plan_has_only_on_device_targets"
+    );
+    assert_eq!(law["fields"]["held"], true);
+    assert_eq!(law["fields"]["private"], true);
+    assert_eq!(cloud_calls.load(Ordering::SeqCst), 0);
+}
