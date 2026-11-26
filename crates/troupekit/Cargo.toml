@@ -49,4 +49,4 @@ serde_json.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }
 troupekit-tools = { path = "../troupekit-tools", version = "0.1.0", default-features = false }
-troupekit-providers = { path = "../troupekit-providers", version = "0.1.0" }
+troupekit-providers = { path = "../troupekit-providers", version = "0.1.0", features = ["embeddings"] }
