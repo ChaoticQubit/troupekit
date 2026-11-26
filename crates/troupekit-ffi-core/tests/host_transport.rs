@@ -42,10 +42,12 @@ async fn model_calls_go_through_host_transport() {
         .instructions("Add numbers.".into())
         .model("openai/gpt-6-luna".into())
         .api_key("k".into())
+        .retries(0)
         .host_transport(Arc::new(Offline))
         .build()
         .await
         .unwrap();
     let err = handle.run("1 + 2".into()).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Retries);
     assert!(err.message.contains("offline"), "{err}");
 }

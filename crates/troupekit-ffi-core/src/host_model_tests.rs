@@ -133,3 +133,31 @@ fn image_part_is_refused() {
     let err = render(&req, &HostModelCaps::default()).unwrap_err();
     assert!(err.message.contains("text only"), "{err}");
 }
+
+#[test]
+fn history_without_tools_in_request_stays_text_for_a_plain_model() {
+    let mut req = CompletionRequest::user("1 + 2", 100);
+    let call = ContentPart::ToolCall {
+        id: "call_0".into(),
+        name: "add".into(),
+        arguments: json!({"a": 1}),
+    };
+    req.messages
+        .push(Message::new(Role::Assistant, vec![call]).unwrap());
+    let result = ContentPart::ToolResult {
+        call_id: "call_0".into(),
+        content: "3".into(),
+        is_error: false,
+    };
+    req.messages
+        .push(Message::new(Role::Tool, vec![result]).unwrap());
+    let rendered = render(&req, &HostModelCaps::default()).unwrap();
+    assert!(rendered
+        .messages
+        .iter()
+        .all(|m| m.tool_calls_json.is_none()));
+    assert!(rendered.messages.iter().all(|m| m.tool_call_id.is_none()));
+    assert!(rendered.messages.iter().all(|m| m.role != "tool"));
+    assert!(rendered.messages[1].text.contains(r#""tool":"add""#));
+    assert!(rendered.messages[2].text.contains('3'));
+}

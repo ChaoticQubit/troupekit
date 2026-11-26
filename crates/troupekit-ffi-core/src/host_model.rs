@@ -189,7 +189,7 @@ pub(crate) fn render(
     let emulate = !caps.tools && !req.tools.is_empty();
     let mut messages = Vec::with_capacity(req.messages.len());
     for message in req.messages.iter().filter(|m| m.role != Role::System) {
-        render_message(message, emulate, &mut messages)?;
+        render_message(message, caps.tools, emulate, &mut messages)?;
     }
     let mut system: Vec<String> = req.system_text().into_iter().collect();
     let mut request = HostRequest::default();
@@ -223,6 +223,7 @@ pub(crate) fn render(
 
 fn render_message(
     message: &Message,
+    native: bool,
     emulate: bool,
     out: &mut Vec<HostMessage>,
 ) -> Result<(), ProviderError> {
@@ -252,15 +253,15 @@ fn render_message(
                 } else {
                     content.clone()
                 };
-                let mut result = if emulate {
+                let mut result = if native {
+                    host_message("tool", &content)
+                } else {
                     host_message(
                         "user",
                         &format!("Result of tool call {call_id}:\n{content}"),
                     )
-                } else {
-                    host_message("tool", &content)
                 };
-                if !emulate {
+                if native {
                     result.tool_call_id = Some(call_id.clone());
                 }
                 out.push(result);
@@ -274,19 +275,18 @@ fn render_message(
         Role::Tool | Role::System => return Ok(()),
     };
     let mut rendered = host_message(role, &text.join("\n"));
-    if role == "assistant" && emulate {
+    if native && !calls.is_empty() {
+        rendered.tool_calls_json = Some(Value::Array(calls).to_string());
+    } else if !calls.is_empty() {
         let envelopes: Vec<String> = calls
             .iter()
             .map(|c| json!({"tool": c["name"], "arguments": c["arguments"]}).to_string())
             .collect();
-        if envelopes.is_empty() {
-            rendered.text = json!({"answer": rendered.text}).to_string();
-        } else {
-            rendered.text = envelopes.join("\n");
-        }
-    } else if !calls.is_empty() {
-        rendered.tool_calls_json = Some(Value::Array(calls).to_string());
+        rendered.text = envelopes.join("\n");
+    } else if role == "assistant" && emulate {
+        rendered.text = json!({"answer": rendered.text}).to_string();
     }
+    assert!(rendered.tool_calls_json.is_none() || native);
     out.push(rendered);
     Ok(())
 }

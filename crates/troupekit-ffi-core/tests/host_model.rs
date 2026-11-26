@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use troupekit_ffi_core::{
-    AgentBuilder, FfiEventKind, HostError, HostModel, HostModelCaps, HostReply, HostRequest,
-    HostTool, TokenSink,
+    AgentBuilder, ErrorCode, FfiEventKind, HostError, HostModel, HostModelCaps, HostReply,
+    HostRequest, HostTool, TokenSink,
 };
 
 struct Scripted {
@@ -230,6 +230,7 @@ async fn host_error_fails_the_run_without_retry() {
         .await
         .unwrap();
     let err = handle.run("hi".into()).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Failed);
     assert!(err.message.contains("script ran out"), "{err}");
     assert_eq!(model.seen.lock().unwrap().len(), 1);
 }

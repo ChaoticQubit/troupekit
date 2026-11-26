@@ -39,9 +39,9 @@ pub trait HostTool: Send + Sync {
     /// Output: the description text.
     fn description(&self) -> String;
 
-    /// Returns the JSON Schema of the arguments as JSON object text.
-    /// Called once when the tool is added; text that is not a JSON
-    /// object is refused with `InvalidArgument`.
+    /// Returns the JSON Schema of the arguments as JSON object text
+    /// with `"type": "object"`. Called once when the tool is added; any
+    /// other text is refused with `InvalidArgument`.
     fn schema_json(&self) -> String;
 
     /// Runs the tool on `args_json`, arguments that match the schema.
@@ -96,8 +96,9 @@ pub trait HostTransport: Send + Sync {
     fn send(&self, request: HostHttpRequest, sink: Arc<HttpSink>) -> Result<(), HostError>;
 }
 
-/// Where a host model pushes text deltas while it generates.
-/// Each delta reaches the run's stream as a `TextDelta` event.
+/// Where a host model pushes text deltas while it generates. Each
+/// delta reaches the run's stream as a `TextDelta` event, except when
+/// troupekit emulates tools: then the parsed answer is sent once.
 /// Built by troupekit for each `HostModel::generate` call.
 #[derive(Debug)]
 pub struct TokenSink {

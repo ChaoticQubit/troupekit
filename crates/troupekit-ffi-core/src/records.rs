@@ -280,7 +280,8 @@ pub struct HostHttpRequest {
 
 /// A failure inside host code, as a message. Foreign exceptions arrive
 /// as this type from the adapters. A host tool's error reaches the model
-/// as an error result; other host errors fail the call with `HostCallback`.
+/// as an error result; a host model's error fails the run (`Failed`) and
+/// a host transport's error is retried (`Retries`), message kept.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]

@@ -2,7 +2,7 @@ use crate::error::{ErrorCode, FfiError};
 #[cfg(feature = "knowledge")]
 use crate::host::HostEmbedder;
 use crate::host::{HostModel, HostTool, HostTransport};
-use crate::host_transport::wrap_transport;
+use crate::host_transport::{origin, wrap_transport};
 #[cfg(feature = "knowledge")]
 use crate::records::{KnowledgeConfig, MemoryConfig};
 use crate::records::{Progress, RunResult};
@@ -80,8 +80,16 @@ impl AgentBuilder {
 
     pub(crate) fn take(&self) -> Result<Agent, FfiError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let transport = self
+            .transport
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         match std::mem::replace(&mut *state, State::Built) {
-            State::Open(agent) => Ok(*agent),
+            State::Open(agent) => match transport {
+                Some(host) => with_transport(*agent, host),
+                None => Ok(*agent),
+            },
             State::Broken(err) => Err(err),
             State::Built => Err(FfiError::new(
                 ErrorCode::InvalidArgument,
@@ -346,15 +354,7 @@ impl AgentBuilder {
     /// Makes no model call. Output: the agent handle, or the first
     /// problem found with its code.
     pub async fn build(self: &Arc<Self>) -> Result<Arc<AgentHandle>, FfiError> {
-        let mut agent = self.take()?;
-        let transport = self
-            .transport
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(host) = transport {
-            agent = with_transport(agent, host)?;
-        }
+        let agent = self.take()?;
         let built = spawn(async move { agent.build().await.map_err(FfiError::from) }).await?;
         Ok(Arc::new(AgentHandle { agent: built }))
     }
@@ -367,6 +367,12 @@ fn with_transport(agent: Agent, host: Arc<dyn HostTransport>) -> Result<Agent, F
             "host_transport needs .model(\"vendor/model\") of a catalog vendor",
         ));
     };
+    if origin(&vendor.base_url).is_none() {
+        return Err(FfiError::new(
+            ErrorCode::Config,
+            format!("vendor `{}` base_url has no plain origin", vendor.id),
+        ));
+    }
     let plain_ok = vendor.base_url.starts_with("http://") && vendor.auth == AuthStyle::NoKey;
     let transport = wrap_transport(host, &vendor.base_url, plain_ok, MAX_REPLY_BYTES);
     Ok(agent.transport(transport))
