@@ -1,0 +1,2 @@
+tool_where.rs:7:
+error: #[tool] fns cannot be generic; use concrete argument types

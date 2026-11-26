@@ -1,0 +1,2 @@
+tool_generic.rs:6:
+error: #[tool] fns cannot be generic; use concrete argument types

@@ -1,0 +1,2 @@
+agent_async.rs:6:
+error: #[agent] fn cannot be async

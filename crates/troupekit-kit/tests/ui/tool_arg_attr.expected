@@ -1,0 +1,2 @@
+tool_arg_attr.rs:6:
+error: attributes on #[tool] arguments are not supported

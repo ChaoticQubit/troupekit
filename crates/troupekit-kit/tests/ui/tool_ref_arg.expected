@@ -1,0 +1,2 @@
+tool_ref_arg.rs:6:
+error: #[tool] arguments must be owned types; use String instead of &str

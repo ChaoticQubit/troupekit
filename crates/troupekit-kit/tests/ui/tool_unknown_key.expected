@@ -1,0 +1,2 @@
+tool_unknown_key.rs:5:
+error: unknown #[tool] key `x`; known keys: name, description, crate

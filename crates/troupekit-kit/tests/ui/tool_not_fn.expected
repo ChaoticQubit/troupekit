@@ -1,0 +1,2 @@
+tool_not_fn.rs:6:
+error: #[tool] goes on a fn

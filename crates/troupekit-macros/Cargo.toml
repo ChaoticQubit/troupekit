@@ -1,0 +1,15 @@
+[package]
+name = "troupekit-macros"
+description = "Attribute macros #[tool] and #[agent] for the Troupekit agent framework, built on the compiler proc_macro crate only."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[lib]
+proc-macro = true

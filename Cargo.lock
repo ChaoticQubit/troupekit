@@ -2756,6 +2756,7 @@ dependencies = [
  "troupekit-core",
  "troupekit-graph",
  "troupekit-host",
+ "troupekit-kit",
  "troupekit-providers",
  "troupekit-store-sqlite",
  "troupekit-tools",
@@ -2856,6 +2857,32 @@ version = "0.1.0"
 dependencies = [
  "thiserror",
 ]
+
+[[package]]
+name = "troupekit-kit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "troupekit-agent",
+ "troupekit-context",
+ "troupekit-core",
+ "troupekit-graph",
+ "troupekit-macros",
+ "troupekit-providers",
+ "troupekit-store-sqlite",
+ "troupekit-tools",
+]
+
+[[package]]
+name = "troupekit-macros"
+version = "0.1.0"
 
 [[package]]
 name = "troupekit-providers"
