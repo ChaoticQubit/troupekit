@@ -135,6 +135,8 @@ enum At {
         run: Box<AgentRun>,
         call_cap: Option<u64>,
         run_cap: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        share: Option<u64>,
     },
     Human {
         data: Map<String, Value>,
@@ -311,6 +313,10 @@ pub struct GraphRun {
     failure: Option<Failure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flow: Option<Box<Flow>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    split: Option<BudgetSplit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<(RunId, u64)>,
     #[serde(skip)]
     marks: Option<Marks>,
     #[serde(skip)]
@@ -450,6 +456,8 @@ impl GraphRun {
             reserve: None,
             registries: NodeTools::default(),
             scratch: Map::new(),
+            split: None,
+            parent: None,
         })
     }
 
@@ -695,6 +703,149 @@ impl GraphRun {
         self.steps
     }
 
+    /// Starts a new run from checkpoint `cp`: a new run id, steps and seq
+    /// at 0, call keys cleared, agent and subflow runs re-keyed, the parent link set
+    /// to `cp`. It waits for the same human if `cp` did, keeps a finished
+    /// status and is queued otherwise. The parent is never written.
+    /// Returns the fork, or `Checkpoint` for a bad checkpoint.
+    pub fn fork(cp: &Checkpoint) -> Result<GraphRun, GraphError> {
+        let mut run = GraphRun::from_checkpoint(cp)?;
+        run.rekey(RunId::new())?;
+        run.parent = Some((cp.run_id, cp.step));
+        assert_ne!(run.run_id, cp.run_id, "a fork has its own run id");
+        Ok(run)
+    }
+
+    fn rekey(&mut self, run_id: RunId) -> Result<(), GraphError> {
+        self.run_id = run_id;
+        self.steps = 0;
+        self.seq = 0;
+        self.parent = None;
+        self.marks = None;
+        self.reserve = None;
+        for (i, b) in self.branches.iter_mut().enumerate() {
+            b.call = None;
+            match &mut b.at {
+                At::Agent { run, .. } => {
+                    let old = run.run_id();
+                    **run = run.fork();
+                    assert_ne!(run.run_id(), old, "a forked agent run has its own run id");
+                }
+                At::Flow { run } => run.rekey(RunId::derived(run_id, &format!("fork:{i}")))?,
+                _ => {}
+            }
+        }
+        if !matches!(
+            self.status,
+            GraphStatus::WaitingHuman { .. } | GraphStatus::Done | GraphStatus::Failed { .. }
+        ) {
+            self.status = GraphStatus::Queued;
+        }
+        Ok(())
+    }
+
+    /// Returns the run and step this run was forked from.
+    /// It is `None` for a run that was started, not forked.
+    /// It never changes.
+    pub fn parent(&self) -> Option<(RunId, u64)> {
+        self.parent
+    }
+
+    /// Walks the parent links of run `run_id` through the latest checkpoint
+    /// of each run in `store`, nearest parent first, at most 64 hops. A
+    /// parent whose checkpoints are gone ends the walk. Returns the links,
+    /// or `Checkpoint` for an unknown run or a deeper chain.
+    pub async fn lineage(
+        store: &dyn CheckpointStore,
+        run_id: RunId,
+    ) -> Result<Vec<(RunId, u64)>, GraphError> {
+        let mut out: Vec<(RunId, u64)> = Vec::new();
+        let mut at = run_id;
+        for _ in 0..=MAX_LINEAGE {
+            let Some(cp) = store.latest(at).await? else {
+                if at == run_id {
+                    return Err(GraphError::Checkpoint(format!("no checkpoint for run {run_id}")));
+                }
+                return Ok(out);
+            };
+            let Some(link) = GraphRun::from_checkpoint(&cp)?.parent else {
+                return Ok(out);
+            };
+            if out.len() == MAX_LINEAGE {
+                return Err(GraphError::Checkpoint(format!(
+                    "the lineage of run {run_id} is deeper than {MAX_LINEAGE}"
+                )));
+            }
+            out.push(link);
+            at = link.0;
+        }
+        unreachable!("the loop returns within MAX_LINEAGE + 1 hops")
+    }
+
+    /// Writes `value` to state key `key` between steps, as node `as_node`
+    /// would (its reducer applies), as a durable change: steps + 1, status
+    /// queued. Refuses a finished run, an undeclared, untracked or mistyped
+    /// key, a key an approval node writes and a node that does not write
+    /// `key`. Returns `Resume` with the reason on a refusal.
+    pub fn update_state(
+        &mut self,
+        key: &str,
+        value: Value,
+        as_node: Option<&str>,
+    ) -> Result<(), GraphError> {
+        let bad = |m: String| Err(GraphError::Resume(m));
+        assert_ne!(self.status, GraphStatus::Running, "state is edited between steps");
+        if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
+            return bad("the run is finished".into());
+        }
+        if !self.workflow.state.contains_key(key) {
+            return bad(format!("`{key}` is not declared in [state]"));
+        }
+        if let Some(n) = self.workflow.nodes.iter().find(|n| {
+            matches!(n.kind, NodeKind::Human { ask: Ask::Approval, .. }) && n.writes.as_deref() == Some(key)
+        }) {
+            return bad(format!("`{key}` is written by approval node `{}`; only its human sets it", n.id));
+        }
+        if self.untracked(key) {
+            return bad(format!("`{key}` is untracked; an edit would not be durable"));
+        }
+        let mut value = value;
+        if let Some(id) = as_node {
+            let Some(node) = self.workflow.node(id) else {
+                return bad(format!("there is no node `{id}`"));
+            };
+            if node.writes.as_deref() != Some(key) {
+                return bad(format!("node `{id}` does not write `{key}`"));
+            }
+            if let Some(reducer) = self.reducer(key) {
+                value = reducer
+                    .reduce(self.state.get(key), &[(0, value)])
+                    .map_err(|e| GraphError::Resume(format!("reducing `{key}`: {e}")))?;
+            }
+        }
+        let errs = self.workflow.check_value(key, &value);
+        if !errs.is_empty() {
+            return bad(format!("value does not match `{key}`: {}", errs.join("; ")));
+        }
+        self.state.insert(key.to_string(), value);
+        self.queue();
+        Ok(())
+    }
+
+    /// Returns the last checkpoint of `history` (ascending steps of one
+    /// run) before the first one in which a branch sits at `node`, so a
+    /// fork of it runs `node` again. Returns `None` when no checkpoint has
+    /// a branch there or the first one does.
+    pub fn checkpoint_before<'a>(history: &'a [Checkpoint], node: &str) -> Option<&'a Checkpoint> {
+        let at = |cp: &Checkpoint| {
+            cp.state["branches"]
+                .as_array()
+                .is_some_and(|bs| bs.iter().any(|b| b["node"].as_str() == Some(node)))
+        };
+        let entered = history.iter().position(at)?;
+        entered.checked_sub(1).map(|i| &history[i])
+    }
+
     /// Returns the workflow snapshot the run started with.
     /// Edits to the workflow file never reach a running run.
     /// It never changes.
@@ -764,6 +915,11 @@ impl GraphRun {
             return Err(GraphError::Resume("the run is finished".into()));
         }
         self.limits = limits;
+        if self.even() {
+            self.top_up(true).map_err(GraphError::Resume)?;
+            self.queue();
+            return Ok(());
+        }
         let spent = self.usage().cost_usd_micros;
         let base = self.limits.clone();
         for b in &mut self.branches {
@@ -774,6 +930,7 @@ impl GraphRun {
                 run,
                 call_cap,
                 run_cap,
+                ..
             } = &mut b.at
             else {
                 unreachable!("budget pauses happen in agent branches");
@@ -782,6 +939,86 @@ impl GraphRun {
             run.resume(node_limits(&base, spent - own, *call_cap, *run_cap))?;
         }
         self.queue();
+        Ok(())
+    }
+
+    /// Sets how concurrent agent branches share the remaining run budget,
+    /// over the flow's `[budget] split`. `BudgetSplit::Shared` restores the
+    /// 0.1 split, also on a v1 workflow run. Returns the run.
+    pub fn with_budget_split(mut self, split: BudgetSplit) -> GraphRun {
+        self.split = Some(split);
+        self
+    }
+
+    fn even(&self) -> bool {
+        let split = self.split.or(self.flow.as_ref().map(|f| f.budget_split()));
+        self.limits.run.is_some() && split.unwrap_or_default() == BudgetSplit::Even
+    }
+
+    fn unspent(&self, skip_paused: bool) -> u64 {
+        self.branches
+            .iter()
+            .map(|b| match &b.at {
+                At::Agent { run, share: Some(s), .. } if !(skip_paused && b.budget_paused().is_some()) => {
+                    s.saturating_sub(run.usage().cost_usd_micros)
+                }
+                At::Flow { run } => run.limits.run.map_or(0, |s| s.saturating_sub(run.usage().cost_usd_micros)),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn free(&self, skip_paused: bool) -> u64 {
+        let cap = self.limits.run.expect("an even split has a run cap");
+        cap.saturating_sub(self.usage().cost_usd_micros)
+            .saturating_sub(self.unspent(skip_paused))
+    }
+
+    fn share(&self, entering: &mut usize) -> Option<u64> {
+        if !self.even() {
+            return None;
+        }
+        assert!(*entering > 0, "every spending branch that enters was counted");
+        let n = u64::try_from(*entering).expect("branch count fits in u64");
+        *entering -= 1;
+        Some(self.free(false) / n)
+    }
+
+    fn spends(&self, node: &str) -> bool {
+        matches!(self.node(node).kind, NodeKind::Agent { .. })
+            || matches!(self.flow_kind(node), Some(FlowKind::Flow { .. }))
+    }
+
+    fn top_up(&mut self, raised: bool) -> Result<(), String> {
+        let paused: Vec<usize> = (0..self.branches.len())
+            .filter(|&i| match self.branches[i].budget_paused() {
+                Some(PauseReason::Budget { limit }) => raised || limit == "run",
+                _ => false,
+            })
+            .collect();
+        if paused.is_empty() {
+            return Ok(());
+        }
+        let free = self.free(true);
+        let each = free / u64::try_from(paused.len()).expect("branch count fits in u64");
+        let base = self.limits.clone();
+        let mut granted = 0u64;
+        for i in paused {
+            let At::Agent { run, call_cap, run_cap, share } = &mut self.branches[i].at else {
+                unreachable!("budget pauses happen in agent branches");
+            };
+            let grant = run.usage().cost_usd_micros.saturating_add(each);
+            let grant = run_cap.map_or(grant, |c| c.min(grant));
+            let old = share.unwrap_or(0);
+            granted = granted.saturating_add(grant.saturating_sub(run.usage().cost_usd_micros));
+            *share = Some(grant);
+            if raised || grant > old {
+                let mut limits = node_limits(&base, 0, *call_cap, *run_cap);
+                limits.run = Some(grant);
+                run.resume(limits).map_err(|e| e.to_string())?;
+            }
+        }
+        assert!(granted <= free, "paused branches never get more than the free budget");
         Ok(())
     }
 
@@ -1066,6 +1303,9 @@ impl GraphRun {
                             Err(e) => return self.fail_after(reduced, format!("node `{}`: {e}", node.id)),
                         },
                     };
+                    if let Err(e) = self.write_sets(&node, i, &output, &mut reduced) {
+                        return GraphOutcome::Failed(e);
+                    }
                     if let Err(e) = self.write(&node, i, output, &mut reduced) {
                         return GraphOutcome::Failed(e);
                     }
@@ -1485,6 +1725,7 @@ impl GraphRun {
         let state = merged.as_ref().unwrap_or(&self.state);
         let regs = &self.registries.0;
         let untracked: &[String] = self.flow.as_ref().map_or(&[], |f| f.untracked());
+        let flow = self.flow.as_deref();
         let futures = self
             .branches
             .iter_mut()
@@ -1525,7 +1766,8 @@ impl GraphRun {
                         }
                         _ => unreachable!("only agent and tool branches work"),
                     };
-                    let secret = node.writes.as_ref().is_some_and(|w| untracked.contains(w));
+                    let secret = node.writes.as_ref().is_some_and(|w| untracked.contains(w))
+                        || node_sets(flow, &node.id).values().any(|k| untracked.contains(k));
                     let (Some(store), Some(finished), false) = (store, finished, secret) else {
                         return (work, None);
                     };
@@ -1556,6 +1798,36 @@ impl GraphRun {
         let Some(key) = &node.writes else {
             return Ok(());
         };
+        self.write_key(node, key, branch, value, reduced)
+    }
+
+    fn write_sets(
+        &mut self,
+        node: &Node,
+        branch: usize,
+        output: &Value,
+        reduced: &mut Vec<Reduced>,
+    ) -> Result<(), String> {
+        let sets = node_sets(self.flow.as_deref(), &node.id);
+        assert!(
+            sets.is_empty() || self.branches[branch].item.is_none(),
+            "map bodies never set state keys, checked at parse"
+        );
+        for (field, key) in sets {
+            let value = output.get(&field).cloned().unwrap_or(Value::Null);
+            self.write_key(node, &key, branch, value, reduced)?;
+        }
+        Ok(())
+    }
+
+    fn write_key(
+        &mut self,
+        node: &Node,
+        key: &str,
+        branch: usize,
+        value: Value,
+        reduced: &mut Vec<Reduced>,
+    ) -> Result<(), String> {
         if self.branches[branch].item.is_some() {
             let errs = self.workflow.check_value(key, &value);
             if !errs.is_empty() {
@@ -1571,7 +1843,7 @@ impl GraphRun {
         }
         if self.reducer(key).is_some() {
             reduced.push(Reduced {
-                key: key.clone(),
+                key: key.to_string(),
                 branch,
                 node: node.id.clone(),
                 value,
@@ -1587,9 +1859,9 @@ impl GraphRun {
             ));
         }
         if self.untracked(key) {
-            self.scratch.insert(key.clone(), value);
+            self.scratch.insert(key.to_string(), value);
         } else {
-            self.state.insert(key.clone(), value);
+            self.state.insert(key.to_string(), value);
         }
         Ok(())
     }
@@ -1678,6 +1950,9 @@ impl GraphRun {
             }
             self.branches = next;
             let window = self.openings();
+            let mut entering = (0..self.branches.len())
+                .filter(|&i| window[i] && self.branches[i].at == At::Enter && self.spends(&self.branches[i].node))
+                .count();
             for i in 0..self.branches.len() {
                 if self.branches[i].at != At::Enter {
                     continue;
@@ -1698,7 +1973,13 @@ impl GraphRun {
                     let mut input = reads(&self.workflow, &self.state, &node.reads, item.as_deref()).map_err(fail)?;
                     input.retain(|_, v| !v.is_null());
                     let child = io.flow(&name).await.map_err(|e| fail(e.to_string()))?;
-                    let limits = node_limits(&self.limits, self.usage().cost_usd_micros, None, None);
+                    let limits = match self.share(&mut entering) {
+                        Some(s) => Limits {
+                            run: Some(s),
+                            ..self.limits.clone()
+                        },
+                        None => node_limits(&self.limits, self.usage().cost_usd_micros, None, None),
+                    };
                     let mut child = GraphRun::start_child(child, input, limits, io).await.map_err(|e| fail(e.to_string()))?;
                     child.run_id = RunId::derived(self.run_id, &format!("{}:{}:{i}", node.id, self.steps));
                     self.branches[i].at = At::Flow { run: Box::new(child) };
@@ -1755,12 +2036,18 @@ impl GraphRun {
                         };
                         let (call_cap, run_cap) =
                             (p.budget.call_usd_micros, p.budget.run_usd_micros);
-                        let limits = node_limits(
+                        let share = self
+                            .share(&mut entering)
+                            .map(|s| run_cap.map_or(s, |c| c.min(s)));
+                        let mut limits = node_limits(
                             &self.limits,
                             self.usage().cost_usd_micros,
                             call_cap,
                             run_cap,
                         );
+                        if share.is_some() {
+                            limits.run = share;
+                        }
                         let input = vec![agent_input(prompt.as_deref(), data)];
                         let run = match &tools {
                             None => AgentRun::new(&p, input, limits, io.agent()).await,
@@ -1777,6 +2064,7 @@ impl GraphRun {
                             run: Box::new(run),
                             call_cap,
                             run_cap,
+                            share,
                         };
                     }
                 }
@@ -1788,6 +2076,9 @@ impl GraphRun {
                 changed = self.close_any();
             }
             if !changed {
+                if self.even() {
+                    self.top_up(false)?;
+                }
                 return Ok(false);
             }
         }
@@ -1844,8 +2135,15 @@ fn apply_finished(b: &mut Branch, finished: Finished) -> Work {
     }
 }
 
+fn node_sets(flow: Option<&Flow>, id: &str) -> BTreeMap<String, String> {
+    match flow.and_then(|f| f.kind(id)) {
+        Some(FlowKind::Agent { sets, .. }) => sets.clone(),
+        _ => BTreeMap::new(),
+    }
+}
+
 fn node_persona(flow: Option<&Flow>, io: &dyn GraphIo, id: &str, mut p: Persona) -> Result<Persona, String> {
-    let Some(FlowKind::Agent { goto, model, .. }) = flow.and_then(|f| f.kind(id)) else {
+    let Some(FlowKind::Agent { goto, model, fields, .. }) = flow.and_then(|f| f.kind(id)) else {
         return Ok(p);
     };
     if let Some(model) = model.as_ref().filter(|m| **m != p.model) {
@@ -1854,11 +2152,16 @@ fn node_persona(flow: Option<&Flow>, io: &dyn GraphIo, id: &str, mut p: Persona)
         })?;
         p.model = model.clone();
     }
-    if !goto.is_empty() {
-        let mut fields = toml::Table::new();
-        fields.insert("next".into(), toml::Value::String(format!("enum({})", goto.join(", "))));
-        fields.insert("reason".into(), toml::Value::String("string".into()));
-        p.output = Some(compile_output(&fields).map_err(|e| format!("goto targets: {e}"))?);
+    if !goto.is_empty() || !fields.is_empty() {
+        let mut table: toml::Table = fields
+            .iter()
+            .map(|(k, v)| (k.clone(), toml::Value::String(v.clone())))
+            .collect();
+        if !goto.is_empty() {
+            table.insert("next".into(), toml::Value::String(format!("enum({})", goto.join(", "))));
+            table.insert("reason".into(), toml::Value::String("string".into()));
+        }
+        p.output = Some(compile_output(&table).map_err(|e| format!("reply fields: {e}"))?);
     }
     Ok(p)
 }
@@ -1930,6 +2233,8 @@ fn run_plain(kind: &FlowKind) -> FlowKind {
             delegates: Vec::new(),
             model: None,
             defer: false,
+            fields: BTreeMap::new(),
+            sets: BTreeMap::new(),
         },
         FlowKind::Tool { tool, .. } => FlowKind::Tool { tool, defer: false },
         FlowKind::Join { .. } => FlowKind::Join { mode: JoinMode::All },
@@ -2015,15 +2320,14 @@ fn untracked_misuse(flow: &Flow) -> Option<String> {
 }
 
 fn unsupported(flow: &Flow) -> Option<String> {
-    if flow.budget_split() == BudgetSplit::Shared {
-        return Some("a shared budget split".into());
-    }
     let node = flow.workflow().nodes.iter().find(|n| match flow.kind(&n.id) {
         Some(FlowKind::Map { .. } | FlowKind::Switch { .. } | FlowKind::Flow { .. }) => false,
         kind => kind.map(run_plain) != Some(FlowKind::from_v1(&n.kind)),
     })?;
     Some(format!("node `{}` of a 0.5 kind or option", node.id))
 }
+
+const MAX_LINEAGE: usize = 64;
 
 fn node_limits(
     base: &Limits,

@@ -574,21 +574,6 @@ async fn map_item_that_breaks_the_item_type_fails_the_run() {
     assert!(gates.calls("w/a").is_empty(), "no item runs");
 }
 
-#[tokio::test]
-async fn shared_budget_split_is_refused_until_it_is_run() {
-    let gates = GatedTool::new();
-    let io = map_io(&gates);
-    let text = "name = 'b'\nstart = 't'\n[budget]\nsplit = 'shared'\n[state]\ny = 'string'\n[[nodes]]\nid = 't'\nkind = 'tool'\ntool = 'w'\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 't'\nto = 'e'\n";
-    let flow = Flow::parse("test/b.toml", text).unwrap();
-    let err = GraphRun::start(flow, Map::new(), Limits::default(), &io)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&err, troupekit_graph::GraphError::Setup(m) if m.contains("shared budget split")),
-        "{err}"
-    );
-}
-
 fn chain_io(gates: &GatedTool, names: &[&str]) -> SimpleGraphIo {
     let mut tools = ToolRegistry::new();
     for name in names {
@@ -973,4 +958,245 @@ async fn deferred_agent_with_a_model_override_runs_last_on_its_model() {
     assert_eq!(state["w"], json!("other"));
     assert_eq!(state["a"], json!("a!"));
     assert_eq!((base.calls(), other.calls()), (0, 1));
+}
+
+mod split {
+    use serde_json::{json, Map};
+    use std::sync::{Arc, Mutex};
+    use troupekit_agent::budget::estimate;
+    use troupekit_agent::{Limits, MemorySource, PersonaLoader, SimpleIo};
+    use troupekit_core::event::PauseReason;
+    use troupekit_graph::testing::{text_reply, FnModel, GatedTool};
+    use troupekit_graph::{BudgetSplit, Flow, GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
+    use troupekit_providers::Price;
+    use troupekit_tools::{ToolOutput, ToolRegistry};
+
+    const PRICE: Price = Price {
+        input_usd_micros_per_mtok: 1_000_000,
+        output_usd_micros_per_mtok: 2_000_000,
+        verified: true,
+        long_context: None,
+        search_usd_micros: 0,
+    };
+
+    const WRITER: &str = "name = 'writer'\ndisplay_name = 'W'\nrole = 'Writes.'\ngoal = 'Done.'\ninstructions = 'Do it.'\nmodel = 'fake/m'\n";
+
+    struct Rig {
+        io: SimpleGraphIo,
+        seen: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl Rig {
+        fn calls(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+
+        fn estimates(&self) -> Vec<u64> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    fn rig() -> Rig {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let model = FnModel::new("fake/m", move |req| {
+            let worst = estimate(req, &PRICE);
+            log.lock().unwrap().push(worst);
+            let text = if req.messages.len() == 1 { "oops" } else { "7" };
+            text_reply(text, worst - 10)
+        });
+        let gates = GatedTool::new();
+        gates.open("s");
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(gates.tool("s", |_| ToolOutput::text("seeded")))
+            .unwrap();
+        let agent = SimpleIo::new(tools).with_model("fake/m", Arc::new(model), PRICE);
+        let personas = PersonaLoader::new(vec![Arc::new(MemorySource::new(
+            "test",
+            [("writer.toml".to_string(), WRITER.to_string())],
+        ))]);
+        Rig {
+            io: SimpleGraphIo::new(Arc::new(agent), personas),
+            seen,
+        }
+    }
+
+    fn fan(agents: &[(&str, &str)], split: &str) -> String {
+        let mut text = format!("name = 'fan'\nstart = 's'\n{split}[state]\nseed = 'string'\n");
+        for (id, ty) in agents {
+            text.push_str(&format!("{id} = '{ty}'\n"));
+        }
+        text.push_str("[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 's'\nwrites = 'seed'\n");
+        for (id, _) in agents {
+            text.push_str(&format!(
+                "[[nodes]]\nid = '{id}'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Go.'\nwrites = '{id}'\n"
+            ));
+        }
+        text.push_str("[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n");
+        for (id, _) in agents {
+            text.push_str(&format!(
+                "[[edges]]\nfrom = 's'\nto = '{id}'\n[[edges]]\nfrom = '{id}'\nto = 'j'\n"
+            ));
+        }
+        text.push_str("[[edges]]\nfrom = 'j'\nto = 'e'\n");
+        text
+    }
+
+    const MAP: &str = "name = 'mapped'\nstart = 'm'\n[state]\nxs = 'list'\nx = 'string'\ny = 'string'\nout = 'list'\n[[nodes]]\nid = 'm'\nkind = 'map'\nover = 'xs'\nitem = 'x'\nbody = 'w'\nwrites = 'out'\n[[nodes]]\nid = 'w'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Go.'\nreads = ['x']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'm'\nto = 'e'\n";
+
+    fn items() -> Map<String, serde_json::Value> {
+        let mut m = Map::new();
+        m.insert("xs".into(), json!(["a", "b", "c"]));
+        m
+    }
+
+    fn cap(run: u64) -> Limits {
+        Limits {
+            run: Some(run),
+            ..Limits::default()
+        }
+    }
+
+    async fn drive(run: &mut GraphRun, rig: &Rig) -> GraphOutcome {
+        for _ in 0..40 {
+            let out = run.step(&rig.io).await;
+            if out != GraphOutcome::Continue {
+                return out;
+            }
+        }
+        panic!("run did not settle in 40 steps");
+    }
+
+    async fn run_flow(
+        text: &str,
+        input: Map<String, serde_json::Value>,
+        limits: Limits,
+    ) -> (Rig, GraphRun, GraphOutcome) {
+        let rig = rig();
+        let flow = Flow::parse("test/fan.toml", text).unwrap();
+        let mut run = GraphRun::start(flow, input, limits, &rig.io).await.unwrap();
+        let out = drive(&mut run, &rig).await;
+        (rig, run, out)
+    }
+
+    fn waiting_on_run(out: &GraphOutcome) -> bool {
+        *out == GraphOutcome::Waiting(PauseReason::Budget {
+            limit: "run".into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn parallel_branches_never_spend_above_run_budget() {
+        let text = fan(&[("a", "string"), ("b", "string"), ("c", "string")], "");
+        let (probe, _, out) = run_flow(&text, Map::new(), Limits::default()).await;
+        assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
+        let worst = probe.estimates()[0];
+        assert!(
+            probe.estimates().iter().all(|e| *e == worst),
+            "the branches send the same request"
+        );
+        let budget = worst * 5 / 2;
+        let (rig, run, out) = run_flow(&text, Map::new(), cap(budget)).await;
+        assert!(
+            run.usage().cost_usd_micros <= budget,
+            "spent {} of {budget}",
+            run.usage().cost_usd_micros
+        );
+        assert!(
+            waiting_on_run(&out),
+            "a share below one call waits: {out:?}"
+        );
+        assert_eq!(
+            rig.calls(),
+            0,
+            "no branch called on a share it cannot afford"
+        );
+        let (rig, run, out) = run_flow(&text, Map::new(), cap(worst * 3)).await;
+        assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
+        assert_eq!(rig.calls(), 3);
+        assert!(run.usage().cost_usd_micros <= worst * 3);
+    }
+
+    #[tokio::test]
+    async fn map_items_never_spend_above_run_budget() {
+        let (probe, _, out) = run_flow(MAP, items(), Limits::default()).await;
+        assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
+        let worst = *probe.estimates().iter().max().unwrap();
+        let budget = worst * 5 / 2;
+        let (rig, run, out) = run_flow(MAP, items(), cap(budget)).await;
+        assert!(
+            run.usage().cost_usd_micros <= budget,
+            "spent {} of {budget}",
+            run.usage().cost_usd_micros
+        );
+        assert!(waiting_on_run(&out), "{out:?}");
+        assert_eq!(
+            rig.calls(),
+            0,
+            "three items share the budget, none runs alone on all of it"
+        );
+    }
+
+    #[tokio::test]
+    async fn freed_reservation_tops_up_a_paused_sibling() {
+        let text = fan(&[("a", "string"), ("b", "int")], "");
+        let (probe, _, out) = run_flow(&text, Map::new(), Limits::default()).await;
+        assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
+        let seen = probe.estimates();
+        assert_eq!(
+            seen.len(),
+            3,
+            "a answers once, b once and once more after the repair"
+        );
+        let (first, repair) = (*seen.iter().min().unwrap(), *seen.iter().max().unwrap());
+        assert!(repair > first, "the repair request is longer");
+        let budget = 2 * first + repair + repair / 4;
+        assert!(
+            budget / 2 < first + repair,
+            "b's own share cannot pay the repair"
+        );
+        let (rig, run, out) = run_flow(&text, Map::new(), cap(budget)).await;
+        let GraphOutcome::Done(state) = out else {
+            panic!("a's unused share lets b finish: {out:?}");
+        };
+        assert_eq!(state["b"], json!(7));
+        assert_eq!(rig.calls(), 3);
+        assert!(
+            run.usage().cost_usd_micros <= budget,
+            "spent {} of {budget}",
+            run.usage().cost_usd_micros
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_split_keeps_v1_limits() {
+        let agents = [("a", "string"), ("b", "string"), ("c", "string")];
+        let text = fan(&agents, "[budget]\nsplit = 'shared'\n");
+        assert_eq!(
+            Flow::parse("test/fan.toml", &text).unwrap().budget_split(),
+            BudgetSplit::Shared
+        );
+        let (probe, _, _) = run_flow(&fan(&agents, ""), Map::new(), Limits::default()).await;
+        let worst = probe.estimates()[0];
+        let (shared, _, out) = run_flow(&text, Map::new(), cap(worst * 5 / 2)).await;
+        assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
+        assert_eq!(
+            shared.calls(),
+            3,
+            "every branch sees the whole remainder, as in 0.1"
+        );
+        let wf = Workflow::parse("test/fan.toml", &fan(&agents, "")).unwrap();
+        let rig = rig();
+        let mut run = GraphRun::new(wf, Map::new(), cap(worst * 5 / 2), &rig.io)
+            .await
+            .unwrap()
+            .with_budget_split(BudgetSplit::Shared);
+        assert!(matches!(drive(&mut run, &rig).await, GraphOutcome::Done(_)));
+        assert_eq!(
+            rig.calls(),
+            3,
+            "with_budget_split restores the 0.1 split on a v1 run"
+        );
+    }
 }

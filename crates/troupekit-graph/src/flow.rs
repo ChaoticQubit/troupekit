@@ -193,6 +193,10 @@ pub enum FlowKind {
         delegates: Vec<String>,
         model: Option<String>,
         defer: bool,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        fields: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        sets: BTreeMap<String, String>,
     },
     #[non_exhaustive]
     Tool {
@@ -246,6 +250,8 @@ impl FlowKind {
                 delegates: Vec::new(),
                 model: None,
                 defer: false,
+                fields: BTreeMap::new(),
+                sets: BTreeMap::new(),
             },
             NodeKind::Tool { tool } => FlowKind::Tool {
                 tool: tool.clone(),
