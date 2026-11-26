@@ -208,3 +208,44 @@ async fn resume_keeps_retries_counted_by_resume_for() {
     );
     assert_eq!(model.calls(), 2);
 }
+
+#[tokio::test]
+async fn exhausted_checkpoint_is_refused_before_another_step() {
+    let failures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = failures.clone();
+    let model = Arc::new(FnModel::new("fake/m", move |_req| {
+        if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+            return Err(
+                ProviderError::new(ProviderErrorKind::RateLimited, "slow down").with_retry_after(1),
+            );
+        }
+        text_reply("late", 10)
+    }));
+    let built = Agent::new("limited")
+        .instructions("Answer.")
+        .model("fake/m")
+        .model_client(model.clone())
+        .retries(1)
+        .checkpoints(Storage::custom(Arc::new(InMemCheckpoints::default())))
+        .build()
+        .await
+        .unwrap();
+    let run_id = built.start("hello").await.unwrap();
+    let err = built.resume_for(run_id, LONG).await.unwrap_err();
+    assert!(
+        matches!(err, KitError::Retries { attempts: 1, .. }),
+        "{err:?}"
+    );
+    assert_eq!(model.calls(), 2);
+    let err = built.resume_for(run_id, LONG).await.unwrap_err();
+    assert!(
+        matches!(err, KitError::Retries { attempts: 1, .. }),
+        "{err:?}"
+    );
+    let err = built.resume(run_id).await.unwrap_err();
+    assert!(
+        matches!(err, KitError::Retries { attempts: 1, .. }),
+        "{err:?}"
+    );
+    assert_eq!(model.calls(), 2);
+}

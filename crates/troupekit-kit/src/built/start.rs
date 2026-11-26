@@ -63,6 +63,7 @@ impl BuiltAgent {
             RunState::Paused { reason, .. } => return Err(KitError::Paused { run_id, reason }),
             _ => {}
         }
+        self.refuse_exhausted(&run)?;
         let io: &dyn AgentIo = &self.inner.io;
         let mut steps = 0u32;
         while steps < MAX_STEPS_PER_WINDOW && !spent(Duration::ZERO) {

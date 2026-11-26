@@ -236,6 +236,22 @@ impl BuiltAgent {
         &self.inner.laws
     }
 
+    /// Refuses a restored run whose saved retry count is past this agent's
+    /// cap, before any step: an earlier call already ended it with
+    /// `Retries`. A count equal to the cap may still take its last retry.
+    fn refuse_exhausted(&self, run: &AgentRun) -> Result<(), KitError> {
+        let retries = run.retries();
+        if retries <= self.inner.retries {
+            return Ok(());
+        }
+        assert!(retries > 0);
+        Err(KitError::Retries {
+            run_id: run.run_id(),
+            attempts: retries - 1,
+            last_error: "retries were used up by an earlier call".into(),
+        })
+    }
+
     async fn finish(
         &self,
         run: &mut AgentRun,
@@ -258,6 +274,7 @@ impl BuiltAgent {
             }
             _ => {}
         }
+        self.refuse_exhausted(run)?;
         loop {
             match drive(run, io, store).await? {
                 StepOutcome::Done(output) => return Ok(outcome(run, output)),
