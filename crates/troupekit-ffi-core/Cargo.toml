@@ -34,7 +34,7 @@ knowledge = ["troupekit-kit/knowledge", "dep:troupekit-context"]
 unused_dependencies = "allow"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 tempfile = "3"
 
 [[test]]
