@@ -20,7 +20,7 @@ use troupekit_core::event::Usage;
 use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::store::CheckpointStore;
-use troupekit_graph::{GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
+use troupekit_graph::{GraphIo, GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSpec};
 
 mod run_api;
@@ -570,7 +570,7 @@ impl BuiltGraph {
             Some(store) => store.clone(),
             None => Arc::new(InMemCheckpoints::default()),
         };
-        self.finish(&mut run, store.as_ref()).await
+        self.finish(&self.inner.io, &mut run, store.as_ref()).await
     }
 
     /// Continues graph run `run_id` from its latest checkpoint and returns
@@ -599,7 +599,10 @@ impl BuiltGraph {
                 ),
             ));
         }
-        Ok(self.finish(&mut run, store.as_ref()).await?.output)
+        Ok(self
+            .finish(&self.inner.io, &mut run, store.as_ref())
+            .await?
+            .output)
     }
 
     /// Returns the validated workflow this graph runs.
@@ -618,6 +621,7 @@ impl BuiltGraph {
 
     async fn finish(
         &self,
+        io: &dyn GraphIo,
         run: &mut GraphRun,
         store: &dyn CheckpointStore,
     ) -> Result<GraphReport, KitError> {
@@ -629,14 +633,14 @@ impl BuiltGraph {
             2 * u64::from(inner.workflow.max_steps) + u64::from(inner.workflow.max_retries) + 8;
         for _ in 0..cap {
             let before = run.steps();
-            let outcome = run.step(&inner.io).await;
+            let outcome = run.step(io).await;
             if run.steps() != before {
                 store.save(run.checkpoint()).await?;
             }
             match outcome {
                 GraphOutcome::Continue => {}
                 GraphOutcome::RetryAt { at_ms, .. } => {
-                    wait_until(inner.io.agent.clock(), at_ms, RETRY_WAIT_CHUNK_MS).await;
+                    wait_until(io.agent().clock(), at_ms, RETRY_WAIT_CHUNK_MS).await;
                 }
                 GraphOutcome::Waiting(reason) => {
                     return Err(KitError::Paused {

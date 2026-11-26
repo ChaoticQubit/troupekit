@@ -17,6 +17,7 @@ mod start;
 mod stream;
 
 pub use start::{Progress, MAX_STEPS_PER_WINDOW};
+pub(crate) use stream::{Queue, StreamIo};
 pub use stream::{RunStream, StreamSettings};
 
 const BASE_RETRY_MS: u64 = 500;

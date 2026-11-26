@@ -120,7 +120,7 @@ fn chunky(deltas: usize, pause: Duration) -> Agent {
         .model_client(Arc::new(Chunky { deltas, pause }))
 }
 
-async fn drain(stream: &mut troupekit::RunStream) -> Vec<troupekit_core::event::Event> {
+async fn drain<T>(stream: &mut troupekit::RunStream<T>) -> Vec<troupekit_core::event::Event> {
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -269,6 +269,49 @@ async fn stream_settings_out_of_range_refused() {
 #[tokio::test]
 async fn agent_stream_builds_then_streams() {
     let mut stream = chunky(2, Duration::ZERO).stream("hi").await.unwrap();
+    let events = drain(&mut stream).await;
+    assert!(matches!(
+        events.last().unwrap().body,
+        EventBody::RunFinished { .. }
+    ));
+}
+
+fn pipeline() -> Graph {
+    Graph::new("pipeline")
+        .agent("draft", drafter())
+        .step("upper", upper_draft)
+}
+
+#[tokio::test]
+async fn graph_stream_yields_node_events_then_finished() {
+    let built = pipeline().build().await.unwrap();
+    let ran = built.run("hi").await.unwrap();
+    let mut stream = built.stream("hi").await.unwrap();
+    let run_id = stream.run_id();
+    let events = drain(&mut stream).await;
+    let first = events.first().unwrap();
+    assert_eq!(first.run_id, run_id);
+    assert!(
+        matches!(&first.body, EventBody::RunStarted { workflow } if workflow == "pipeline"),
+        "{events:?}"
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e.body, EventBody::TextDelta { .. })));
+    let last = events.last().unwrap();
+    assert_eq!(last.run_id, run_id);
+    assert!(
+        matches!(last.body, EventBody::RunFinished { .. }),
+        "{events:?}"
+    );
+    let report = stream.finish().await.unwrap();
+    assert_eq!(report.output(), &ran);
+    assert_eq!(report.run_id(), run_id);
+}
+
+#[tokio::test]
+async fn graph_stream_builds_then_streams() {
+    let mut stream = pipeline().stream("hi").await.unwrap();
     let events = drain(&mut stream).await;
     assert!(matches!(
         events.last().unwrap().body,

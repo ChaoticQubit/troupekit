@@ -180,7 +180,7 @@ impl BuiltAgent {
         let messages = self.messages(input.into()).await?;
         let queue = Arc::new(Queue::new(settings.capacity));
         let io = StreamIo {
-            agent: self.clone(),
+            base: self.clone(),
             queue: queue.clone(),
         };
         let mut run = AgentRun::new(&inner.persona, messages, inner.limits.clone(), &io).await?;
@@ -261,7 +261,7 @@ impl Queue {
         }
     }
 
-    fn dropped(&self) -> u64 {
+    pub(crate) fn dropped(&self) -> u64 {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -286,34 +286,53 @@ impl EventSink for Queue {
     }
 }
 
-struct StreamIo {
-    agent: BuiltAgent,
-    queue: Arc<Queue>,
+pub(crate) trait BaseIo: Send + Sync + 'static {
+    fn io(&self) -> &dyn AgentIo;
 }
 
-impl EventSink for StreamIo {
+impl BaseIo for BuiltAgent {
+    fn io(&self) -> &dyn AgentIo {
+        &self.inner.io
+    }
+}
+
+impl BaseIo for Arc<dyn AgentIo> {
+    fn io(&self) -> &dyn AgentIo {
+        self.as_ref()
+    }
+}
+
+/// The io of one streamed run: everything from `base`, except that each
+/// event goes to the stream's queue and then to `base`'s own sink, so a
+/// user sink set with `.events(..)` still sees every event.
+pub(crate) struct StreamIo<B> {
+    pub(crate) base: B,
+    pub(crate) queue: Arc<Queue>,
+}
+
+impl<B: BaseIo> EventSink for StreamIo<B> {
     fn emit(&self, event: Event) {
         self.queue.push(event.clone());
-        self.agent.inner.io.events.emit(event);
+        self.base.io().events().emit(event);
     }
 }
 
 #[async_trait]
-impl AgentIo for StreamIo {
+impl<B: BaseIo> AgentIo for StreamIo<B> {
     async fn model(&self, selector: &str) -> Result<ModelHandle, AgentError> {
-        self.agent.inner.io.model(selector).await
+        self.base.io().model(selector).await
     }
 
     fn tools(&self) -> &ToolRegistry {
-        self.agent.inner.io.tools()
+        self.base.io().tools()
     }
 
     fn evals(&self) -> &EvalRegistry {
-        self.agent.inner.io.evals()
+        self.base.io().evals()
     }
 
     fn ledger(&self) -> &dyn UsageLedger {
-        self.agent.inner.io.ledger()
+        self.base.io().ledger()
     }
 
     fn events(&self) -> &dyn EventSink {
@@ -321,6 +340,6 @@ impl AgentIo for StreamIo {
     }
 
     fn clock(&self) -> &dyn Clock {
-        self.agent.inner.io.clock()
+        self.base.io().clock()
     }
 }
