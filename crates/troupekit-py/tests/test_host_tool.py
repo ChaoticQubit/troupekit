@@ -8,6 +8,7 @@ import pytest
 import troupekit
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import pending
 import stub_server
 
 ANSWER = ["Done"]
@@ -16,9 +17,9 @@ TOOL_NAME = "echo"
 TOOL_ARGS = {"text": "hi"}
 
 pytestmark = pytest.mark.xfail(
-    not hasattr(troupekit, "AgentBuilder"),
-    reason="B5: troupekit-py does not expose AgentBuilder and HostTool support yet",
-    raises=AttributeError,
+    pending.SKELETON,
+    reason=pending.SKELETON_REASON,
+    raises=troupekit.TroupekitError,
     strict=True,
 )
 

@@ -6,6 +6,7 @@ import pytest
 import troupekit
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import pending
 import stub_server
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "agent.toml"
@@ -13,9 +14,9 @@ CHUNKS = ["Hello", " from", " the stub"]
 EVENTS_MAX = 10_000
 
 pytestmark = pytest.mark.xfail(
-    not hasattr(troupekit, "AgentBuilder"),
-    reason="B5: troupekit-py does not expose AgentBuilder, AgentHandle and RunStream yet",
-    raises=AttributeError,
+    pending.SKELETON,
+    reason=pending.SKELETON_REASON,
+    raises=troupekit.TroupekitError,
     strict=True,
 )
 

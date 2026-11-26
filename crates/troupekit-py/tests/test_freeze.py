@@ -1,7 +1,5 @@
 import pathlib
 
-import pytest
-
 import troupekit
 from troupekit import _troupekit
 
@@ -44,12 +42,6 @@ def exported(module, name):
     return hasattr(target, method)
 
 
-@pytest.mark.xfail(
-    not hasattr(troupekit, "AgentBuilder"),
-    reason="B5: troupekit-py exports only version() until the PyO3 adapter lands",
-    raises=AssertionError,
-    strict=True,
-)
 def test_freeze_names_match_adapters():
     """Every freeze name is exported by the native module and the package.
 
