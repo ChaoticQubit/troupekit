@@ -107,12 +107,13 @@ class AgentHandle:
         """
         return await asyncio.to_thread(self._inner.resume_for, run_id, budget_ms)
 
-    def stream(self, input):
-        """Starts a streamed run.
+    async def stream(self, input):
+        """Starts a streamed run once its run id is known.
 
-        Input: the user text. Output: an async `RunStream`.
+        Input: the user text. Output: an async `RunStream`; a setup error
+        raises `TroupekitError` here, as `start` does.
         """
-        return RunStream(self._inner.stream(input))
+        return RunStream(await asyncio.to_thread(self._inner.stream, input))
 
 
 class GraphBuilder:
@@ -204,12 +205,13 @@ class GraphHandle:
         """
         return await asyncio.to_thread(self._inner.resume_for, run_id, budget_ms)
 
-    def stream(self, input):
-        """Starts a streamed run.
+    async def stream(self, input):
+        """Starts a streamed graph run once its run id is known.
 
-        Input: the input text. Output: an async `RunStream`.
+        Input: the input text. Output: an async `RunStream`; a setup error
+        raises `TroupekitError` here, as `start` does.
         """
-        return RunStream(self._inner.stream(input))
+        return RunStream(await asyncio.to_thread(self._inner.stream, input))
 
 
 class RunStream:

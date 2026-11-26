@@ -183,7 +183,7 @@ impl AgentHandle {
         wait(py, self.0.resume_for(run_id, budget_ms)).map(Into::into)
     }
 
-    fn stream(&self, input: String) -> RunStream {
-        RunStream(self.0.stream(input))
+    fn stream(&self, py: Python<'_>, input: String) -> PyResult<RunStream> {
+        wait(py, self.0.stream(input)).map(RunStream)
     }
 }

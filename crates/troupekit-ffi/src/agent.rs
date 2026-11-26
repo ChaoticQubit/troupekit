@@ -185,7 +185,7 @@ impl AgentHandle {
         Ok(self.0.resume_for(run_id, budget_ms).await?.into())
     }
 
-    pub fn stream(&self, input: String) -> Arc<RunStream> {
-        Arc::new(RunStream(self.0.stream(input)))
+    pub async fn stream(&self, input: String) -> Result<Arc<RunStream>, TroupekitError> {
+        Ok(Arc::new(RunStream(self.0.stream(input).await?)))
     }
 }
