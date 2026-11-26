@@ -36,6 +36,16 @@ pub trait GraphIo: Send + Sync {
         None
     }
 
+    /// Decides whether agent node `node` may run `persona` on model
+    /// `selector`, a flow's per-node `model` override. A host whose
+    /// privacy depends on the handle (a private or on-device persona)
+    /// returns `Err` with the reason for any handle that breaks it. The
+    /// default allows every override.
+    fn allow_model(&self, node: &str, persona: &Persona, selector: &str) -> Result<(), String> {
+        let _ = (node, persona, selector);
+        Ok(())
+    }
+
     /// Loads flow `name` for a subflow node. The default has no flows and
     /// returns `Setup` "no flow source", so a flow with subflow nodes fails
     /// at `GraphRun::start` over such an io.

@@ -379,7 +379,7 @@ impl GraphRun {
                         .persona(persona)
                         .await
                         .map_err(|e| setup(&n.id, e.to_string()))?;
-                    let p = node_persona(flow, &n.id, p).map_err(|e| setup(&n.id, e))?;
+                    let p = node_persona(flow, io, &n.id, p).map_err(|e| setup(&n.id, e))?;
                     let delegates = node_delegates(flow, &n.id);
                     if !delegates.is_empty() && io.agent_arc().is_none() {
                         return Err(setup(
@@ -1705,7 +1705,7 @@ impl GraphRun {
                         }
                         let data = reads(&self.workflow, &self.state, &node.reads, item.as_deref()).map_err(fail)?;
                         let p = io.persona(persona).await.map_err(|e| fail(e.to_string()))?;
-                        let mut p = node_persona(self.flow.as_deref(), &node.id, p).map_err(fail)?;
+                        let mut p = node_persona(self.flow.as_deref(), io, &node.id, p).map_err(fail)?;
                         let delegates = node_delegates(self.flow.as_deref(), &node.id).to_vec();
                         let tools = if delegates.is_empty() {
                             None
@@ -1807,11 +1807,14 @@ fn apply_finished(b: &mut Branch, finished: Finished) -> Work {
     }
 }
 
-fn node_persona(flow: Option<&Flow>, id: &str, mut p: Persona) -> Result<Persona, String> {
+fn node_persona(flow: Option<&Flow>, io: &dyn GraphIo, id: &str, mut p: Persona) -> Result<Persona, String> {
     let Some(FlowKind::Agent { goto, model, .. }) = flow.and_then(|f| f.kind(id)) else {
         return Ok(p);
     };
-    if let Some(model) = model {
+    if let Some(model) = model.as_ref().filter(|m| **m != p.model) {
+        io.allow_model(id, &p, model).map_err(|reason| {
+            format!("model override `{model}` is not allowed for persona `{}`: {reason}", p.name)
+        })?;
         p.model = model.clone();
     }
     if !goto.is_empty() {
@@ -1926,6 +1929,13 @@ fn check_children<'a>(
             }
             if !child.workflow().state.contains_key(returns) {
                 return Err(setup(format!("flow `{name}` has no state key `{returns}` to return")));
+            }
+            for c in &child.workflow().nodes {
+                if let NodeKind::Agent { persona, .. } = &c.kind {
+                    let p = io.persona(persona).await.map_err(|e| setup(format!("flow `{name}`: {e}")))?;
+                    node_persona(Some(&child), io, &c.id, p)
+                        .map_err(|e| setup(format!("flow `{name}`, node `{}`: {e}", c.id)))?;
+                }
             }
             path.push(name.clone());
             check_children(&child, io, path).await?;

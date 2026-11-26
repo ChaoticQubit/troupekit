@@ -408,3 +408,113 @@ async fn node_registry_holds_only_persona_and_delegation_tools() {
         "no stray tool, no member tool"
     );
 }
+
+struct Privacy {
+    inner: SimpleGraphIo,
+    private: Vec<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl GraphIo for Privacy {
+    fn agent(&self) -> &dyn troupekit_agent::AgentIo {
+        self.inner.agent()
+    }
+
+    async fn persona(
+        &self,
+        name: &str,
+    ) -> Result<troupekit_agent::Persona, troupekit_agent::AgentError> {
+        self.inner.persona(name).await
+    }
+
+    fn conditions(&self) -> &troupekit_graph::Conditions {
+        self.inner.conditions()
+    }
+
+    fn allow_model(
+        &self,
+        _node: &str,
+        persona: &troupekit_agent::Persona,
+        selector: &str,
+    ) -> Result<(), String> {
+        if self.private.contains(&persona.name.as_str()) && selector != "fake/local" {
+            return Err(format!("`{selector}` is not an on-device handle"));
+        }
+        Ok(())
+    }
+}
+
+fn privacy_io(private: Vec<&'static str>) -> (Privacy, Arc<FnModel>, Arc<FnModel>) {
+    let cloud = Arc::new(FnModel::new("fake/cloud", |_| text_reply("cloud", 10)));
+    let local = Arc::new(FnModel::new("fake/local", |_| text_reply("local", 10)));
+    let base = Arc::new(FnModel::new("fake/m", |_| text_reply("base", 10)));
+    let inner = io(&[
+        ("fake/m", base),
+        ("fake/cloud", cloud.clone()),
+        ("fake/local", local.clone()),
+    ]);
+    (Privacy { inner, private }, cloud, local)
+}
+
+async fn start_on(io: &Privacy, text: &str) -> Result<GraphRun, GraphError> {
+    let flow = Flow::parse("test/r.toml", text).unwrap();
+    GraphRun::start(flow, Map::new(), Limits::default(), io).await
+}
+
+#[tokio::test]
+async fn private_persona_override_onto_a_cloud_handle_is_refused_at_start() {
+    let (io, cloud, _) = privacy_io(vec!["writer"]);
+    let err = start_on(&io, &writer_flow("model = 'fake/cloud'\n"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Setup(m)
+            if m.contains("node `a`")
+                && m.contains("model override `fake/cloud` is not allowed for persona `writer`")
+                && m.contains("not an on-device handle")),
+        "{err}"
+    );
+    assert_eq!(cloud.calls(), 0, "nothing reaches the cloud handle");
+}
+
+#[tokio::test]
+async fn private_persona_override_that_stays_on_device_runs() {
+    let (io, cloud, local) = privacy_io(vec!["writer"]);
+    let mut run = start_on(&io, &writer_flow("model = 'fake/local'\n"))
+        .await
+        .unwrap();
+    let mut out = GraphOutcome::Continue;
+    for _ in 0..10 {
+        out = run.step(&io).await;
+        if out != GraphOutcome::Continue {
+            break;
+        }
+    }
+    let GraphOutcome::Done(state) = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(state["out"], json!("local"));
+    assert_eq!((cloud.calls(), local.calls()), (0, 1));
+}
+
+#[tokio::test]
+async fn override_on_a_non_private_persona_is_kept() {
+    let (io, cloud, _) = privacy_io(vec![]);
+    let mut run = start_on(&io, &writer_flow("model = 'fake/cloud'\n"))
+        .await
+        .unwrap();
+    for _ in 0..10 {
+        if run.step(&io).await != GraphOutcome::Continue {
+            break;
+        }
+    }
+    assert_eq!(cloud.calls(), 1);
+}
+
+#[tokio::test]
+async fn an_override_equal_to_the_persona_model_never_asks_the_hook() {
+    let (io, _, _) = privacy_io(vec!["writer"]);
+    assert!(start_on(&io, &writer_flow("model = 'fake/m'\n"))
+        .await
+        .is_ok());
+}

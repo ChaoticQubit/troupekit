@@ -225,3 +225,54 @@ async fn child_usage_counts_against_parent_budget() {
         "a child over the parent budget stops: {out:?}"
     );
 }
+
+struct PrivateFlows(Flows);
+
+#[async_trait]
+impl GraphIo for PrivateFlows {
+    fn agent(&self) -> &dyn AgentIo {
+        self.0.agent()
+    }
+
+    async fn persona(&self, name: &str) -> Result<Persona, AgentError> {
+        self.0.persona(name).await
+    }
+
+    fn conditions(&self) -> &Conditions {
+        self.0.conditions()
+    }
+
+    async fn flow(&self, name: &str) -> Result<Flow, GraphError> {
+        self.0.flow(name).await
+    }
+
+    fn allow_model(&self, _node: &str, persona: &Persona, selector: &str) -> Result<(), String> {
+        Err(format!(
+            "persona `{}` is private; `{selector}` is a cloud handle",
+            persona.name
+        ))
+    }
+}
+
+#[tokio::test]
+async fn private_override_inside_a_subflow_is_refused_at_start() {
+    let gates = GatedTool::new();
+    let child = CHILD.replace(
+        "persona = 'writer'\n",
+        "persona = 'writer'\nmodel = 'fake/cloud'\n",
+    );
+    let io = PrivateFlows(io(
+        &gates,
+        model(),
+        &[("parent", parent("polish")), ("polish", child)],
+    ));
+    let flow = io.flow("parent").await.unwrap();
+    let err = GraphRun::start(flow, topic(), Limits::default(), &io)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Setup(m) if m.contains("flow `polish`, node `w`") && m.contains("is private")),
+        "{err}"
+    );
+    assert!(gates.calls("c1").is_empty(), "nothing in the child ran");
+}
