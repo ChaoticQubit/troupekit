@@ -20,6 +20,7 @@ use troupekit_core::clock::{Clock, SystemClock};
 use troupekit_core::store::{BlobStore, Filter, KeywordStore, MemoryLog, VectorStore};
 use troupekit_core::tool::ToolSpec;
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, Toolkit};
+use troupekit_trace::{content, trace_span, Span, Trace};
 
 /// Name of the toolkit `KnowledgeKit::toolkit` returns.
 /// Register it with `ToolRegistry::register_toolkit`.
@@ -515,24 +516,61 @@ impl Tool for KitTool {
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let k = &self.kit;
-        let output = match self.spec.name.as_str() {
-            SEARCH_KNOWLEDGE => search(k, parse(args)?).await?,
-            REMEMBER_FACT => remember(k, parse(args)?, ctx).await?,
-            FORGET_FACT => forget(k, parse(args)?).await?,
-            RECALL_FACTS => {
-                let NoArgs {} = parse(args)?;
-                recall(k).await?
-            }
-            UPDATE_SESSION_SUMMARY => update_summary(k, parse(args)?).await?,
-            READ_SESSION_SUMMARY => {
-                let NoArgs {} = parse(args)?;
-                read_summary(k).await?
-            }
-            other => return Err(ToolError::UnknownTool(other.to_string())),
-        };
+        let mut span = memory_span(self.spec.name.as_str(), k);
+        let output = async {
+            Ok(match self.spec.name.as_str() {
+                SEARCH_KNOWLEDGE => search(k, parse(args)?).await?,
+                REMEMBER_FACT => {
+                    let args: RememberArgs = parse(args)?;
+                    if span.is_enabled() {
+                        span.record("fact_bytes", args.key.len() + args.value.len());
+                        span.record("fact", content(format!("{}: {}", args.key, args.value)));
+                    }
+                    remember(k, args, ctx).await?
+                }
+                FORGET_FACT => forget(k, parse(args)?).await?,
+                RECALL_FACTS => {
+                    let NoArgs {} = parse(args)?;
+                    recall(k).await?
+                }
+                UPDATE_SESSION_SUMMARY => update_summary(k, parse(args)?).await?,
+                READ_SESSION_SUMMARY => {
+                    let NoArgs {} = parse(args)?;
+                    read_summary(k).await?
+                }
+                other => return Err(ToolError::UnknownTool(other.to_string())),
+            })
+        }
+        .await;
+        match &output {
+            Ok(text) => span.record("output_bytes", text.len()),
+            Err(e) => span.fail(e.to_string()),
+        }
+        drop(span);
+        let output = output?;
         assert!(estimate_tokens(&output) <= k.settings.result_budget_tokens, "tool output over its budget");
         Ok(ToolOutput::text(output))
     }
+}
+
+/// Opens the `memory.*` span for one memory tool call: subject and
+/// session are content. Input: the tool name and the kit. Output: the
+/// span, disabled for `search_knowledge` or when `memory` is off.
+fn memory_span(tool: &str, k: &Inner) -> Span {
+    let name = match tool {
+        REMEMBER_FACT => "memory.remember",
+        FORGET_FACT => "memory.forget",
+        RECALL_FACTS => "memory.recall",
+        UPDATE_SESSION_SUMMARY => "memory.summary_write",
+        READ_SESSION_SUMMARY => "memory.summary_read",
+        _ => return Span::none(),
+    };
+    trace_span!(
+        Trace::Memory,
+        name,
+        subject = content(k.subject.as_str()),
+        session = content(k.session.as_str()),
+    )
 }
 
 /// Parses tool arguments into `A`. Input: the JSON arguments. Output:

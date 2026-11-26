@@ -7,6 +7,7 @@ use crate::error::ContextError;
 use crate::ingest::META_SCOPE;
 use std::collections::BTreeMap;
 use troupekit_core::store::{Filter, KeywordStore, Scored, VectorStore};
+use troupekit_trace::{content, trace_span, Trace};
 
 const K_RRF_DEFAULT: u32 = 60;
 const CANDIDATES_DEFAULT: usize = 50;
@@ -191,6 +192,32 @@ pub fn rrf(lists: &[Vec<String>], k_rrf: u32) -> Vec<(String, f32)> {
 /// like `retrieve` on a blank query, no or a blank scope, or a `base`
 /// that sets the scope key, and on a query or filter over its cap.
 pub async fn hybrid_search(
+    vectors: &dyn VectorStore,
+    keywords: &dyn KeywordStore,
+    embedder: &dyn Embedder,
+    query: &str,
+    scopes: &[&str],
+    base: &Filter,
+    cfg: &HybridConfig,
+) -> Result<Vec<HybridHit>, ContextError> {
+    let mut span = trace_span!(
+        Trace::Knowledge,
+        "knowledge.search",
+        mode = format!("{:?}", cfg.mode).to_lowercase(),
+        k = cfg.top_k,
+        candidates = cfg.candidates,
+        scopes = scopes.len(),
+        query = content(query),
+    );
+    let result = span.instrument(search_scopes(vectors, keywords, embedder, query, scopes, base, cfg)).await;
+    match &result {
+        Ok(hits) => span.record("hits", hits.len()),
+        Err(e) => span.fail(e.to_string()),
+    }
+    result
+}
+
+async fn search_scopes(
     vectors: &dyn VectorStore,
     keywords: &dyn KeywordStore,
     embedder: &dyn Embedder,

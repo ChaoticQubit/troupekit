@@ -32,4 +32,3 @@ pub use troupekit_core::tool::HostedTool;
 pub use troupekit_core::tool::ToolSpec;
 pub use typed::{typed_tool, TypedTool};
 
-use troupekit_trace as _;
