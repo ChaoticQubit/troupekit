@@ -23,6 +23,11 @@ struct TroupekitDemoApp: App {
             .sheet(isPresented: $showingKey) {
                 KeySheet(store: keychain, onDone: { showingKey = false })
             }
+            .onAppear {
+                if ProcessInfo.processInfo.arguments.contains("-resetState") {
+                    model.reset()
+                }
+            }
         }
     }
 }

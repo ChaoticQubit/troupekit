@@ -16,20 +16,33 @@ struct ChatView: View {
                 ScrollViewReader { proxy in
                     List {
                         ForEach(model.lines) { line in
-                            bubble(line.text, author: line.author)
+                            bubble(line.text, author: line.author, identifier: line.author == .agent ? "answer" : "line")
                                 .listRowSeparator(.hidden)
                         }
                         if model.isRunning {
-                            bubble(model.streaming.isEmpty ? "…" : model.streaming, author: .agent)
+                            bubble(model.streaming.isEmpty ? "…" : model.streaming, author: .agent, identifier: "streaming")
                                 .listRowSeparator(.hidden)
                                 .id("streaming")
-                                .accessibilityIdentifier("streaming")
                         }
                     }
                     .listStyle(.plain)
                     .onChange(of: model.streaming) { _ in
                         proxy.scrollTo("streaming", anchor: .bottom)
                     }
+                }
+                if let runId = model.runId {
+                    HStack(spacing: 12) {
+                        Text("run \(runId)").accessibilityIdentifier("runId")
+                        Text("steps \(model.steps)").accessibilityIdentifier("steps")
+                        if let progress = model.progress {
+                            Text(progress).accessibilityIdentifier("progress")
+                        }
+                    }
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
                 }
                 Divider()
                 HStack(spacing: 8) {
@@ -56,10 +69,11 @@ struct ChatView: View {
         }
     }
 
-    private func bubble(_ text: String, author: ChatLine.Author) -> some View {
+    private func bubble(_ text: String, author: ChatLine.Author, identifier: String) -> some View {
         HStack {
             if author == .user { Spacer(minLength: 40) }
             Text(text)
+                .accessibilityIdentifier(identifier)
                 .padding(10)
                 .foregroundStyle(author == .user ? Color.white : Color.primary)
                 .background(background(for: author), in: RoundedRectangle(cornerRadius: 12))

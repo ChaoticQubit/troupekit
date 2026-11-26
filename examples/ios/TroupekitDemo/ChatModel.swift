@@ -25,6 +25,9 @@ final class ChatModel: ObservableObject {
     @Published private(set) var lines: [ChatLine] = []
     @Published private(set) var streaming: String = ""
     @Published private(set) var isRunning = false
+    @Published private(set) var runId: String?
+    @Published private(set) var steps = 0
+    @Published private(set) var progress: String?
 
     private let defaults: UserDefaults
 
@@ -46,6 +49,9 @@ final class ChatModel: ObservableObject {
         precondition(!runId.isEmpty, "run id must not be empty")
         defaults.set(runId, forKey: Self.runIdKey)
         lines.append(ChatLine(author: .user, text: question))
+        self.runId = runId
+        steps = 0
+        progress = nil
         streaming = ""
         isRunning = true
     }
@@ -53,8 +59,10 @@ final class ChatModel: ObservableObject {
     /// Marks a stored run as resuming after a relaunch.
     /// Input: none. Output: none; no-op when nothing is pending.
     func beginResume() {
-        guard pendingRunId != nil else { return }
+        guard let pending = pendingRunId else { return }
         lines.append(ChatLine(author: .notice, text: "Resuming the last run"))
+        runId = pending
+        progress = nil
         streaming = ""
         isRunning = true
     }
@@ -66,11 +74,38 @@ final class ChatModel: ObservableObject {
         streaming += delta
     }
 
+    /// Counts one finished step of the current run.
+    /// Input: none. Output: none.
+    func stepFinished() {
+        steps += 1
+    }
+
+    /// Ends a background window that left the run unfinished; the run id stays stored.
+    /// Input: none. Output: none.
+    func pending() {
+        progress = "pending"
+        streaming = ""
+        isRunning = false
+    }
+
+    /// Forgets any stored run, for a clean start.
+    /// Input: none. Output: none.
+    func reset() {
+        defaults.removeObject(forKey: Self.runIdKey)
+        lines = []
+        runId = nil
+        steps = 0
+        progress = nil
+        streaming = ""
+        isRunning = false
+    }
+
     /// Shows the final answer once and clears the stored run id.
     /// Input: the answer text. Output: none.
     func finish(answer: String) {
         defaults.removeObject(forKey: Self.runIdKey)
         lines.append(ChatLine(author: .agent, text: answer))
+        progress = "done"
         streaming = ""
         isRunning = false
     }
