@@ -105,6 +105,8 @@ fn unknown_key_and_unknown_target_are_refused() {
     let bad_id = refused("name = \"x\"\n[[target]]\nid = \"A b\"\n");
     assert_names(&bad_id, "target.id");
     let bad_tier = refused("name = \"x\"\n[[target]]\nid = \"a\"\ntiers = [\"Big!\"]\n");
+    let reserved = refused("name = \"x\"\n[[target]]\nid = \"a\"\ntiers = [\"private\"]\n");
+    assert_names(&reserved, "tiers");
     assert_names(&bad_tier, "tiers");
     let bad_name = refused("name = \"\"\n[[target]]\nid = \"a\"\n");
     assert_names(&bad_name, "name");
@@ -412,4 +414,306 @@ fn private_assert_fires_on_forged_plan() {
         BoundTarget::remote("cloud"),
     ]);
     forged.assert_lawful(&RouteTags::default().with_private(true));
+}
+
+use async_trait::async_trait;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use troupekit_core::error::{ProviderError, ProviderErrorKind};
+use troupekit_core::event::Usage;
+use troupekit_core::message::{Message, Role};
+use troupekit_providers::catalog::Price;
+use troupekit_providers::model::Model;
+use troupekit_providers::request::{CompletionRequest, CompletionResponse, Delta, StopReason};
+use troupekit_providers::route::RoutedModel;
+
+enum Step {
+    Reply(u64),
+    Fail(ProviderErrorKind),
+    DeltaThenFail,
+}
+
+struct Scripted {
+    id: String,
+    script: Mutex<VecDeque<Step>>,
+    calls: Arc<AtomicUsize>,
+}
+
+fn scripted(id: &str, steps: Vec<Step>) -> (Arc<dyn Model>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let model = Scripted {
+        id: id.into(),
+        script: Mutex::new(steps.into()),
+        calls: calls.clone(),
+    };
+    (Arc::new(model), calls)
+}
+
+fn answer(text: &str, cost_usd_micros: u64) -> CompletionResponse {
+    CompletionResponse {
+        message: Message::text(Role::Assistant, text),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 10,
+            cost_usd_micros,
+        },
+        stop: StopReason::EndTurn,
+    }
+}
+
+impl Scripted {
+    fn next(&self) -> Step {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("script ran out")
+    }
+}
+
+#[async_trait]
+impl Model for Scripted {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    async fn complete(&self, _: &CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        match self.next() {
+            Step::Reply(cost) => Ok(answer(&self.id, cost)),
+            Step::Fail(kind) => Err(ProviderError::new(kind, "scripted failure")),
+            Step::DeltaThenFail => Err(ProviderError::new(ProviderErrorKind::Server, "x")),
+        }
+    }
+
+    async fn stream(
+        &self,
+        _: &CompletionRequest,
+        on_delta: &mut (dyn for<'d> FnMut(&'d Delta) + Send),
+    ) -> Result<CompletionResponse, ProviderError> {
+        let text = Delta::TextDelta {
+            text: self.id.clone(),
+        };
+        match self.next() {
+            Step::Reply(cost) => {
+                on_delta(&text);
+                Ok(answer(&self.id, cost))
+            }
+            Step::Fail(kind) => Err(ProviderError::new(kind, "scripted failure")),
+            Step::DeltaThenFail => {
+                on_delta(&text);
+                Err(ProviderError::new(ProviderErrorKind::Server, "mid-stream"))
+            }
+        }
+    }
+}
+
+const PAIR: &str = r#"
+name = "office"
+default = "cloud"
+order = ["local", "cloud"]
+[[target]]
+id = "local"
+tiers = ["small"]
+[[target]]
+id = "cloud"
+tiers = ["large"]
+[budget]
+cloud_usd_per_day = 1.0
+"#;
+
+fn pair_policy(extra: &str) -> RoutePolicy {
+    RoutePolicy::parse("office.toml", &format!("{PAIR}{extra}")).unwrap()
+}
+
+fn price(input: u64, output: u64) -> Price {
+    Price {
+        input_usd_micros_per_mtok: input,
+        output_usd_micros_per_mtok: output,
+        verified: true,
+        long_context: None,
+        search_usd_micros: 0,
+    }
+}
+
+fn routed(policy: RoutePolicy, local: Arc<dyn Model>, cloud: Arc<dyn Model>) -> RoutedModel {
+    RoutedModel::builder(policy)
+        .on_device("local", local, Price::FREE)
+        .remote("cloud", cloud, price(1, 2))
+        .clock(Arc::new(FixedClock::new(1_800_000_000_000)))
+        .build()
+        .unwrap()
+}
+
+fn text(reply: &CompletionResponse) -> String {
+    reply.message.text_content()
+}
+
+fn req() -> CompletionRequest {
+    CompletionRequest::user("hi", 16)
+}
+
+#[tokio::test]
+async fn routes_by_plan_order() {
+    let (local, local_calls) = scripted("local", vec![Step::Reply(0)]);
+    let (cloud, cloud_calls) = scripted("cloud", vec![Step::Reply(0)]);
+    let model = routed(pair_policy(""), local, cloud);
+    assert_eq!(model.id(), "route/office");
+    assert_eq!(text(&model.complete(&req()).await.unwrap()), "cloud");
+    assert_eq!(cloud_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+    let small = model.view(RouteTags::default().with_tier("small"));
+    assert_eq!(text(&small.complete(&req()).await.unwrap()), "local");
+    assert_eq!(local_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn falls_back_on_error_when_allowed() {
+    let (local, local_calls) = scripted("local", vec![Step::Reply(0)]);
+    let (cloud, _) = scripted("cloud", vec![Step::Fail(ProviderErrorKind::Server)]);
+    let model = routed(pair_policy(""), local, cloud);
+    assert_eq!(text(&model.complete(&req()).await.unwrap()), "local");
+    assert_eq!(local_calls.load(Ordering::SeqCst), 1);
+
+    let (local, local_calls) = scripted("local", vec![]);
+    let (cloud, _) = scripted("cloud", vec![Step::Fail(ProviderErrorKind::Server)]);
+    let strict = routed(pair_policy("[fallback]\non_error = false\n"), local, cloud);
+    let err = strict.complete(&req()).await.unwrap_err();
+    assert_eq!(err.kind, ProviderErrorKind::Server);
+    assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn private_never_falls_back_to_remote() {
+    let (local, local_calls) = scripted(
+        "local",
+        vec![
+            Step::Fail(ProviderErrorKind::Server),
+            Step::Fail(ProviderErrorKind::Network),
+        ],
+    );
+    let (cloud, cloud_calls) = scripted("cloud", vec![]);
+    let model = routed(pair_policy(""), local, cloud);
+    let private = model.view(RouteTags::default().with_private(true));
+    assert_eq!(private.id(), "route/office:private");
+    assert!(private.complete(&req()).await.is_err());
+    let relaxed = private.view(RouteTags::default());
+    let err = relaxed
+        .stream(&req(), &mut |_: &Delta| {})
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ProviderErrorKind::Network);
+    assert_eq!(local_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(cloud_calls.load(Ordering::SeqCst), 0);
+
+    let (cloud, cloud_calls) = scripted("cloud", vec![]);
+    let remote_only = RoutedModel::builder(
+        RoutePolicy::parse("r.toml", "name = \"r\"\n[[target]]\nid = \"cloud\"\n").unwrap(),
+    )
+    .remote("cloud", cloud, Price::FREE)
+    .build()
+    .unwrap()
+    .view(RouteTags::default().with_private(true));
+    let err = remote_only.complete(&req()).await.unwrap_err();
+    assert_eq!(err.kind, ProviderErrorKind::Network);
+    assert!(err.message.starts_with("no route: "));
+    assert!(err.message.contains("private"));
+    assert_eq!(cloud_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn no_switch_after_first_delta() {
+    let (local, local_calls) = scripted("local", vec![]);
+    let (cloud, _) = scripted("cloud", vec![Step::DeltaThenFail]);
+    let model = routed(pair_policy(""), local, cloud);
+    let mut seen = Vec::new();
+    let err = model
+        .stream(&req(), &mut |d: &Delta| seen.push(d.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.message, "mid-stream");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+
+    let (local, _) = scripted("local", vec![Step::Reply(0)]);
+    let (cloud, _) = scripted("cloud", vec![Step::Fail(ProviderErrorKind::Server)]);
+    let model = routed(pair_policy(""), local, cloud);
+    let mut seen = Vec::new();
+    let reply = model
+        .stream(&req(), &mut |d: &Delta| seen.push(d.clone()))
+        .await
+        .unwrap();
+    assert_eq!(text(&reply), "local");
+    assert_eq!(
+        seen,
+        [Delta::TextDelta {
+            text: "local".into()
+        }]
+    );
+}
+
+#[tokio::test]
+async fn budget_counts_remote_spend() {
+    let (local, local_calls) = scripted("local", vec![Step::Reply(0)]);
+    let (cloud, cloud_calls) = scripted("cloud", vec![Step::Reply(600_000), Step::Reply(400_000)]);
+    let model = routed(pair_policy(""), local, cloud);
+    assert_eq!(text(&model.complete(&req()).await.unwrap()), "cloud");
+    assert_eq!(text(&model.complete(&req()).await.unwrap()), "cloud");
+    assert_eq!(text(&model.complete(&req()).await.unwrap()), "local");
+    assert_eq!(cloud_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(local_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn views_cover_private_and_tiers() {
+    let (local, _) = scripted("local", vec![]);
+    let (cloud, _) = scripted("cloud", vec![]);
+    let model = routed(pair_policy(""), local, cloud);
+    let views = model.views("route/office");
+    let names: Vec<&str> = views.iter().map(|(n, _, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "route/office",
+            "route/office:private",
+            "route/office:small",
+            "route/office:large"
+        ]
+    );
+    for (name, view, _) in &views {
+        assert_eq!(view.id(), name.as_str());
+    }
+    assert_eq!(views[0].2, price(1, 2));
+    assert_eq!(views[1].2, Price::FREE);
+    assert_eq!(views[2].2, Price::FREE);
+    assert_eq!(views[3].2, price(1, 2));
+}
+
+#[test]
+fn unbound_target_is_a_build_error() {
+    let (local, _) = scripted("local", vec![]);
+    let (cloud, _) = scripted("cloud", vec![]);
+    let err = RoutedModel::builder(pair_policy(""))
+        .on_device("local", local.clone(), Price::FREE)
+        .build()
+        .err()
+        .unwrap();
+    assert!(matches!(err, RouteError::Bind { ref target, .. } if target == "cloud"));
+    let err = RoutedModel::builder(pair_policy(""))
+        .on_device("local", local.clone(), Price::FREE)
+        .remote("cloud", cloud.clone(), Price::FREE)
+        .remote("ghost", cloud.clone(), Price::FREE)
+        .build()
+        .err()
+        .unwrap();
+    assert!(matches!(err, RouteError::Bind { ref target, .. } if target == "ghost"));
+    let err = RoutedModel::builder(pair_policy(""))
+        .on_device("local", local.clone(), Price::FREE)
+        .remote("local", cloud.clone(), Price::FREE)
+        .remote("cloud", cloud, Price::FREE)
+        .build()
+        .err()
+        .unwrap();
+    assert!(matches!(err, RouteError::Bind { ref target, .. } if target == "local"));
 }

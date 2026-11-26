@@ -3,10 +3,12 @@
 //! the planned targets in order. A private request never leaves the device.
 
 mod decide;
+mod model;
 mod policy;
 mod signals;
 
 pub use decide::{decide, BoundTarget, RoutePlan};
+pub use model::{RoutedModel, RoutedModelBuilder};
 
 pub use policy::{
     BudgetPolicy, DevicePolicy, FallbackPolicy, NetworkMode, NetworkPolicy, RoutePolicy,

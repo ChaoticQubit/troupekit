@@ -351,6 +351,9 @@ impl RoutePolicy {
                         "a tier must be 1 to 64 bytes of a-z, 0-9, _ or -".into(),
                     ));
                 }
+                if tier == "private" {
+                    return Err(invalid(&key, "tier name private is reserved".into()));
+                }
                 if !seen.insert(tier.as_str()) {
                     return Err(invalid(&key, format!("tier {tier} is repeated")));
                 }
