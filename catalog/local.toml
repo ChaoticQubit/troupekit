@@ -1,0 +1,11 @@
+[[model]]
+id = "smollm2-135m-instruct-q2k"
+url = "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/09816acd5d99df7be770d85ea30822623dab342c/SmolLM2-135M-Instruct-Q2_K.gguf"
+sha256 = "741ad12b64088fedc17c33aacb22e48be1972ef36a39f03666dd68bd15614fb9"
+bytes = 88202080
+ram_bytes = 268435456
+context = 8192
+class = "phone"
+licence = "apache-2.0"
+embeddings = false
+recommended = false
