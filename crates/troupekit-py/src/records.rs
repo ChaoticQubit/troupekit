@@ -378,7 +378,8 @@ impl From<neutral::HostRequest> for HostRequest {
 }
 
 /// A host model's whole reply, mirrored from `HostReply`.
-/// Rust parses and validates `text`; token counts feed the run's usage.
+/// Rust parses and validates `text` and `tool_calls_json` (native tool
+/// calls, for a model whose caps set `tools`); token counts feed usage.
 /// Returned by a Python `HostModel.generate`.
 #[pyclass(frozen, get_all, from_py_object, module = "troupekit")]
 #[derive(Clone, Debug)]
@@ -386,17 +387,24 @@ pub struct HostReply {
     pub text: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub tool_calls_json: Option<String>,
 }
 
 #[pymethods]
 impl HostReply {
     #[new]
-    #[pyo3(signature = (text, input_tokens=0, output_tokens=0))]
-    fn new(text: String, input_tokens: u64, output_tokens: u64) -> Self {
+    #[pyo3(signature = (text, input_tokens=0, output_tokens=0, tool_calls_json=None))]
+    fn new(
+        text: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        tool_calls_json: Option<String>,
+    ) -> Self {
         HostReply {
             text,
             input_tokens,
             output_tokens,
+            tool_calls_json,
         }
     }
 }
@@ -407,6 +415,7 @@ impl From<HostReply> for neutral::HostReply {
         out.text = value.text;
         out.input_tokens = value.input_tokens;
         out.output_tokens = value.output_tokens;
+        out.tool_calls_json = value.tool_calls_json;
         out
     }
 }

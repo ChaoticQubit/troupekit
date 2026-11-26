@@ -287,13 +287,15 @@ impl From<neutral::HostRequest> for HostRequest {
 }
 
 /// A host model's whole reply, mirrored from `HostReply`.
-/// Rust parses and validates `text`; token counts feed the run's usage.
-/// Returned by the foreign `HostModel::generate`.
+/// Rust parses and validates `text` and `tool_calls_json` (native tool
+/// calls, for a model whose caps set `tools`); token counts feed usage.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct HostReply {
     pub text: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[uniffi(default = None)]
+    pub tool_calls_json: Option<String>,
 }
 
 impl From<HostReply> for neutral::HostReply {
@@ -302,6 +304,7 @@ impl From<HostReply> for neutral::HostReply {
         out.text = value.text;
         out.input_tokens = value.input_tokens;
         out.output_tokens = value.output_tokens;
+        out.tool_calls_json = value.tool_calls_json;
         out
     }
 }

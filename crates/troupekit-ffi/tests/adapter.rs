@@ -1,5 +1,5 @@
 use std::path::Path;
-use troupekit_ffi::{ErrorCode, HostHeader, HostHttpRequest, TroupekitError};
+use troupekit_ffi::{ErrorCode, HostHeader, HostHttpRequest, HostReply, TroupekitError};
 use troupekit_ffi_core as neutral;
 
 const RENAMES: &[(&str, &str)] = &[
@@ -191,4 +191,25 @@ fn host_request_text_hides_key() {
     assert!(texts[1].contains("application/json"), "{}", texts[1]);
     let flagged = neutral::HostHeader::from(headers[1].clone());
     assert!(flagged.sensitive);
+}
+
+/// A host model's native tool calls reach the neutral layer unchanged.
+/// Input: a reply with and without `tool_calls_json`. Output: passes when
+/// the neutral `HostReply` holds the same text, counts and tool calls.
+#[test]
+fn host_reply_keeps_tool_calls() {
+    let calls = r#"[{"id":"c1","name":"echo","arguments":{"text":"hi"}}]"#;
+    for tool_calls_json in [Some(calls.to_owned()), None] {
+        let reply = HostReply {
+            text: "x".to_owned(),
+            input_tokens: 3,
+            output_tokens: 1,
+            tool_calls_json: tool_calls_json.clone(),
+        };
+        let out = neutral::HostReply::from(reply);
+        assert_eq!(out.text, "x");
+        assert_eq!(out.input_tokens, 3);
+        assert_eq!(out.output_tokens, 1);
+        assert_eq!(out.tool_calls_json, tool_calls_json);
+    }
 }

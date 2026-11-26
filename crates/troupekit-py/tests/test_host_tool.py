@@ -165,3 +165,15 @@ def test_python_exception_becomes_host_error(stub):
     results = tool_messages(state.body(1))
     assert len(results) == 1
     assert "echo broke: code 42" in json.dumps(results[0])
+
+
+def test_host_reply_carries_tool_calls():
+    """A Python host model can return native tool calls with its reply.
+
+    Input: a `HostReply` with and without `tool_calls_json`. Output: the
+    field reads back as given and defaults to None.
+    """
+    calls = '[{"id":"c1","name":"echo","arguments":{"text":"hi"}}]'
+    reply = troupekit.HostReply("x", 3, 1, tool_calls_json=calls)
+    assert reply.tool_calls_json == calls
+    assert troupekit.HostReply("x").tool_calls_json is None
