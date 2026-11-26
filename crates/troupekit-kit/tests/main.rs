@@ -16,6 +16,7 @@ mod model;
 mod output;
 mod start;
 mod storage;
+mod stream;
 #[path = "fixtures/tools_mod.rs"]
 mod tools_mod;
 mod ui;

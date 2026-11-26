@@ -23,6 +23,8 @@ use troupekit_core::store::CheckpointStore;
 use troupekit_graph::{GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSpec};
 
+mod run_api;
+
 const MAX_NODES: usize = 64;
 const MAX_GRAPH_RETRIES: u32 = 50;
 const DEFAULT_GRAPH_RETRIES: u32 = 3;
@@ -53,6 +55,7 @@ pub struct Graph {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    events: Option<Arc<dyn troupekit_agent::EventSink>>,
 }
 
 impl Graph {
@@ -72,6 +75,7 @@ impl Graph {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            events: None,
         }
     }
 
@@ -257,7 +261,7 @@ impl Graph {
             }
         }
         agent_io.tools = registry;
-        agent_io.events = Arc::new(Discard);
+        agent_io.events = self.events.clone().unwrap_or_else(|| Arc::new(Discard));
         agent_io.ledger = self
             .ledger
             .clone()
