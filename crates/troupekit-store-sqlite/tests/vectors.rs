@@ -387,24 +387,59 @@ async fn remove_source_drops_rows_keywords_index_and_status() {
     let other = SqliteStore::open(&t.path).await.unwrap();
     assert_eq!(docs(&other).await.len().await.unwrap(), 1);
     assert_eq!(vectors.remove_source("docs", "missing.md").await.unwrap(), 0);
-    store_error(vectors.remove_source(" ", "a.md").await, "scope");
+    store_error(vectors.remove_source("", "a.md").await, "scope");
 }
 
 #[tokio::test]
 async fn reopen_after_replace_source_does_not_rebuild() {
-    let t = temp();
-    let mut rng = Rng(13);
-    {
+    for settings in [VectorSettings::new(DIMS), VectorSettings::new(DIMS).with_kind(IndexKind::Hnsw(HnswParams::default()))] {
+        let t = temp();
+        let mut rng = Rng(13);
+        {
+            let store = SqliteStore::open(&t.path).await.unwrap();
+            let vectors = store.vectors("docs", settings.clone()).await.unwrap();
+            let first = (0..4).map(|i| sourced(&format!("a{i}"), &mut rng, "docs", "a.md")).collect();
+            vectors.replace_source("docs", "a.md", first, "h1").await.unwrap();
+            vectors.replace_source("docs", "a.md", vec![sourced("a9", &mut rng, "docs", "a.md")], "h2").await.unwrap();
+        }
         let store = SqliteStore::open(&t.path).await.unwrap();
-        let vectors = docs(&store).await;
-        let first = (0..4).map(|i| sourced(&format!("a{i}"), &mut rng, "docs", "a.md")).collect();
-        vectors.replace_source("docs", "a.md", first, "h1").await.unwrap();
-        vectors.replace_source("docs", "a.md", vec![sourced("a9", &mut rng, "docs", "a.md")], "h2").await.unwrap();
+        let vectors = store.vectors("docs", settings.clone()).await.unwrap();
+        assert_eq!(vectors.open_report().rebuilds(), 0, "{:?}", settings.kind());
+        assert_eq!(vectors.len().await.unwrap(), 1);
     }
-    let store = SqliteStore::open(&t.path).await.unwrap();
-    let vectors = docs(&store).await;
-    assert_eq!(vectors.open_report().rebuilds(), 0);
-    assert_eq!(vectors.len().await.unwrap(), 1);
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[tokio::test]
+async fn deleted_chunk_leaves_no_bytes_in_the_file() {
+    const MARKER: &str = "zqxvelociraptormarker";
+    let marked: Vec<f32> = (0..DIMS).map(|i| 0.123_456_79 + i as f32 * 0.010_203).collect();
+    let pattern: Vec<u8> = marked.iter().flat_map(|x| x.to_le_bytes()).collect();
+    for settings in [VectorSettings::new(DIMS), VectorSettings::new(DIMS).with_kind(IndexKind::Hnsw(HnswParams::default()))] {
+        let t = temp();
+        let mut rng = Rng(29);
+        {
+            let store = SqliteStore::open(&t.path).await.unwrap();
+            let vectors = store.vectors("docs", settings.clone()).await.unwrap();
+            let mut records: Vec<VectorRecord> = (0..40).map(|i| sourced(&format!("k{i}"), &mut rng, "docs", "a.md")).collect();
+            records.push(rec("secret", marked.clone(), &format!("the {MARKER} plan"), &[("scope", "docs"), ("source", "a.md")]));
+            vectors.replace_source("docs", "a.md", records, "h1").await.unwrap();
+            assert_eq!(ids(&vectors.search_text(MARKER, 1, &filter(&[])).await.unwrap()), ["secret"]);
+            let kept: Vec<VectorRecord> = (0..40).map(|i| sourced(&format!("k{i}"), &mut rng, "docs", "a.md")).collect();
+            vectors.replace_source("docs", "a.md", kept, "h2").await.unwrap();
+            assert!(vectors.search_text(MARKER, 1, &filter(&[])).await.unwrap().is_empty());
+        }
+        let conn = rusqlite::Connection::open(&t.path).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0)).unwrap();
+        drop(conn);
+        let mut bytes = std::fs::read(&t.path).unwrap();
+        bytes.extend(std::fs::read(t.path.with_extension("db-wal")).unwrap_or_default());
+        assert!(!contains(&bytes, MARKER.as_bytes()), "marker text left in the file ({:?})", settings.kind());
+        assert!(!contains(&bytes, &pattern), "marked vector left in the file ({:?})", settings.kind());
+    }
 }
 
 #[tokio::test]
@@ -579,7 +614,8 @@ async fn every_bound_is_enforced() {
     store_error(v.search(&[1.0; DIMS], 1_001, &filter(&[])).await, "k");
     store_error(v.search(&[1.0; DIMS], 1, &filter(&[("a", "1"), ("b", "2")])).await, "max_meta_pairs");
     store_error(v.replace_source("", "a.md", vec![], "h").await, "scope");
-    store_error(v.replace_source("d", "a.md", vec![], "").await, "content_hash");
+    store_error(v.replace_source("d", "a", vec![], "").await, "content_hash");
+    store_error(v.replace_source("d", "a.md", vec![], "h").await, "source must be 1 to 3 bytes");
     assert_eq!(count(&t.path, "SELECT COUNT(*) FROM chunk"), 0);
 }
 

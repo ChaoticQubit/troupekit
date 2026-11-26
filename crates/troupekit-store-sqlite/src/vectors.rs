@@ -283,9 +283,11 @@ impl SqliteStore {
         let name = name.to_string();
         let store = self.clone();
         let now_ms = self.inner.clock.now_ms();
+        let secure_delete = i64::from(self.inner.secure_delete);
         let state = self
             .call(move |conn| {
                 let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db)?;
+                tx.execute("INSERT INTO chunk_fts (chunk_fts, rank) VALUES ('secure-delete', ?1)", [secure_delete]).map_err(db)?;
                 let row: Option<(i64, String, String)> = tx
                     .query_row(
                         "SELECT dims, kind, params_json FROM vector_index WHERE name = ?1",
