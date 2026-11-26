@@ -332,6 +332,7 @@ pub struct Knowledge {
     pub(crate) index: String,
     pub(crate) store: Option<PathBuf>,
     pub(crate) embedder: Option<Arc<dyn Embedder>>,
+    pub(crate) on_device: bool,
     pub(crate) load: LoadSettings,
     pub(crate) chunk: ChunkConfig,
     pub(crate) allow_failed: bool,
@@ -348,6 +349,7 @@ impl Knowledge {
             index: defaults.scope().to_string(),
             store: None,
             embedder: None,
+            on_device: false,
             load: defaults.load().clone(),
             chunk: defaults.chunk(),
             allow_failed: false,
@@ -376,6 +378,16 @@ impl Knowledge {
     /// Returns the settings.
     pub fn embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
+        self.on_device = false;
+        self
+    }
+
+    /// Sets an embedder that runs on the device, with no network, and
+    /// marks it so: a private agent accepts only such an embedder.
+    /// Otherwise the same as `embedder`.
+    pub fn on_device_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self.on_device = true;
         self
     }
 
@@ -431,6 +443,7 @@ impl fmt::Debug for Knowledge {
             .field("index", &self.index)
             .field("store", &self.store)
             .field("embedder", &self.embedder.is_some())
+            .field("on_device", &self.on_device)
             .field("allow_failed", &self.allow_failed)
             .finish_non_exhaustive()
     }

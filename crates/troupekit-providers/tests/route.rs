@@ -688,6 +688,9 @@ fn views_cover_private_and_tiers() {
     assert_eq!(views[1].2, Price::FREE);
     assert_eq!(views[2].2, Price::FREE);
     assert_eq!(views[3].2, price(1, 2));
+    assert_eq!(model.price(), price(1, 2));
+    let private_large = model.view(RouteTags::default().with_private(true).with_tier("large"));
+    assert_eq!(private_large.price(), Price::FREE);
 }
 
 #[test]

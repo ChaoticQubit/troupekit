@@ -264,39 +264,53 @@ impl RoutedModel {
     /// `prefix:private` and `prefix:<tier>` per policy tier, each with the
     /// highest price among the targets it can reach, so budgets stay safe.
     pub fn views(&self, prefix: &str) -> Vec<(String, Arc<dyn Model>, Price)> {
-        let shared = &self.shared;
-        let reach = |keep: &dyn Fn(&Bound) -> bool| {
-            max_price(shared.bound.iter().filter(|b| keep(b)).map(|b| b.price))
-        };
-        let mut out: Vec<(String, Arc<dyn Model>, Price)> = Vec::new();
         let base = self.view(RouteTags::default());
-        let mut named = |suffix: &str, view: RoutedModel, price: Price| {
-            let name = format!("{prefix}{suffix}");
-            let view = RoutedModel {
-                id: name.clone(),
-                ..view
-            };
-            out.push((name, Arc::new(view), price));
-        };
-        named("", base.clone(), reach(&|_| true));
-        let private = base.view(RouteTags::default().with_private(true));
-        named(":private", private, reach(&|b| b.target.is_on_device()));
-        for tier in shared.policy.tiers() {
+        let mut tagged = vec![
+            (String::new(), base.clone()),
+            (
+                ":private".to_owned(),
+                base.view(RouteTags::default().with_private(true)),
+            ),
+        ];
+        for tier in self.shared.policy.tiers() {
             let view = base.view(RouteTags::default().with_tier(tier.clone()));
-            let serves = |b: &Bound| {
+            tagged.push((format!(":{tier}"), view));
+        }
+        let out: Vec<(String, Arc<dyn Model>, Price)> = tagged
+            .into_iter()
+            .map(|(suffix, view)| {
+                let name = format!("{prefix}{suffix}");
+                let price = view.price();
+                let view = RoutedModel {
+                    id: name.clone(),
+                    ..view
+                };
+                (name, Arc::new(view) as Arc<dyn Model>, price)
+            })
+            .collect();
+        assert_eq!(
+            out.len(),
+            2 + self.shared.policy.tiers().len(),
+            "one view per name"
+        );
+        out
+    }
+
+    /// The highest price among the targets this view can reach: on-device
+    /// only when private, only targets serving the tier when one is set.
+    /// Budgets charge it, so they never under-count.
+    pub fn price(&self) -> Price {
+        let shared = &self.shared;
+        let reaches = |b: &&Bound| {
+            let serves = self.tags.tier.as_ref().is_none_or(|tier| {
                 shared
                     .policy
                     .target(b.target.id())
                     .is_some_and(|t| t.tiers().contains(tier))
-            };
-            named(&format!(":{tier}"), view, reach(&serves));
-        }
-        assert_eq!(
-            out.len(),
-            2 + shared.policy.tiers().len(),
-            "one view per name"
-        );
-        out
+            });
+            serves && (!self.tags.private || b.target.is_on_device())
+        };
+        max_price(shared.bound.iter().filter(reaches).map(|b| b.price))
     }
 
     fn day_key(&self) -> String {

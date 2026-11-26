@@ -68,6 +68,7 @@ pub struct Agent {
     inline_laws: Vec<String>,
     auto_laws: bool,
     pub(crate) trace: crate::trace::TraceConfig,
+    pub(crate) route: crate::route::RouteConfig,
 }
 
 impl Agent {
@@ -106,6 +107,7 @@ impl Agent {
             inline_laws: Vec::new(),
             auto_laws: true,
             trace: crate::trace::TraceConfig::default(),
+            route: crate::route::RouteConfig::default(),
         }
     }
 
@@ -437,6 +439,23 @@ impl Agent {
     }
 
     #[cfg(feature = "knowledge")]
+    fn check_private_knowledge(&self) -> Result<(), KitError> {
+        match &self.knowledge {
+            Some(k) if self.route.private && !k.on_device => Err(KitError::config(
+                &self.name,
+                "a private agent cannot send documents to a cloud embedder: \
+                 use Knowledge::dir(..).on_device_embedder(..)",
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    #[cfg(not(feature = "knowledge"))]
+    fn check_private_knowledge(&self) -> Result<(), KitError> {
+        Ok(())
+    }
+
+    #[cfg(feature = "knowledge")]
     fn has_context(&self) -> bool {
         self.memory.is_some() || self.knowledge.is_some()
     }
@@ -461,6 +480,7 @@ impl Agent {
             && self.api_key == other.api_key
             && self.api_key_env == other.api_key_env
             && self.catalog == other.catalog
+            && self.route.same(&other.route)
     }
 
     #[cfg(feature = "knowledge")]
@@ -497,6 +517,7 @@ impl Agent {
                 "needs a model: call .model(\"vendor/model\")",
             ));
         };
+        self.check_private_knowledge()?;
         let mut registry = ToolRegistry::new();
         for tool in &self.tools {
             registry.register(tool.clone())?;
@@ -504,6 +525,7 @@ impl Agent {
         let tool_names: Vec<String> = registry.specs().into_iter().map(|s| s.name).collect();
         let (persona, persona_text) =
             self.persona(instructions, model_key.unwrap_or(selector), &tool_names)?;
+        self.route.check_judges(name, &persona)?;
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
         let handle = resolve(ModelChoice {
@@ -516,6 +538,7 @@ impl Agent {
             api_key_env: self.api_key_env.as_deref(),
             transport: self.transport.clone(),
         })?;
+        let handle = self.route.handle(name, handle)?;
         Ok(Prepared {
             persona,
             persona_text,
@@ -594,6 +617,9 @@ impl fmt::Debug for Agent {
             .field("api_key_env", &self.api_key_env)
             .field("model_client", &self.model_client.is_some())
             .field("retries", &self.retries)
+            .field("private", &self.route.private)
+            .field("tier", &self.route.tier)
+            .field("route", &self.route.has_route())
             .finish_non_exhaustive()
     }
 }

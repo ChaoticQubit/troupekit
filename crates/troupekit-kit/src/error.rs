@@ -37,6 +37,8 @@ pub enum KitError {
     #[cfg(feature = "knowledge")]
     #[error(transparent)]
     Context(#[from] troupekit_context::ContextError),
+    #[error(transparent)]
+    Route(troupekit_providers::route::RouteError),
     #[error("run {run_id} failed: {reason}")]
     Failed { run_id: RunId, reason: String },
     #[error("run {run_id} paused: {reason:?}")]

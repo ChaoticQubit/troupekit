@@ -58,6 +58,7 @@ pub struct Graph {
     inline_laws: Vec<String>,
     auto_laws: bool,
     pub(crate) trace: crate::trace::TraceConfig,
+    pub(crate) private: bool,
 }
 
 impl Graph {
@@ -78,6 +79,7 @@ impl Graph {
             inline_laws: Vec::new(),
             auto_laws: true,
             trace: crate::trace::TraceConfig::default(),
+            private: false,
         }
     }
 
@@ -195,10 +197,17 @@ impl Graph {
     }
 
     async fn build_in(
-        self,
+        mut self,
         owner: String,
         traced: Option<crate::trace::Traced>,
     ) -> Result<BuiltGraph, KitError> {
+        if self.private {
+            for (_, node) in &mut self.nodes {
+                if let Node::Agent(agent) = node {
+                    agent.route.private = true;
+                }
+            }
+        }
         let fail = |m: String| KitError::config(&owner, m);
         if self.retries > MAX_GRAPH_RETRIES {
             return Err(fail(format!(
@@ -465,6 +474,7 @@ impl fmt::Debug for Graph {
             .field("storage", &self.storage)
             .field("retries", &self.retries)
             .field("ledger", &self.ledger.is_some())
+            .field("private", &self.private)
             .finish_non_exhaustive()
     }
 }
