@@ -193,7 +193,69 @@ async fn toml_instructions_file_is_refused() {
         .await
         .unwrap_err();
     assert!(matches!(err, KitError::Config { .. }), "{err:?}");
-    assert!(err.to_string().contains("instructions_file"), "{err}");
+    assert!(err.to_string().contains("from_toml_file"), "{err}");
+}
+
+fn persona_with_instructions_file(dir: &std::path::Path, file: &str) -> std::path::PathBuf {
+    let text = fixture_text().replace(
+        "instructions = \"\"\"",
+        &format!("instructions_file = \"{file}\"\ncontext = \"\"\""),
+    );
+    let persona = dir.join("support.toml");
+    std::fs::write(&persona, text).unwrap();
+    persona
+}
+
+#[tokio::test]
+async fn toml_file_reads_instructions_file_beside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let persona = persona_with_instructions_file(dir.path(), "notes/support.md");
+    std::fs::create_dir(dir.path().join("notes")).unwrap();
+    std::fs::write(dir.path().join("notes/support.md"), "Quote the order line.").unwrap();
+    let built = Agent::from_toml_file(&persona)
+        .model_client(support_model())
+        .tool(lookup_order())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(built.persona().instructions, "Quote the order line.");
+    assert!(built
+        .persona()
+        .system_prompt()
+        .contains("Quote the order line."));
+}
+
+#[tokio::test]
+async fn toml_file_instructions_file_must_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let persona = persona_with_instructions_file(dir.path(), "missing.md");
+    let err = Agent::from_toml_file(&persona)
+        .model_client(support_model())
+        .tool(lookup_order())
+        .build()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KitError::Config { .. }), "{err:?}");
+    assert!(err.to_string().contains("does not exist"), "{err}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn toml_file_instructions_symlink_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.md");
+    std::fs::write(&secret, "secret text").unwrap();
+    std::os::unix::fs::symlink(&secret, dir.path().join("support.md")).unwrap();
+    let persona = persona_with_instructions_file(dir.path(), "support.md");
+    let err = Agent::from_toml_file(&persona)
+        .model_client(support_model())
+        .tool(lookup_order())
+        .build()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KitError::Config { .. }), "{err:?}");
+    assert!(err.to_string().contains("symlink"), "{err}");
 }
 
 #[tokio::test]
@@ -218,6 +280,27 @@ async fn two_toml_agents_in_one_graph_are_told_apart() {
     assert!(
         err.to_string()
             .contains("two different agents are named `toml`"),
+        "{err}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn toml_file_instructions_outside_its_directory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("support.md"), "secret text").unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("notes")).unwrap();
+    let persona = persona_with_instructions_file(dir.path(), "notes/support.md");
+    let err = Agent::from_toml_file(&persona)
+        .model_client(support_model())
+        .tool(lookup_order())
+        .build()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KitError::Config { .. }), "{err:?}");
+    assert!(
+        err.to_string().contains("persona file's directory"),
         "{err}"
     );
 }

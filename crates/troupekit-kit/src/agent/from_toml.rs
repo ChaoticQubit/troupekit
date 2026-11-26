@@ -1,7 +1,8 @@
 use super::Agent;
 use crate::error::KitError;
 use crate::laws::read_checked;
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 use toml::Value as Toml;
 use troupekit_agent::Persona;
 
@@ -32,7 +33,9 @@ impl Agent {
 
     /// Starts a builder from the persona file at `path`, read at `build`.
     /// The path must have no `..`, end in `.toml` and name a regular
-    /// UTF-8 file of at most `MAX_PERSONA_BYTES`. Otherwise as `from_toml`.
+    /// UTF-8 file of at most `MAX_PERSONA_BYTES`. An `instructions_file`
+    /// is read from the persona's own directory, no symlinks, no escape.
+    /// Otherwise as `from_toml`, where `instructions_file` is refused.
     pub fn from_toml_file(path: impl AsRef<Path>) -> Agent {
         let mut agent = Agent::new(TOML_NAME);
         agent.persona_source = Some(PersonaSource::File(path.as_ref().to_path_buf()));
@@ -114,11 +117,10 @@ impl Agent {
             let named = tools.iter().map(|t| text(t)).collect();
             table.insert("tools".into(), Toml::Array(named));
         }
-        if table.contains_key("instructions_file") {
-            return Err(KitError::config(
-                source,
-                "instructions_file is not read by from_toml: inline instructions in the TOML or call .instructions(..)",
-            ));
+        if table.contains_key("instructions_file") && !table.contains_key("instructions") {
+            let body = self.instructions_file(source, &table)?;
+            table.remove("instructions_file");
+            table.insert("instructions".into(), text(&body));
         }
         let selector = table
             .get("model")
@@ -130,6 +132,8 @@ impl Agent {
         let persona_text = toml::to_string(&table)
             .map_err(|e| KitError::config(source, format!("persona does not serialize: {e}")))?;
         let persona = Persona::parse(source, &persona_text)?;
+        assert!(persona.instructions_file.is_none());
+        assert!(!persona.instructions.trim().is_empty());
         let Some(selector) = selector else {
             return Err(KitError::config(
                 source,
@@ -138,4 +142,63 @@ impl Agent {
         };
         Ok((persona, persona_text, selector))
     }
+
+    fn instructions_file(&self, source: &str, table: &toml::Table) -> Result<String, KitError> {
+        let Some(PersonaSource::File(persona)) = &self.persona_source else {
+            return Err(KitError::config(
+                source,
+                "instructions_file needs from_toml_file, or call .instructions(..)",
+            ));
+        };
+        let Some(relative) = table.get("instructions_file").and_then(Toml::as_str) else {
+            return Err(KitError::config(
+                source,
+                "instructions_file must be a string",
+            ));
+        };
+        let body = instructions_body(persona, relative)
+            .map_err(|m| KitError::config(source, format!("instructions_file {m}")))?;
+        assert!(body.len() <= MAX_PERSONA_BYTES);
+        assert!(!table.contains_key("instructions"));
+        Ok(body)
+    }
+}
+
+/// Reads `relative`, an `instructions_file` value, from the directory of
+/// the persona file at `persona`. Refuses `..`, absolute paths, symlinks,
+/// and any path whose canonical form leaves that directory. Returns the
+/// text of a .md or .txt file of at most `MAX_PERSONA_BYTES`.
+fn instructions_body(persona: &Path, relative: &str) -> Result<String, String> {
+    let relative = Path::new(relative);
+    if relative.is_absolute() || relative.components().any(|c| c == Component::ParentDir) {
+        return Err("must be a relative path without `..`".into());
+    }
+    let extension = match relative.extension().and_then(|e| e.to_str()) {
+        Some("md") => "md",
+        Some("txt") => "txt",
+        _ => return Err("must be a .md or .txt file".into()),
+    };
+    let persona = persona
+        .canonicalize()
+        .map_err(|e| format!("cannot be resolved: {e}"))?;
+    let directory = persona
+        .parent()
+        .expect("a canonical file path has a parent");
+    let joined = directory.join(relative);
+    match std::fs::symlink_metadata(&joined) {
+        Ok(meta) if meta.file_type().is_symlink() => return Err("must not be a symlink".into()),
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => return Err("does not exist".into()),
+        Err(e) => return Err(format!("cannot be read: {e}")),
+    }
+    let canonical = joined
+        .canonicalize()
+        .map_err(|e| format!("cannot be resolved: {e}"))?;
+    if !canonical.starts_with(directory) {
+        return Err("must stay under the persona file's directory".into());
+    }
+    let (read, body) = read_checked(&canonical, extension, MAX_PERSONA_BYTES as u64)?;
+    assert_eq!(read, canonical);
+    assert!(body.len() <= MAX_PERSONA_BYTES);
+    Ok(body)
 }
