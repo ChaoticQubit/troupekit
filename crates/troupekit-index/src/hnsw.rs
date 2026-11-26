@@ -3,6 +3,7 @@ use std::cmp::Reverse;
 
 use crate::brute::{cosine_with_norm, norm, Ranked, TopK};
 use crate::quant::Slots;
+use troupekit_trace::{trace_span, Trace};
 use crate::rng::Rng;
 use crate::{check_k, check_vector, HnswParams, IndexError, Neighbor, PageChange, PageKey, Quantization, VectorIndex};
 
@@ -506,6 +507,7 @@ impl VectorIndex for Hnsw {
         if k == 0 {
             return Ok(Vec::new());
         }
+        let mut span = trace_span!(Trace::Knowledge, "index.search", kind = "hnsw", k = k);
         let qn = norm(query);
         let any = |_: u32| true;
         let mut layer = self.top as usize;
@@ -518,6 +520,7 @@ impl VectorIndex for Hnsw {
         let returnable = |s: u32| allow.is_none_or(|f| f(self.ids[s as usize]));
         let ef = self.params.ef_search().max(k);
         let found = self.search_layer(query, qn, &[ep], ef, 0, &returnable);
+        span.record("candidates", found.len());
         let mut top = TopK::new(k);
         for c in found {
             top.push(c.rank.0);
@@ -526,6 +529,7 @@ impl VectorIndex for Hnsw {
         assert!(hits.len() <= k, "hnsw returned more than k");
         assert!(hits.windows(2).all(|w| Ranked(w[0]) > Ranked(w[1])), "hnsw result is not sorted by score then id");
         assert!(hits.iter().all(|n| self.slot_of.contains_key(&n.id)), "hnsw returned a removed id");
+        span.record("hits", hits.len());
         Ok(hits)
     }
 

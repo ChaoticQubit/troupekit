@@ -4,6 +4,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transact
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use troupekit_core::error::CoreError;
+use troupekit_trace::{trace_span, Trace};
 use troupekit_core::store::{Filter, KeywordStore, Scored, VectorRecord, VectorStore};
 use troupekit_index::{new_index, HnswParams, IndexError, IndexKind, PageChange, PageKey, Quantization, VectorIndex, MAX_DIMS, MAX_K};
 
@@ -581,25 +582,29 @@ impl VectorStore for SqliteVectors {
             return Ok(());
         }
         let state = Arc::clone(&self.state);
-        self.store
-            .call(move |conn| {
-                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db)?;
-                let mut cached = write_cached(&state);
-                reload_if_needed(&tx, &state, &mut cached)?;
-                cached.stale = true;
-                let keys = write_rows(&tx, &state.name, &records)?;
-                for (key, record) in keys.iter().zip(&records) {
-                    cached.index.insert(*key, &record.vector).map_err(index_err)?;
-                }
-                let changes = cached.index.take_changes();
-                write_pages(&tx, &state.name, changes)?;
-                let generation = bump_generation(&tx, &state.name)?;
-                tx.commit().map_err(db)?;
-                cached.generation = generation;
-                cached.stale = false;
-                Ok(())
-            })
-            .await
+        let mut span = trace_span!(Trace::Knowledge, "vectors.upsert", index = self.state.name.as_str(), records = records.len());
+        let result = span.instrument(self.store.call(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db)?;
+            let mut cached = write_cached(&state);
+            reload_if_needed(&tx, &state, &mut cached)?;
+            cached.stale = true;
+            let keys = write_rows(&tx, &state.name, &records)?;
+            for (key, record) in keys.iter().zip(&records) {
+                cached.index.insert(*key, &record.vector).map_err(index_err)?;
+            }
+            let changes = cached.index.take_changes();
+            write_pages(&tx, &state.name, changes)?;
+            let generation = bump_generation(&tx, &state.name)?;
+            tx.commit().map_err(db)?;
+            cached.generation = generation;
+            cached.stale = false;
+            Ok(())
+        }))
+        .await;
+        if let Err(e) = &result {
+            span.fail(e.to_string());
+        }
+        result
     }
 
     async fn search(&self, query: &[f32], k: usize, filter: &Filter) -> Result<Vec<Scored>, CoreError> {

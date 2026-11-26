@@ -294,4 +294,3 @@ pub(crate) fn check_k(k: usize) -> Result<(), IndexError> {
     Ok(())
 }
 
-use troupekit_trace as _;

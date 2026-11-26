@@ -339,3 +339,27 @@ fn neighbor_new_sets_fields() {
 fn stateful_allow_filter_never_panics() {
     case_stateful_allow_is_called_safely(brute);
 }
+
+#[test]
+fn index_search_emits_knowledge_span() {
+    use std::sync::Arc;
+    use troupekit_trace::{MemorySink, Trace, TraceSet, Tracer};
+    for (kind, label) in [(IndexKind::BruteForce, "brute"), (IndexKind::Hnsw(HnswParams::default()), "hnsw")] {
+        let mut index = new_index(&kind, 4, Quantization::F32).unwrap();
+        for id in 0..5u64 {
+            index.insert(id, &[1.0, id as f32, 0.5, 0.25]).unwrap();
+        }
+        let sink = Arc::new(MemorySink::default());
+        let tracer = Tracer::builder().categories(TraceSet::none().with(Trace::Knowledge)).sink(sink.clone()).build().unwrap();
+        index.search(&[1.0, 0.0, 0.0, 0.0], 3, None).unwrap();
+        tracer.enter(|| index.search(&[1.0, 0.0, 0.0, 0.0], 3, None).unwrap());
+        drop(tracer);
+        let lines = sink.lines();
+        let starts: Vec<&String> = lines.iter().filter(|l| l.contains("\"t\":\"start\"")).collect();
+        assert_eq!(starts.len(), 1, "{label}: only the traced search records: {lines:?}");
+        assert!(starts[0].contains("\"cat\":\"knowledge\"") && starts[0].contains("\"name\":\"index.search\""));
+        assert!(starts[0].contains(&format!("\"kind\":\"{label}\"")) && starts[0].contains("\"k\":3"), "{}", starts[0]);
+        let end = lines.iter().find(|l| l.contains("\"t\":\"end\"")).unwrap();
+        assert!(end.contains("\"hits\":3") && end.contains("\"candidates\":"), "{end}");
+    }
+}

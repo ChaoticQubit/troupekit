@@ -13,4 +13,3 @@ pub mod secret;
 pub mod store;
 pub mod tool;
 
-use troupekit_trace as _;
