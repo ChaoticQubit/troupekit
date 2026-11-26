@@ -1,3 +1,4 @@
+mod html;
 mod manifest;
 mod record;
 mod redact;

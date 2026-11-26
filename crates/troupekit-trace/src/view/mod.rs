@@ -2,10 +2,12 @@
 //! `read_jsonl` builds a `SpanTree` from a possibly truncated, hostile or
 //! huge JSON lines file; `render_terminal` and `render_html` show it.
 
+mod html;
 mod parse;
 mod terminal;
 mod tree;
 
+pub use html::render_html;
 pub use terminal::{render_terminal, TermOptions};
 pub use tree::{FieldValue, Node, NodeKind, SpanTree};
 
