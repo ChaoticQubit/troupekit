@@ -9,6 +9,7 @@ pub mod fold;
 pub mod middleware;
 pub mod model;
 pub mod request;
+pub mod route;
 #[cfg(feature = "reqwest")]
 pub mod reqwest_transport;
 pub mod sse;
