@@ -233,3 +233,178 @@ async fn goto_and_override_flows_still_refuse_unbuilt_options() {
         "{err}"
     );
 }
+
+const HELPER: &str = "name = 'helper'\ndisplay_name = 'H'\nrole = 'Helps.'\ngoal = 'Answer.'\ninstructions = 'Help.'\nmodel = 'fake/h'\n";
+
+fn leader_model() -> Arc<FnModel> {
+    use troupekit_core::message::{ContentPart, Message, Role};
+    use troupekit_providers::{CompletionResponse, StopReason};
+    Arc::new(FnModel::new("fake/m", |req| {
+        let result = req
+            .messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .find_map(|p| match p {
+                ContentPart::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            });
+        match result {
+            Some(content) => text_reply(&content, 10),
+            None => Ok(CompletionResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    parts: vec![ContentPart::ToolCall {
+                        id: "c1".into(),
+                        name: "delegate_work".into(),
+                        arguments: json!({"coworker": "helper", "task": "say hi"}),
+                    }],
+                },
+                usage: troupekit_core::event::Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cost_usd_micros: 0,
+                },
+                stop: StopReason::ToolUse,
+            }),
+        }
+    }))
+}
+
+struct Delegating {
+    io: SimpleGraphIo,
+    sink: Arc<troupekit_agent::VecSink>,
+}
+
+struct Unshared(SimpleGraphIo);
+
+#[async_trait::async_trait]
+impl GraphIo for Unshared {
+    fn agent(&self) -> &dyn troupekit_agent::AgentIo {
+        self.0.agent()
+    }
+
+    async fn persona(
+        &self,
+        name: &str,
+    ) -> Result<troupekit_agent::Persona, troupekit_agent::AgentError> {
+        self.0.persona(name).await
+    }
+
+    fn conditions(&self) -> &troupekit_graph::Conditions {
+        self.0.conditions()
+    }
+}
+
+fn delegating_io() -> Delegating {
+    let sink = Arc::new(troupekit_agent::VecSink::default());
+    let helper = Arc::new(FnModel::new("fake/h", |_| text_reply("member says hi", 10)));
+    let mut agent = SimpleIo::new(ToolRegistry::new())
+        .with_model("fake/m", leader_model(), PRICE)
+        .with_model("fake/h", helper, PRICE);
+    agent.events = sink.clone();
+    let personas = PersonaLoader::new(vec![Arc::new(MemorySource::new(
+        "test",
+        [
+            ("writer.toml".to_string(), WRITER.to_string()),
+            ("helper.toml".to_string(), HELPER.to_string()),
+        ],
+    ))]);
+    let agent: Arc<dyn troupekit_agent::AgentIo> = Arc::new(agent);
+    Delegating {
+        io: SimpleGraphIo::new(agent, personas),
+        sink,
+    }
+}
+
+fn delegate_flow() -> String {
+    writer_flow("delegates = ['helper']\n")
+}
+
+#[tokio::test]
+async fn delegate_node_calls_member_and_gets_fenced_answer() {
+    let d = delegating_io();
+    let GraphOutcome::Done(state) = run(&delegate_flow(), Map::new(), &d.io).await else {
+        panic!("the delegating run finishes");
+    };
+    let out = state["out"].as_str().unwrap();
+    assert!(out.contains("<untrusted source="), "{out}");
+    assert!(out.contains("member says hi"), "{out}");
+}
+
+#[tokio::test]
+async fn member_events_stream_through_graph_sink() {
+    let d = delegating_io();
+    let flow = Flow::parse("test/r.toml", &delegate_flow()).unwrap();
+    let mut graph = GraphRun::start(flow, Map::new(), Limits::default(), &d.io)
+        .await
+        .unwrap();
+    assert!(matches!(
+        drive(&mut graph, &d.io).await,
+        GraphOutcome::Done(_)
+    ));
+    let events = d.sink.events();
+    let member: Vec<_> = events
+        .iter()
+        .filter(|e| e.run_id != graph.run_id())
+        .collect();
+    assert!(!member.is_empty(), "member events reach the sink");
+    assert!(
+        member.iter().all(|e| e.run_id == member[0].run_id),
+        "one member run, one id"
+    );
+    assert!(
+        events.iter().any(|e| e.run_id == graph.run_id()),
+        "graph events too"
+    );
+}
+
+#[tokio::test]
+async fn delegates_without_agent_arc_fail_at_start() {
+    let io = Unshared(delegating_io().io);
+    let flow = Flow::parse("test/r.toml", &delegate_flow()).unwrap();
+    let err = GraphRun::start(flow, Map::new(), Limits::default(), &io)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Setup(m) if m.contains("delegates need a GraphIo that shares its AgentIo (agent_arc)")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn node_registry_holds_only_persona_and_delegation_tools() {
+    let tools: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
+    let seen = tools.clone();
+    let d = delegating_io();
+    let spy = Arc::new(FnModel::new("fake/m", move |req| {
+        seen.lock()
+            .unwrap()
+            .push(req.tools.iter().map(|t| t.name.clone()).collect());
+        text_reply("done", 10)
+    }));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(FnTool::new("stray", |_, _| async {
+            Ok(ToolOutput::text("no"))
+        }))
+        .unwrap();
+    let mut agent = SimpleIo::new(registry)
+        .with_model("fake/m", spy, PRICE)
+        .with_model(
+            "fake/h",
+            Arc::new(FnModel::new("fake/h", |_| text_reply("hi", 10))),
+            PRICE,
+        );
+    agent.events = d.sink.clone();
+    let io = SimpleGraphIo::new(Arc::new(agent), d.io.personas);
+    assert!(matches!(
+        run(&delegate_flow(), Map::new(), &io).await,
+        GraphOutcome::Done(_)
+    ));
+    let tools = tools.lock().unwrap();
+    assert_eq!(
+        tools[0],
+        vec!["delegate_work", "ask_question"],
+        "no stray tool, no member tool"
+    );
+}

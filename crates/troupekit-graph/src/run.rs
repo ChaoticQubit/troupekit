@@ -1,19 +1,20 @@
 use crate::error::GraphError;
 use crate::flow::{BudgetSplit, JoinMode, Flow, FlowKind, GRAPH_FORMAT_FLOW};
-use crate::io::{Emitter, GraphIo, NodeIo};
+use crate::io::{Emitter, GraphIo, NodeIo, ToolsIo};
 use crate::workflow::{Ask, Node, NodeKind, Workflow};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
-use troupekit_agent::{compile_output, AgentRun, Budget, Limits, Persona, RunState, StepOutcome};
+use std::sync::Arc;
+use troupekit_agent::{compile_output, AgentRun, AgentTool, DelegateSettings, DelegationTools, Budget, Limits, Persona, RunState, StepOutcome};
 use troupekit_core::event::{EventBody, PauseReason, Usage};
 use troupekit_core::ids::RunId;
 use troupekit_core::message::{Message, Role};
 use std::collections::{BTreeMap, BTreeSet};
 use troupekit_core::error::CoreError;
 use troupekit_core::store::{BranchWrite, Checkpoint, CheckpointStore};
-use troupekit_tools::{fence_untrusted, ToolContext, ToolError};
+use troupekit_tools::{fence_untrusted, ToolContext, ToolError, ToolRegistry};
 
 /// Version of the serialized graph run of a 0.1 workflow.
 /// A run of a flow that uses a 0.5 feature writes `GRAPH_FORMAT_FLOW` (2).
@@ -310,6 +311,26 @@ pub struct GraphRun {
     merged: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(skip)]
     reserve: Option<Reserve>,
+    #[serde(skip)]
+    registries: NodeTools,
+}
+
+/// Per-node tool registries of agent nodes with delegates, by node id.
+/// A cache rebuilt from the flow and io after restore, never state, so it
+/// compares equal and shows only node ids.
+#[derive(Clone, Default)]
+struct NodeTools(BTreeMap<String, Arc<ToolRegistry>>);
+
+impl PartialEq for NodeTools {
+    fn eq(&self, _: &NodeTools) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for NodeTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.0.keys()).finish()
+    }
 }
 
 struct Reduced {
@@ -351,6 +372,18 @@ impl GraphRun {
                         .await
                         .map_err(|e| setup(&n.id, e.to_string()))?;
                     let p = node_persona(flow, &n.id, p).map_err(|e| setup(&n.id, e))?;
+                    let delegates = node_delegates(flow, &n.id);
+                    if !delegates.is_empty() && io.agent_arc().is_none() {
+                        return Err(setup(
+                            &n.id,
+                            "delegates need a GraphIo that shares its AgentIo (agent_arc)".into(),
+                        ));
+                    }
+                    for d in delegates {
+                        io.persona(d)
+                            .await
+                            .map_err(|e| setup(&n.id, format!("delegate `{d}`: {e}")))?;
+                    }
                     let probe = vec![Message::text(Role::User, "setup check")];
                     AgentRun::new(&p, probe, Limits::default(), io.agent())
                         .await
@@ -405,6 +438,7 @@ impl GraphRun {
             marks: None,
             merged: BTreeMap::new(),
             reserve: None,
+            registries: NodeTools::default(),
         })
     }
 
@@ -896,6 +930,9 @@ impl GraphRun {
             Ok(true) => return Ok(GraphOutcome::Done(self.state.clone())),
             Ok(false) => {}
         }
+        if let Err(e) = self.prepare_registries(io).await {
+            return Ok(GraphOutcome::Failed(e));
+        }
         let done = match marks {
             Some(m) => self.check_marks(m.done)?,
             None => BTreeMap::new(),
@@ -1342,6 +1379,28 @@ impl GraphRun {
         Ok(true)
     }
 
+    async fn prepare_registries(&mut self, io: &dyn GraphIo) -> Result<(), String> {
+        let missing: Vec<String> = self
+            .branches
+            .iter()
+            .filter(|b| matches!(b.at, At::Agent { .. }))
+            .map(|b| b.node.clone())
+            .filter(|id| !self.registries.0.contains_key(id))
+            .filter(|id| !node_delegates(self.flow.as_deref(), id).is_empty())
+            .collect();
+        for id in missing {
+            let NodeKind::Agent { persona, .. } = &self.node(&id).kind else {
+                unreachable!("agent branches sit at agent nodes");
+            };
+            let fail = |m: String| format!("node `{id}`: {m}");
+            let p = io.persona(persona).await.map_err(|e| fail(e.to_string()))?;
+            let delegates = node_delegates(self.flow.as_deref(), &id).to_vec();
+            let (reg, _) = node_registry(io, &delegates, &p.tools).await.map_err(fail)?;
+            self.registries.0.insert(id, Arc::new(reg));
+        }
+        Ok(())
+    }
+
     async fn run_branches(
         &mut self,
         io: &dyn GraphIo,
@@ -1351,6 +1410,7 @@ impl GraphRun {
     ) -> (Vec<Work>, Option<CoreError>) {
         let workers = self.workers();
         let (wf, state, run_id, step) = (&self.workflow, &self.state, self.run_id, self.steps);
+        let regs = &self.registries.0;
         let futures = self
             .branches
             .iter_mut()
@@ -1368,7 +1428,7 @@ impl GraphRun {
                     let node = wf.node(&b.node).expect("branches sit at workflow nodes");
                     let (work, finished) = match (&mut b.at, &node.kind) {
                         (At::Agent { run, .. }, NodeKind::Agent { persona, .. }) => {
-                            let nio = NodeIo::new(em, &node.id, persona);
+                            let nio = NodeIo::new(em, &node.id, persona).with_tools(regs.get(&node.id).map(|r| r.as_ref()));
                             let outcome = run.step(&nio).await;
                             let finished = AgentDone::of(&outcome).map(|outcome| Finished::Agent {
                                 run: run.clone(),
@@ -1570,7 +1630,17 @@ impl GraphRun {
                         }
                         let data = reads(&self.workflow, &self.state, &node.reads, item.as_deref()).map_err(fail)?;
                         let p = io.persona(persona).await.map_err(|e| fail(e.to_string()))?;
-                        let p = node_persona(self.flow.as_deref(), &node.id, p).map_err(fail)?;
+                        let mut p = node_persona(self.flow.as_deref(), &node.id, p).map_err(fail)?;
+                        let delegates = node_delegates(self.flow.as_deref(), &node.id).to_vec();
+                        let tools = if delegates.is_empty() {
+                            None
+                        } else {
+                            let (reg, names) = node_registry(io, &delegates, &p.tools).await.map_err(fail)?;
+                            p.tools.extend(names);
+                            let reg = Arc::new(reg);
+                            self.registries.0.insert(node.id.clone(), reg.clone());
+                            Some(reg)
+                        };
                         let (call_cap, run_cap) =
                             (p.budget.call_usd_micros, p.budget.run_usd_micros);
                         let limits = node_limits(
@@ -1580,9 +1650,17 @@ impl GraphRun {
                             run_cap,
                         );
                         let input = vec![agent_input(prompt.as_deref(), data)];
-                        let run = AgentRun::new(&p, input, limits, io.agent())
-                            .await
-                            .map_err(|e| fail(e.to_string()))?;
+                        let run = match &tools {
+                            None => AgentRun::new(&p, input, limits, io.agent()).await,
+                            Some(reg) => {
+                                let tio = ToolsIo {
+                                    inner: io.agent(),
+                                    tools: reg,
+                                };
+                                AgentRun::new(&p, input, limits, &tio).await
+                            }
+                        }
+                        .map_err(|e| fail(e.to_string()))?;
                         self.branches[i].at = At::Agent {
                             run: Box::new(run),
                             call_cap,
@@ -1670,6 +1748,55 @@ fn node_persona(flow: Option<&Flow>, id: &str, mut p: Persona) -> Result<Persona
     Ok(p)
 }
 
+fn node_delegates<'f>(flow: Option<&'f Flow>, id: &str) -> &'f [String] {
+    match flow.and_then(|f| f.kind(id)) {
+        Some(FlowKind::Agent { delegates, .. }) => delegates,
+        _ => &[],
+    }
+}
+
+async fn node_registry(
+    io: &dyn GraphIo,
+    delegates: &[String],
+    persona_tools: &[String],
+) -> Result<(ToolRegistry, Vec<String>), String> {
+    let shared = io
+        .agent_arc()
+        .ok_or("delegates need a GraphIo that shares its AgentIo (agent_arc)")?;
+    let mut settings = DelegateSettings::default();
+    if let Some(store) = io.checkpoints() {
+        settings = settings.with_store(store);
+    }
+    let mut coworkers = Vec::with_capacity(delegates.len());
+    for name in delegates {
+        let member = io.persona(name).await.map_err(|e| format!("delegate `{name}`: {e}"))?;
+        let description = format!("{}: {}", member.display_name, member.role);
+        let tool = AgentTool::new(name, &description, member, shared.clone(), settings.clone())
+            .map_err(|e| e.to_string())?;
+        coworkers.push((name.clone(), tool));
+    }
+    let delegation = DelegationTools::new(coworkers, settings).map_err(|e| e.to_string())?;
+    let mut reg = ToolRegistry::new();
+    for name in persona_tools {
+        let tool = io
+            .agent()
+            .tools()
+            .get(name)
+            .ok_or_else(|| format!("tool `{name}` is not registered"))?;
+        reg.register(tool).map_err(|e| e.to_string())?;
+    }
+    let mut names = Vec::new();
+    for tool in delegation.tools() {
+        names.push(tool.spec().name.clone());
+        reg.register(tool).map_err(|e| e.to_string())?;
+    }
+    assert!(
+        reg.specs().len() == persona_tools.len() + names.len(),
+        "the node registry holds only persona and delegation tools"
+    );
+    Ok((reg, names))
+}
+
 fn goto_choice(output: &Value, targets: &[String]) -> Result<String, String> {
     let next = output.get("next").and_then(Value::as_str).unwrap_or_default();
     targets
@@ -1681,16 +1808,11 @@ fn goto_choice(output: &Value, targets: &[String]) -> Result<String, String> {
 
 fn run_plain(kind: &FlowKind) -> FlowKind {
     match kind.clone() {
-        FlowKind::Agent {
-            persona,
-            prompt,
-            delegates,
-            ..
-        } => FlowKind::Agent {
+        FlowKind::Agent { persona, prompt, .. } => FlowKind::Agent {
             persona,
             prompt,
             goto: Vec::new(),
-            delegates,
+            delegates: Vec::new(),
             model: None,
             defer: false,
         },
