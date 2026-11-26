@@ -4,8 +4,14 @@ const MANIFEST: &str = include_str!("../Cargo.toml");
 /// Input: the manifest text. Output: every non-blank line after the header
 /// and before the next table header. Panics when the table is missing.
 fn dependency_lines(manifest: &str) -> Vec<&str> {
-    let mut lines = manifest.lines().skip_while(|line| line.trim() != "[dependencies]");
-    assert_eq!(lines.next().map(str::trim), Some("[dependencies]"), "no [dependencies] table");
+    let mut lines = manifest
+        .lines()
+        .skip_while(|line| line.trim() != "[dependencies]");
+    assert_eq!(
+        lines.next().map(str::trim),
+        Some("[dependencies]"),
+        "no [dependencies] table"
+    );
     lines
         .take_while(|line| !line.trim_start().starts_with('['))
         .filter(|line| !line.trim().is_empty())
