@@ -1,0 +1,1 @@
+{"$defs": {"point": {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]}}, "anyOf": [{"$ref": "#/$defs/point"}, {"type": "null"}, {"$ref": "#/$defs/point"}]}
