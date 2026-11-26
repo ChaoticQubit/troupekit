@@ -468,12 +468,18 @@ impl Agent {
         })
     }
 
+    /// Returns the model selector: `.model(..)`, else a TOML persona's
+    /// `model`. Output: `None` when neither is set.
+    pub(crate) fn selector(&self) -> Option<String> {
+        self.model.clone().or_else(|| self.toml_selector())
+    }
+
     /// Returns the catalog vendor the model selector names, from the
     /// builder's catalog or the built-in one, reading a TOML persona's
     /// model when no `.model(..)` is set. Output: `None` for an alias or
     /// a vendor the catalog does not list.
     pub(crate) fn vendor_spec(&self) -> Option<VendorSpec> {
-        let selector = self.model.clone().or_else(|| self.toml_selector())?;
+        let selector = self.selector()?;
         let (vendor, _) = selector.split_once('/')?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
         let spec = catalog.vendor(vendor)?.clone();

@@ -13,3 +13,10 @@ pub use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolSpec};
 pub fn vendor_of(agent: &Agent) -> Option<troupekit_providers::catalog::VendorSpec> {
     agent.vendor_spec()
 }
+
+/// Returns `agent`'s model selector, from `.model(..)` or a TOML
+/// persona's `model`, for neutral-layer error messages. Not public API.
+/// Output: `None` when no model is set.
+pub fn selector_of(agent: &Agent) -> Option<String> {
+    agent.selector()
+}
