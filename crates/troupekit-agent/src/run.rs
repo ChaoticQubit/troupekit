@@ -524,13 +524,16 @@ impl AgentRun {
             stream = stream,
             messages = content(serde_json::to_string(&req.messages).expect("messages serialize")),
         );
-        let started = Instant::now();
+        let started = span.is_enabled().then(Instant::now);
         let mut first_delta: Option<Instant> = None;
         let result = if stream {
             let (sink, clock, run_id, seq) = (io.events(), io.clock(), self.run_id, &mut self.seq);
             let first = &mut first_delta;
+            let timed = started.is_some();
             let mut on_delta = |d: &Delta| {
-                first.get_or_insert_with(Instant::now);
+                if timed {
+                    first.get_or_insert_with(Instant::now);
+                }
                 if let Delta::TextDelta { text } = d {
                     sink.emit(Event {
                         run_id,
@@ -545,7 +548,7 @@ impl AgentRun {
         } else {
             span.instrument(handle.model.complete(req)).await
         };
-        if let Some(at) = first_delta {
+        if let (Some(started), Some(at)) = (started, first_delta) {
             span.record("ttft_us", at.saturating_duration_since(started).as_micros() as u64);
         }
         if let Err(e) = &result {
