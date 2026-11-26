@@ -6,7 +6,7 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
-use troupekit_agent::{AgentRun, Budget, Limits, RunState, StepOutcome};
+use troupekit_agent::{compile_output, AgentRun, Budget, Limits, Persona, RunState, StepOutcome};
 use troupekit_core::event::{EventBody, PauseReason, Usage};
 use troupekit_core::ids::RunId;
 use troupekit_core::message::{Message, Role};
@@ -341,7 +341,7 @@ impl GraphRun {
     ) -> Result<GraphRun, GraphError> {
         let setup = |id: &str, m: String| GraphError::Setup(format!("node `{id}`: {m}"));
         for n in &workflow.nodes {
-            if flow.is_some_and(|f| matches!(f.kind(&n.id), Some(FlowKind::Map { .. }))) {
+            if flow.is_some_and(|f| matches!(f.kind(&n.id), Some(FlowKind::Map { .. } | FlowKind::Switch { .. }))) {
                 continue;
             }
             match &n.kind {
@@ -350,6 +350,7 @@ impl GraphRun {
                         .persona(persona)
                         .await
                         .map_err(|e| setup(&n.id, e.to_string()))?;
+                    let p = node_persona(flow, &n.id, p).map_err(|e| setup(&n.id, e))?;
                     let probe = vec![Message::text(Role::User, "setup check")];
                     AgentRun::new(&p, probe, Limits::default(), io.agent())
                         .await
@@ -963,8 +964,18 @@ impl GraphRun {
                     };
                     self.usage += run.usage();
                     self.branches[i].at = At::Left;
+                    let target = match self.goto(&node.id) {
+                        None => None,
+                        Some(targets) => match goto_choice(&output, targets) {
+                            Ok(t) => Some(t),
+                            Err(e) => return self.fail_after(reduced, format!("node `{}`: {e}", node.id)),
+                        },
+                    };
                     if let Err(e) = self.write(&node, i, output, &mut reduced) {
                         return GraphOutcome::Failed(e);
+                    }
+                    if let Some(t) = target {
+                        self.branches[i] = Branch::enter(&t);
                     }
                 }
                 Work::Tool(Ok(output)) => {
@@ -1056,6 +1067,28 @@ impl GraphRun {
 
     fn flow_kind(&self, id: &str) -> Option<&FlowKind> {
         self.flow.as_ref()?.kind(id)
+    }
+
+    fn goto(&self, id: &str) -> Option<&[String]> {
+        match self.flow_kind(id) {
+            Some(FlowKind::Agent { goto, .. }) if !goto.is_empty() => Some(goto),
+            _ => None,
+        }
+    }
+
+    fn switch_to(&self, id: &str, on: &str) -> Result<String, String> {
+        let label = match self.state.get(on) {
+            Some(Value::String(v)) => v.clone(),
+            Some(Value::Bool(v)) => v.to_string(),
+            Some(Value::Null) | None => return Err(format!("reads `{on}`, which is not set")),
+            Some(other) => return Err(format!("`{on}` is not a string, enum or bool: {other}")),
+        };
+        self.workflow
+            .next(id)
+            .into_iter()
+            .find(|e| e.when.as_deref() == Some(label.as_str()))
+            .map(|e| e.to.clone())
+            .ok_or_else(|| format!("no edge for value `{label}` of `{on}`"))
     }
 
     fn deferred(&self, id: &str) -> bool {
@@ -1482,6 +1515,7 @@ impl GraphRun {
                     continue;
                 }
                 changed = true;
+                assert!(self.goto(&b.node).is_none(), "goto agents route on their choice, never by leaving");
                 let out = self.workflow.next(&b.node);
                 assert!(!out.is_empty(), "only end nodes have no out-edges");
                 next.extend(out.into_iter().map(|e| Branch::enter(&e.to)));
@@ -1498,6 +1532,12 @@ impl GraphRun {
                     self.expand_map(i)?;
                     changed = true;
                     break;
+                }
+                if let Some(FlowKind::Switch { on }) = self.flow_kind(&node.id) {
+                    let to = self.switch_to(&node.id, on).map_err(fail)?;
+                    self.branches[i] = Branch::enter(&to);
+                    changed = true;
+                    continue;
                 }
                 let item = self.branches[i].item.clone();
                 match &node.kind {
@@ -1530,6 +1570,7 @@ impl GraphRun {
                         }
                         let data = reads(&self.workflow, &self.state, &node.reads, item.as_deref()).map_err(fail)?;
                         let p = io.persona(persona).await.map_err(|e| fail(e.to_string()))?;
+                        let p = node_persona(self.flow.as_deref(), &node.id, p).map_err(fail)?;
                         let (call_cap, run_cap) =
                             (p.budget.call_usd_micros, p.budget.run_usd_micros);
                         let limits = node_limits(
@@ -1613,21 +1654,44 @@ fn apply_finished(b: &mut Branch, finished: Finished) -> Work {
     }
 }
 
+fn node_persona(flow: Option<&Flow>, id: &str, mut p: Persona) -> Result<Persona, String> {
+    let Some(FlowKind::Agent { goto, model, .. }) = flow.and_then(|f| f.kind(id)) else {
+        return Ok(p);
+    };
+    if let Some(model) = model {
+        p.model = model.clone();
+    }
+    if !goto.is_empty() {
+        let mut fields = toml::Table::new();
+        fields.insert("next".into(), toml::Value::String(format!("enum({})", goto.join(", "))));
+        fields.insert("reason".into(), toml::Value::String("string".into()));
+        p.output = Some(compile_output(&fields).map_err(|e| format!("goto targets: {e}"))?);
+    }
+    Ok(p)
+}
+
+fn goto_choice(output: &Value, targets: &[String]) -> Result<String, String> {
+    let next = output.get("next").and_then(Value::as_str).unwrap_or_default();
+    targets
+        .iter()
+        .find(|t| t.as_str() == next)
+        .cloned()
+        .ok_or_else(|| format!("chose `{next}`, which is not one of its goto targets"))
+}
+
 fn run_plain(kind: &FlowKind) -> FlowKind {
     match kind.clone() {
         FlowKind::Agent {
             persona,
             prompt,
-            goto,
             delegates,
-            model,
             ..
         } => FlowKind::Agent {
             persona,
             prompt,
-            goto,
+            goto: Vec::new(),
             delegates,
-            model,
+            model: None,
             defer: false,
         },
         FlowKind::Tool { tool, .. } => FlowKind::Tool { tool, defer: false },
@@ -1644,7 +1708,7 @@ fn unsupported(flow: &Flow) -> Option<String> {
         return Some("untracked state".into());
     }
     let node = flow.workflow().nodes.iter().find(|n| match flow.kind(&n.id) {
-        Some(FlowKind::Map { .. }) => false,
+        Some(FlowKind::Map { .. } | FlowKind::Switch { .. }) => false,
         kind => kind.map(run_plain) != Some(FlowKind::from_v1(&n.kind)),
     })?;
     Some(format!("node `{}` of a 0.5 kind or option", node.id))
