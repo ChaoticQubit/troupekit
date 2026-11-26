@@ -41,6 +41,8 @@ pub enum KitError {
     Failed { run_id: RunId, reason: String },
     #[error("run {run_id} paused: {reason:?}")]
     Paused { run_id: RunId, reason: PauseReason },
+    #[error("run {run_id} was cancelled; resume it from its last checkpoint")]
+    Cancelled { run_id: RunId },
     #[error("run {run_id}: gave up after {attempts} retries: {last_error}")]
     Retries {
         run_id: RunId,

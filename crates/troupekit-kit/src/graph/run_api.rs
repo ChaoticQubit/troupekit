@@ -1,12 +1,15 @@
-use super::{input_state, BuiltGraph, Graph};
-use crate::built::{Progress, MAX_STEPS_PER_WINDOW};
+use super::{input_state, BuiltGraph, Graph, GraphReport};
+use crate::built::{Progress, Queue, RunStream, StreamIo, StreamSettings, MAX_STEPS_PER_WINDOW};
 use crate::error::KitError;
+use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
-use troupekit_agent::EventSink;
+use troupekit_agent::{AgentError, AgentIo, EventSink, Persona};
 use troupekit_core::ids::RunId;
+use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::store::CheckpointStore;
+use troupekit_graph::{Conditions, GraphIo};
 use troupekit_graph::{GraphOutcome, GraphRun};
 
 impl Graph {
@@ -16,6 +19,16 @@ impl Graph {
     pub fn events(mut self, sink: Arc<dyn EventSink>) -> Self {
         self.events = Some(sink);
         self
+    }
+
+    /// Builds the graph and starts a streamed run on `input`.
+    /// Output: the stream once the run id is known, or the first build
+    /// or setup error. Keep a `BuiltGraph` to run many times.
+    pub async fn stream(
+        self,
+        input: impl Into<String>,
+    ) -> Result<RunStream<GraphReport>, KitError> {
+        self.build().await?.stream(input).await
     }
 }
 
@@ -82,6 +95,49 @@ impl BuiltGraph {
         Ok(Progress::Pending { run_id })
     }
 
+    /// Starts a graph run on `input` and returns the stream of its events
+    /// and its agent nodes' events, with the default buffer. Fails at the
+    /// call on a bad setup. Needs no durable storage.
+    pub async fn stream(
+        &self,
+        input: impl Into<String>,
+    ) -> Result<RunStream<GraphReport>, KitError> {
+        self.stream_with(input, StreamSettings::default()).await
+    }
+
+    /// Starts a streamed graph run on `input` with `settings`. Events also
+    /// reach the graph's own `.events(..)` sink. Fails with `Config` when
+    /// the capacity is out of range, else as `stream`.
+    pub async fn stream_with(
+        &self,
+        input: impl Into<String>,
+        settings: StreamSettings,
+    ) -> Result<RunStream<GraphReport>, KitError> {
+        let inner = &self.inner;
+        settings.check(&inner.owner)?;
+        let queue = Arc::new(Queue::new(settings.capacity));
+        let io = StreamGraphIo {
+            graph: self.clone(),
+            agent: StreamIo {
+                base: inner.io.agent.clone(),
+                queue: queue.clone(),
+            },
+        };
+        let state = input_state(&input.into());
+        let mut run =
+            GraphRun::new(inner.workflow.clone(), state, inner.limits.clone(), &io).await?;
+        let run_id = run.run_id();
+        let store: Arc<dyn CheckpointStore> = match &inner.store {
+            Some(store) => store.clone(),
+            None => Arc::new(InMemCheckpoints::default()),
+        };
+        store.save(run.checkpoint()).await?;
+        let graph = self.clone();
+        let task = async move { graph.finish(&io, &mut run, store.as_ref()).await };
+        assert_eq!(queue.dropped(), 0);
+        Ok(RunStream::spawn(run_id, queue, task))
+    }
+
     async fn load(&self, run_id: RunId) -> Result<GraphRun, KitError> {
         let inner = &self.inner;
         let store = self.durable("resume_for")?;
@@ -119,5 +175,25 @@ fn text_of(output: &Value) -> String {
     match output {
         Value::String(text) => text.clone(),
         other => other.to_string(),
+    }
+}
+
+struct StreamGraphIo {
+    graph: BuiltGraph,
+    agent: StreamIo<Arc<dyn AgentIo>>,
+}
+
+#[async_trait]
+impl GraphIo for StreamGraphIo {
+    fn agent(&self) -> &dyn AgentIo {
+        &self.agent
+    }
+
+    async fn persona(&self, name: &str) -> Result<Persona, AgentError> {
+        self.graph.inner.io.persona(name).await
+    }
+
+    fn conditions(&self) -> &Conditions {
+        self.graph.inner.io.conditions()
     }
 }

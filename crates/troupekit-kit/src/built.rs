@@ -14,8 +14,11 @@ use troupekit_core::message::{Message, Role};
 use troupekit_core::store::CheckpointStore;
 
 mod start;
+mod stream;
 
 pub use start::{Progress, MAX_STEPS_PER_WINDOW};
+pub(crate) use stream::{Queue, StreamIo};
+pub use stream::{RunStream, StreamSettings};
 
 const BASE_RETRY_MS: u64 = 500;
 const MAX_RETRY_MS: u64 = 30_000;
@@ -198,7 +201,7 @@ impl BuiltAgent {
             Some(store) => store.clone(),
             None => Arc::new(InMemCheckpoints::default()),
         };
-        self.finish(&mut run, store.as_ref()).await
+        self.finish(&inner.io, &mut run, store.as_ref()).await
     }
 
     /// Continues run `run_id` from its latest checkpoint, after a crash
@@ -219,7 +222,10 @@ impl BuiltAgent {
             ));
         };
         let mut run = AgentRun::from_checkpoint(&checkpoint)?;
-        Ok(self.finish(&mut run, store.as_ref()).await?.text)
+        Ok(self
+            .finish(&self.inner.io, &mut run, store.as_ref())
+            .await?
+            .text)
     }
 
     /// Returns the validated persona this agent runs.
@@ -254,10 +260,10 @@ impl BuiltAgent {
 
     async fn finish(
         &self,
+        io: &dyn AgentIo,
         run: &mut AgentRun,
         store: &dyn CheckpointStore,
     ) -> Result<RunOutcome, KitError> {
-        let io: &dyn AgentIo = &self.inner.io;
         match run.state().clone() {
             RunState::Done { output } => return Ok(outcome(run, output)),
             RunState::Failed { error } => {

@@ -364,3 +364,28 @@ async fn two_toml_personas_share_a_graph() {
         vec!["support".to_string(), "billing".to_string()]
     );
 }
+
+/// Shouts the answer text.
+#[troupekit::tool]
+fn shout_answer(answer: String) -> String {
+    answer.to_uppercase()
+}
+
+#[tokio::test]
+async fn step_fed_by_typed_agent_is_refused() {
+    let err = Graph::new("typed")
+        .agent(
+            "answer",
+            Agent::from_toml_file(FIXTURE)
+                .model_client(support_model())
+                .tool(lookup_order()),
+        )
+        .step("loud", shout_answer)
+        .build()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KitError::Config { .. }), "{err:?}");
+    let text = err.to_string();
+    assert!(text.contains("step `loud`"), "{text}");
+    assert!(text.contains("typed output"), "{text}");
+}

@@ -23,3 +23,4 @@ host_transport_streams_chunks
 full_buffer_drops_deltas_not_lifecycle
 callback_from_worker_thread_no_deadlock
 concurrent_runs_on_one_handle
+host_request_debug_hides_key
