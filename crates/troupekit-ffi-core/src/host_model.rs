@@ -11,6 +11,10 @@ use troupekit_core::message::{ContentPart, Message, Role};
 use troupekit_providers::model::MAX_REPLY_BYTES;
 use troupekit_providers::{CompletionRequest, CompletionResponse, Delta, Model, StopReason};
 
+/// Starts the message of every host model failure, so the run's
+/// `Failed` reason maps to `ErrorCode::HostCallback`.
+pub(crate) const HOST_CALLBACK: &str = "host model callback failed: ";
+
 const REPAIR: &str = "Your last reply was not valid. Reply again with only one JSON object: \
 {\"tool\": \"<name>\", \"arguments\": {...}} to call a tool, or {\"answer\": ...} to answer.";
 
@@ -142,10 +146,8 @@ impl HostModelAdapter {
         }
         let reply = match joined {
             Ok(Ok(Ok(reply))) => reply,
-            Ok(Ok(Err(error))) => return Err(failed(format!("host model: {}", error.message))),
-            Ok(Err(_)) | Err(_) => {
-                return Err(failed(format!("host model `{}` panicked", self.id)))
-            }
+            Ok(Ok(Err(error))) => return Err(failed(error.message)),
+            Ok(Err(_)) | Err(_) => return Err(failed(format!("`{}` panicked", self.id))),
         };
         let size = reply.text.len() + reply.tool_calls_json.as_ref().map_or(0, String::len);
         if size > MAX_REPLY_BYTES {
@@ -156,7 +158,10 @@ impl HostModelAdapter {
 }
 
 fn failed(message: String) -> ProviderError {
-    ProviderError::new(ProviderErrorKind::BadRequest, message)
+    ProviderError::new(
+        ProviderErrorKind::BadRequest,
+        format!("{HOST_CALLBACK}{message}"),
+    )
 }
 
 fn decode(message: &str) -> ProviderError {

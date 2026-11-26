@@ -230,8 +230,9 @@ async fn host_error_fails_the_run_without_retry() {
         .await
         .unwrap();
     let err = handle.run("hi".into()).await.unwrap_err();
-    assert_eq!(err.code, ErrorCode::Failed);
+    assert_eq!(err.code, ErrorCode::HostCallback);
     assert!(err.message.contains("script ran out"), "{err}");
+    assert!(err.run_id.is_some());
     assert_eq!(model.seen.lock().unwrap().len(), 1);
 }
 
@@ -246,4 +247,44 @@ async fn priced_host_model_charges_its_price() {
         .unwrap();
     let result = handle.run_outcome("hi".into()).await.unwrap();
     assert_eq!(result.usage.cost_usd_micros, 12);
+}
+
+#[tokio::test]
+async fn bad_reply_after_repair_is_failed_not_host_callback() {
+    let model = scripted(
+        HostModelCaps::default(),
+        vec![(vec![], reply("three")), (vec![], reply("still three"))],
+    );
+    let err = agent(model)
+        .build()
+        .await
+        .unwrap()
+        .run("1 + 2".into())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Failed);
+}
+
+#[tokio::test]
+async fn host_model_with_host_transport_names_the_selector() {
+    struct Offline;
+    impl troupekit_ffi_core::HostTransport for Offline {
+        fn send(
+            &self,
+            _request: troupekit_ffi_core::HostHttpRequest,
+            _sink: Arc<troupekit_ffi_core::HttpSink>,
+        ) -> Result<(), HostError> {
+            Err(HostError::new("offline"))
+        }
+    }
+    let model = scripted(HostModelCaps::default(), vec![]);
+    let err = AgentBuilder::new("greeter".into())
+        .instructions("Say hello.".into())
+        .host_model(model)
+        .host_transport(Arc::new(Offline))
+        .build()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Config);
+    assert!(err.message.contains("`host/scripted`"), "{err}");
 }

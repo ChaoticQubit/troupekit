@@ -64,6 +64,13 @@ fn kit_errors(run_id: RunId) -> Vec<(KitError, ErrorCode)> {
             ErrorCode::Failed,
         ),
         (
+            KitError::Failed {
+                run_id,
+                reason: "BadRequest: host model callback failed: offline".into(),
+            },
+            ErrorCode::HostCallback,
+        ),
+        (
             KitError::Paused {
                 run_id,
                 reason: PauseReason::Budget {

@@ -62,8 +62,9 @@ impl FfiError {
 
 impl From<troupekit_kit::KitError> for FfiError {
     /// Maps every kit error to its stable code, with the kit's message
-    /// (which never holds a key) and the run id for run outcomes. A kit
-    /// variant added later maps to `Internal` until it gets its own code.
+    /// (which never holds a key) and the run id for run outcomes. A run
+    /// failed by a host model is `HostCallback`. A kit variant added later
+    /// maps to `Internal` until it gets its own code.
     fn from(err: troupekit_kit::KitError) -> FfiError {
         use troupekit_kit::KitError as K;
         let message = err.to_string();
@@ -79,6 +80,9 @@ impl From<troupekit_kit::KitError> for FfiError {
             K::Store(_) => (ErrorCode::Store, None),
             #[cfg(feature = "knowledge")]
             K::Context(_) => (ErrorCode::Context, None),
+            K::Failed { run_id, reason } if reason.contains(crate::host_model::HOST_CALLBACK) => {
+                (ErrorCode::HostCallback, Some(run_id.to_string()))
+            }
             K::Failed { run_id, .. } => (ErrorCode::Failed, Some(run_id.to_string())),
             K::Paused { run_id, .. } => (ErrorCode::Paused, Some(run_id.to_string())),
             K::Retries { run_id, .. } => (ErrorCode::Retries, Some(run_id.to_string())),

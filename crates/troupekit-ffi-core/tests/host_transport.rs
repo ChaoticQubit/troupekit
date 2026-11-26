@@ -34,6 +34,7 @@ async fn host_transport_needs_a_catalog_model() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Config);
     assert!(err.message.contains("host_transport"), "{err}");
+    assert!(err.message.contains("`my-alias`"), "{err}");
 }
 
 #[tokio::test]

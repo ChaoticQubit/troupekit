@@ -362,9 +362,13 @@ impl AgentBuilder {
 
 fn with_transport(agent: Agent, host: Arc<dyn HostTransport>) -> Result<Agent, FfiError> {
     let Some(vendor) = troupekit_kit::__private::vendor_of(&agent) else {
+        let named = match troupekit_kit::__private::selector_of(&agent) {
+            Some(selector) => format!("model `{selector}` names no catalog vendor"),
+            None => "no model is set".to_string(),
+        };
         return Err(FfiError::new(
             ErrorCode::Config,
-            "host_transport needs .model(\"vendor/model\") of a catalog vendor",
+            format!("host_transport needs a catalog .model(\"vendor/model\"): {named}"),
         ));
     };
     if origin(&vendor.base_url).is_none() {
