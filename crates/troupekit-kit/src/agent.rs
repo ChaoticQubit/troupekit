@@ -528,17 +528,18 @@ impl Agent {
         self.route.check_judges(name, &persona)?;
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
-        let handle = resolve(ModelChoice {
-            agent: name,
-            selector,
-            catalog,
-            client: self.model_client.clone(),
-            price: self.price,
-            api_key: self.api_key.clone(),
-            api_key_env: self.api_key_env.as_deref(),
-            transport: self.transport.clone(),
+        let handle = self.route.handle(name, || {
+            resolve(ModelChoice {
+                agent: name,
+                selector,
+                catalog,
+                client: self.model_client.clone(),
+                price: self.price,
+                api_key: self.api_key.clone(),
+                api_key_env: self.api_key_env.as_deref(),
+                transport: self.transport.clone(),
+            })
         })?;
-        let handle = self.route.handle(name, handle)?;
         Ok(Prepared {
             persona,
             persona_text,

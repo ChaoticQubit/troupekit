@@ -878,3 +878,30 @@ fn battery_above_100_counts_as_full() {
         Some(100)
     );
 }
+
+#[test]
+fn context_limit_applies_to_remote_targets() {
+    let policy = RoutePolicy::parse(
+        "remote.toml",
+        "name = \"remote\"\n[[target]]\nid = \"small\"\ncontext_tokens = 8192\n\
+         [[target]]\nid = \"big\"\ncontext_tokens = 32768\n[[target]]\nid = \"open\"\n",
+    )
+    .unwrap();
+    let bound = vec![
+        BoundTarget::remote("small"),
+        BoundTarget::remote("big"),
+        BoundTarget::remote("open"),
+    ];
+    let tags = RouteTags::default();
+    let long = Signals::default()
+        .with_prompt_tokens(9_000)
+        .with_max_tokens(0);
+    assert_eq!(ids(&decide(&policy, &bound, &tags, &long)), ["big", "open"]);
+    let exact = Signals::default()
+        .with_prompt_tokens(8_000)
+        .with_max_tokens(192);
+    assert_eq!(
+        ids(&decide(&policy, &bound, &tags, &exact)),
+        ["small", "big", "open"]
+    );
+}

@@ -38,7 +38,10 @@ async fn route_binds_cloud_and_refuses_unknown_targets() {
     let edge = policy("name = \"office\"\n[[target]]\nid = \"edge\"\n");
     let text = config_error(echo().route(edge)).await;
     assert!(text.contains("edge"), "{text}");
-    assert!(text.contains("`local`") && text.contains("`cloud`"), "{text}");
+    assert!(
+        text.contains("`local`") && text.contains("`cloud`"),
+        "{text}"
+    );
 
     let with_local =
         policy("name = \"office\"\n[[target]]\nid = \"local\"\n[[target]]\nid = \"cloud\"\n");
@@ -82,8 +85,7 @@ async fn private_agent_refuses_cloud_embedder() {
     let plain = Knowledge::dir(dir.path()).embedder(Arc::new(HashingEmbedder::new(32)));
     let text = config_error(echo().private(true).knowledge(plain)).await;
     assert!(text.contains("on_device_embedder"), "{text}");
-    let marked =
-        Knowledge::dir(dir.path()).on_device_embedder(Arc::new(HashingEmbedder::new(32)));
+    let marked = Knowledge::dir(dir.path()).on_device_embedder(Arc::new(HashingEmbedder::new(32)));
     let text = config_error(echo().private(true).knowledge(marked)).await;
     assert!(!text.contains("embedder"), "{text}");
     assert!(text.contains("on-device"), "{text}");
@@ -150,4 +152,24 @@ fn defaults_are_the_safe_values() {
     assert!(text.contains("route: false"), "{text}");
     let graph = format!("{:?}", Graph::new("pipe"));
     assert!(graph.contains("private: false"), "{graph}");
+}
+
+#[tokio::test]
+async fn cloud_key_is_needed_only_when_a_cloud_target_can_run() {
+    let keyless = || {
+        Agent::new("keyless")
+            .instructions("Echo the user.")
+            .model("openai/gpt-6-luna")
+            .api_key_env("TROUPEKIT_TEST_KEY_THAT_IS_NEVER_SET")
+    };
+    let text = config_error(keyless().private(true)).await;
+    assert!(text.contains("on-device"), "{text}");
+    let local_only = policy("name = \"office\"\n[[target]]\nid = \"local\"\n");
+    let text = config_error(keyless().route(local_only)).await;
+    assert!(text.contains(".local("), "{text}");
+    let cloud = policy("name = \"office\"\n[[target]]\nid = \"cloud\"\n");
+    let err = keyless().route(cloud).build().await.unwrap_err();
+    assert!(matches!(err, KitError::MissingKey { .. }), "{err}");
+    let err = keyless().build().await.unwrap_err();
+    assert!(matches!(err, KitError::MissingKey { .. }), "{err}");
 }

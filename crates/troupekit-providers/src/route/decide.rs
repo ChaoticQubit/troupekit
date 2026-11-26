@@ -157,11 +157,10 @@ pub fn decide(
     }
     let needed = signals.prompt_tokens.saturating_add(signals.max_tokens);
     pass.drop_if("context", |t| {
-        t.on_device
-            && policy
-                .target(&t.id)
-                .and_then(|p| p.context_tokens())
-                .is_some_and(|limit| limit < needed)
+        policy
+            .target(&t.id)
+            .and_then(|p| p.context_tokens())
+            .is_some_and(|limit| limit < needed)
     });
     let device = policy.device();
     if let (Some(min), Some(level)) = (device.min_battery_percent(), signals.battery_percent) {

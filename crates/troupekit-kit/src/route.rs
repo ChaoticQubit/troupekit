@@ -89,7 +89,15 @@ impl RouteConfig {
         Ok(())
     }
 
-    pub(crate) fn handle(&self, owner: &str, cloud: ModelHandle) -> Result<ModelHandle, KitError> {
+    /// Picks the model handle the agent runs on. `cloud` resolves the
+    /// `.model(..)` selector and is called only when the result can use
+    /// it, so a private or local-only agent needs no cloud key.
+    /// Output: the handle, or the first configuration error.
+    pub(crate) fn handle(
+        &self,
+        owner: &str,
+        cloud: impl FnOnce() -> Result<ModelHandle, KitError>,
+    ) -> Result<ModelHandle, KitError> {
         let policy = match (&self.policy, &self.file) {
             (Some(policy), _) => Some(policy.clone()),
             (None, Some(path)) => Some(read_policy(owner, path)?),
@@ -101,11 +109,15 @@ impl RouteConfig {
         if let Some(tier) = self.tier.as_ref().filter(|t| !policy.tiers().contains(t)) {
             return Err(KitError::config(
                 owner,
-                format!("tier `{tier}` is served by no target of route `{}`", policy.name()),
+                format!(
+                    "tier `{tier}` is served by no target of route `{}`",
+                    policy.name()
+                ),
             ));
         }
         let has_local = policy.target(LOCAL).is_some();
         let mut builder = RoutedModel::builder(policy.clone());
+        let mut cloud = Some(cloud);
         for target in policy.targets() {
             builder = match target.id() {
                 LOCAL => match &self.on_device {
@@ -117,15 +129,17 @@ impl RouteConfig {
                         ))
                     }
                 },
-                CLOUD => builder.remote(CLOUD, cloud.model.clone(), cloud.price),
-                other => {
-                    return Err(KitError::config(
-                        owner,
-                        format!(
-                            "route target `{other}` is not a kit target: name them `local` and `cloud`"
-                        ),
-                    ))
+                CLOUD => {
+                    let resolve = cloud.take().expect("route target ids are unique");
+                    let handle = resolve()?;
+                    builder.remote(CLOUD, handle.model, handle.price)
                 }
+                other => return Err(KitError::config(
+                    owner,
+                    format!(
+                        "route target `{other}` is not a kit target: name them `local` and `cloud`"
+                    ),
+                )),
             };
         }
         if let Some(network) = &self.network {
@@ -147,12 +161,19 @@ impl RouteConfig {
         })
     }
 
-    fn unrouted(&self, owner: &str, cloud: ModelHandle) -> Result<ModelHandle, KitError> {
+    fn unrouted(
+        &self,
+        owner: &str,
+        cloud: impl FnOnce() -> Result<ModelHandle, KitError>,
+    ) -> Result<ModelHandle, KitError> {
         if self.tier.is_some() {
-            return Err(KitError::config(owner, "a tier needs a policy: call .route(..)"));
+            return Err(KitError::config(
+                owner,
+                "a tier needs a policy: call .route(..)",
+            ));
         }
         if !self.private {
-            return Ok(cloud);
+            return cloud();
         }
         match &self.on_device {
             Some((model, price)) => Ok(ModelHandle {
