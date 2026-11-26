@@ -14,7 +14,6 @@ import troupekit
 from troupekit import _troupekit
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import pending
 import stub_server
 
 CRATES = pathlib.Path(__file__).resolve().parents[2]
@@ -338,14 +337,10 @@ def pull_all(stream):
 def code_of(excinfo):
     """Returns the numeric code of a raised `TroupekitError`.
 
-    Input: the pytest `ExceptionInfo`. Output: the int code. A code of
-    `Unsupported` skips the case: the neutral call it reached is a stub,
-    and `pytest.raises` has already caught what `needs_neutral` would.
+    Input: the pytest `ExceptionInfo`. Output: the int code. Every body a
+    case reaches is built (K10), so `Unsupported` is a plain failure here.
     """
-    code = excinfo.value.code
-    if code == pending.UNSUPPORTED:
-        pytest.skip(f"not built in troupekit-ffi-core yet: {excinfo.value.message}")
-    return code
+    return excinfo.value.code
 
 
 @pytest.fixture
@@ -368,7 +363,6 @@ def test_version_matches_core():
     assert troupekit.version() == _troupekit.version()
 
 
-@pending.needs_neutral
 def test_missing_model_is_config_error():
     """An agent with no model and no host model is refused at build.
 
@@ -380,7 +374,6 @@ def test_missing_model_is_config_error():
     assert code_of(excinfo) == CODES["Config"]
 
 
-@pending.needs_neutral
 def test_missing_key_names_env_not_value(stub):
     """A missing key names the environment variable, never a key value.
 
@@ -410,7 +403,6 @@ def test_missing_key_names_env_not_value(stub):
     assert SECRET not in str(excinfo.value)
 
 
-@pending.needs_neutral
 def test_host_model_run_returns_text():
     """A run on a host model returns the model's text.
 
@@ -422,7 +414,6 @@ def test_host_model_run_returns_text():
     assert len(model.requests) == 1
 
 
-@pending.needs_neutral
 def test_host_tool_called_with_json_args():
     """A host tool receives the arguments the model asked for, as JSON.
 
@@ -436,7 +427,6 @@ def test_host_tool_called_with_json_args():
     assert len(model.requests) == 2
 
 
-@pending.needs_neutral
 def test_host_tool_error_reaches_model():
     """A `HostError` from a tool reaches the model as the tool's output.
 
@@ -449,7 +439,6 @@ def test_host_tool_error_reaches_model():
     assert "echo is offline" in model.requests[1]
 
 
-@pending.needs_neutral
 def test_host_tool_throw_does_not_crash():
     """Any Python exception in a tool is contained and the run goes on.
 
@@ -462,7 +451,6 @@ def test_host_tool_throw_does_not_crash():
     assert "ZeroDivisionError" in model.requests[1]
 
 
-@pending.needs_neutral
 def test_stream_yields_deltas_then_finished(stub):
     """A stream yields the text deltas, then `run_finished` last.
 
@@ -480,7 +468,6 @@ def test_stream_yields_deltas_then_finished(stub):
     assert stream.dropped_deltas() == 0
 
 
-@pending.needs_neutral
 def test_listener_sees_same_events_as_pull():
     """A listener gets the same kinds, in order, as pulling the same run.
 
@@ -497,7 +484,6 @@ def test_listener_sees_same_events_as_pull():
     assert collector.kinds == pulled
 
 
-@pending.needs_neutral
 def test_start_returns_run_id_before_model_call(stub, tmp_path):
     """`start` returns a run id and makes no model call.
 
@@ -510,7 +496,6 @@ def test_start_returns_run_id_before_model_call(stub, tmp_path):
     assert state.count() == 0
 
 
-@pending.needs_neutral
 def test_resume_after_handles_dropped(stub, tmp_path):
     """A run started by one handle is finished by a fresh one.
 
@@ -526,7 +511,6 @@ def test_resume_after_handles_dropped(stub, tmp_path):
     assert state.count() == 1
 
 
-@pending.needs_neutral
 def test_resume_for_zero_budget_is_pending(stub, tmp_path):
     """A zero budget window does no step and reports the run as pending.
 
@@ -542,7 +526,6 @@ def test_resume_for_zero_budget_is_pending(stub, tmp_path):
     assert state.count() == 0
 
 
-@pending.needs_neutral
 def test_cancel_keeps_checkpoint_and_resumes(stub, tmp_path):
     """A cancelled streamed run keeps its checkpoint and can be resumed.
 
@@ -559,7 +542,6 @@ def test_cancel_keeps_checkpoint_and_resumes(stub, tmp_path):
     assert agent.resume(stream.run_id()) == "".join(ANSWER)
 
 
-@pending.needs_neutral
 def test_toml_agent_runs(stub):
     """A persona TOML agent runs against the stub vendor.
 
@@ -572,7 +554,6 @@ def test_toml_agent_runs(stub):
     assert agent.build().run("hi") == "".join(ANSWER)
 
 
-@pending.needs_neutral
 def test_toml_over_cap_refused():
     """A persona TOML over 1 MiB is refused before it is parsed.
 
@@ -586,7 +567,6 @@ def test_toml_over_cap_refused():
     assert "MiB" in excinfo.value.message
 
 
-@pending.needs_neutral
 def test_graph_agent_then_step_runs():
     """A graph runs an agent node, then a host tool step after it.
 
@@ -602,7 +582,6 @@ def test_graph_agent_then_step_runs():
     assert "stamped" in result.output_json
 
 
-@pending.needs_neutral
 def test_knowledge_with_host_embedder_finds_doc(tmp_path):
     """Knowledge with a host embedder finds the document a query names.
 
@@ -623,7 +602,6 @@ def test_knowledge_with_host_embedder_finds_doc(tmp_path):
     assert "The secret fruit is pineapple" in model.requests[1]
 
 
-@pending.needs_neutral
 def test_memory_facts_persist_between_runs(tmp_path):
     """A fact stored in one run is in the next run's request.
 
@@ -651,7 +629,6 @@ def test_error_codes_are_stable():
         assert int(getattr(troupekit.ErrorCode, name)) == number
 
 
-@pending.needs_neutral
 def test_laws_path_with_dotdot_refused(tmp_path):
     """A laws path with `..` is refused at build.
 
@@ -665,7 +642,6 @@ def test_laws_path_with_dotdot_refused(tmp_path):
     assert ".." in excinfo.value.message
 
 
-@pending.needs_neutral
 def test_host_transport_refuses_other_origin(stub):
     """A reply whose final URL is on another origin is refused.
 
@@ -681,7 +657,6 @@ def test_host_transport_refuses_other_origin(stub):
     assert len(transport.requests) == 1
 
 
-@pending.needs_neutral
 def test_host_transport_streams_chunks(stub):
     """A host transport's body chunks become the run's text deltas.
 
@@ -708,7 +683,6 @@ def sse(payload):
     return b"data: " + json.dumps(payload).encode() + b"\n\n"
 
 
-@pending.needs_neutral
 def test_full_buffer_drops_deltas_not_lifecycle():
     """A full event buffer drops text deltas but keeps every lifecycle event.
 
@@ -748,9 +722,6 @@ def test_full_buffer_drops_deltas_not_lifecycle():
         timeout=RUN_SECONDS_MAX,
         check=False,
     )
-    if child.returncode != 0 and "is not built yet" in child.stderr:
-        last = child.stderr.strip().splitlines()[-1]
-        pytest.skip(f"not built in troupekit-ffi-core yet: {last}")
     assert child.returncode == 0, child.stderr
     report = json.loads(child.stdout.strip().splitlines()[-1])
     assert report["dropped"] > 0
@@ -758,7 +729,6 @@ def test_full_buffer_drops_deltas_not_lifecycle():
     assert report["kinds"][-1] == "run_finished"
 
 
-@pending.needs_neutral
 def test_callback_from_worker_thread_no_deadlock():
     """A Python tool called from a Rust worker thread does not deadlock.
 
@@ -782,7 +752,6 @@ def test_callback_from_worker_thread_no_deadlock():
     assert tool.calls[0][1] != runner["thread"]
 
 
-@pending.needs_neutral
 def test_concurrent_runs_on_one_handle():
     """One handle serves several runs at once from several Python threads.
 

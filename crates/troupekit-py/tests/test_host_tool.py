@@ -8,21 +8,12 @@ import pytest
 import troupekit
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import pending
 import stub_server
 
 ANSWER = ["Done"]
 RUN_SECONDS_MAX = 30
 TOOL_NAME = "echo"
 TOOL_ARGS = {"text": "hi"}
-
-pytestmark = pytest.mark.xfail(
-    pending.SKELETON,
-    reason=pending.SKELETON_REASON,
-    raises=troupekit.TroupekitError,
-    strict=True,
-)
-
 
 class EchoTool:
     """A Python host tool that records each call and the thread it ran on.

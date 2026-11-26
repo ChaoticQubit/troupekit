@@ -375,26 +375,15 @@ fun deltaText(events: List<Event>): String =
 /**
  * Runs `body` and returns its `TroupekitException.Failure`.
  * Input: a suspending body. Output: the failure; fails the test when the
- * body returns normally. An `Unsupported` failure skips the case.
+ * body returns normally. Every body is built (K10), so no code skips.
  */
 suspend fun expectFailure(body: suspend () -> Unit): TroupekitException.Failure {
     try {
         body()
     } catch (error: TroupekitException.Failure) {
-        skipIfUnbuilt(error)
         return error
     }
     throw AssertionError("expected a TroupekitException")
-}
-
-/**
- * Skips a case while the neutral call it reaches is still a stub.
- * Input: a failure. Output: none; raises a JUnit assumption failure for
- * code `Unsupported`, so the case reports as skipped, not passed.
- */
-fun skipIfUnbuilt(error: TroupekitException.Failure) {
-    val reason = "not built in troupekit-ffi-core yet: ${error.detail}"
-    assumeTrue(reason, error.code != CODES["Unsupported"])
 }
 
 /**
@@ -423,20 +412,6 @@ abstract class ContractCases {
     }
 
     /**
-     * Runs one case body and turns an `Unsupported` failure into a skip.
-     * Input: the body. Output: none; any other error fails the case.
-     * Mirrors `pending.needs_neutral` of the Python runner.
-     */
-    fun neutral(body: suspend () -> Unit) = runBlocking {
-        try {
-            body()
-        } catch (error: TroupekitException.Failure) {
-            skipIfUnbuilt(error)
-            throw error
-        }
-    }
-
-    /**
      * A fresh scratch directory for one case.
      * Input: none. Output: its absolute path.
      * Each case gets its own SQLite files.
@@ -452,13 +427,13 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_missing_model_is_config_error() = neutral {
+    fun test_missing_model_is_config_error() = runBlocking<Unit> {
         val failure = expectFailure { AgentBuilder("helper").instructions("Help.").build() }
         assertEquals(CODES["Config"], failure.code)
     }
 
     @Test
-    fun test_missing_key_names_env_not_value() = neutral {
+    fun test_missing_key_names_env_not_value() = runBlocking<Unit> {
         assertEquals(null, System.getenv(MISSING_ENV))
         val keyed = {
             AgentBuilder("helper").instructions("Help.").model(SELECTOR)
@@ -475,14 +450,14 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_host_model_run_returns_text() = neutral {
+    fun test_host_model_run_returns_text() = runBlocking<Unit> {
         val model = ScriptedModel(listOf("Hello from the host model"))
         assertEquals("Hello from the host model", hostAgent(model).build().run("hi"))
         assertEquals(1, model.requests.size)
     }
 
     @Test
-    fun test_host_tool_called_with_json_args() = neutral {
+    fun test_host_tool_called_with_json_args() = runBlocking<Unit> {
         val call = toolReply("echo", mapOf("text" to "hi"))
         val model = ScriptedModel(listOf(call, answerReply("done")))
         val tool = RecordingTool()
@@ -492,7 +467,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_host_tool_error_reaches_model() = neutral {
+    fun test_host_tool_error_reaches_model() = runBlocking<Unit> {
         val call = toolReply("echo", mapOf("text" to "hi"))
         val model = ScriptedModel(listOf(call, answerReply("recovered")))
         val tool = RecordingTool(behaviour = ToolBehaviour.Fails("echo is offline"))
@@ -501,7 +476,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_host_tool_throw_does_not_crash() = neutral {
+    fun test_host_tool_throw_does_not_crash() = runBlocking<Unit> {
         val call = toolReply("echo", mapOf("text" to "hi"))
         val model = ScriptedModel(listOf(call, answerReply("still here")))
         val tool = RecordingTool(behaviour = ToolBehaviour.Crash)
@@ -511,7 +486,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_stream_yields_deltas_then_finished() = neutral {
+    fun test_stream_yields_deltas_then_finished() = runBlocking<Unit> {
         val stream = cloudAgent(StubTransport(answerChunks())).build().stream("hi")
         val events = pullAll(stream)
         assertEquals(ANSWER_PARTS.joinToString(""), deltaText(events))
@@ -521,7 +496,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_listener_sees_same_events_as_pull() = neutral {
+    fun test_listener_sees_same_events_as_pull() = runBlocking<Unit> {
         val pulled = pullAll(hostAgent(ScriptedModel(listOf("same"))).build().stream("hi"))
         val collector = Collector()
         val stream = hostAgent(ScriptedModel(listOf("same"))).build().stream("hi")
@@ -532,7 +507,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_start_returns_run_id_before_model_call() = neutral {
+    fun test_start_returns_run_id_before_model_call() = runBlocking<Unit> {
         val transport = StubTransport(answerChunks())
         val database = File(scratch(), "runs.db").path
         val runId = cloudAgent(transport, database).build().start("hi")
@@ -541,7 +516,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_resume_after_handles_dropped() = neutral {
+    fun test_resume_after_handles_dropped() = runBlocking<Unit> {
         val transport = StubTransport(answerChunks())
         val database = File(scratch(), "runs.db").path
         val runId = cloudAgent(transport, database).build().use { first -> first.start("hi") }
@@ -551,7 +526,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_resume_for_zero_budget_is_pending() = neutral {
+    fun test_resume_for_zero_budget_is_pending() = runBlocking<Unit> {
         val transport = StubTransport(answerChunks())
         val agent = cloudAgent(transport, File(scratch(), "runs.db").path).build()
         val runId = agent.start("hi")
@@ -561,7 +536,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_cancel_keeps_checkpoint_and_resumes() = neutral {
+    fun test_cancel_keeps_checkpoint_and_resumes() = runBlocking<Unit> {
         val transport = StubTransport(answerChunks())
         val agent = cloudAgent(transport, File(scratch(), "runs.db").path).build()
         val stream = agent.stream("hi")
@@ -572,14 +547,14 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_toml_agent_runs() = neutral {
+    fun test_toml_agent_runs() = runBlocking<Unit> {
         val builder = AgentBuilder.fromToml(shared("agent.toml")).catalogToml(catalog())
             .hostTransport(StubTransport(answerChunks()))
         assertEquals(ANSWER_PARTS.joinToString(""), builder.build().run("hi"))
     }
 
     @Test
-    fun test_toml_over_cap_refused() = neutral {
+    fun test_toml_over_cap_refused() = runBlocking<Unit> {
         val text = shared("agent.toml") + "\n" + "a".repeat(1_048_576)
         val failure = expectFailure { AgentBuilder.fromToml(text).build() }
         assertTrue(failure.code in setOf(CODES["Config"], CODES["InvalidArgument"]))
@@ -587,7 +562,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_graph_agent_then_step_runs() = neutral {
+    fun test_graph_agent_then_step_runs() = runBlocking<Unit> {
         val writer = hostAgent(ScriptedModel(listOf("draft")))
         val stamp = RecordingTool("stamp", ToolBehaviour.Output("stamped"))
         val graph = GraphBuilder("flow").agent("writer", writer).step("stamp", stamp)
@@ -598,7 +573,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_knowledge_with_host_embedder_finds_doc() = neutral {
+    fun test_knowledge_with_host_embedder_finds_doc() = runBlocking<Unit> {
         val root = scratch()
         val docs = File(root, "docs").also { check(it.mkdirs()) }
         File(docs, "fruit.md").writeText("The secret fruit is pineapple.\n")
@@ -615,7 +590,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_memory_facts_persist_between_runs() = neutral {
+    fun test_memory_facts_persist_between_runs() = runBlocking<Unit> {
         val database = File(scratch(), "memory.db").path
         val config = MemoryConfig(
             user = "user-1", session = "session-1", sqlite = database, preamble = true,
@@ -640,7 +615,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_laws_path_with_dotdot_refused() = neutral {
+    fun test_laws_path_with_dotdot_refused() = runBlocking<Unit> {
         val agent = hostAgent(ScriptedModel(listOf("x"))).laws("../laws.bend")
         val failure = expectFailure { agent.build() }
         assertTrue(failure.code in setOf(CODES["Config"], CODES["InvalidArgument"]))
@@ -648,7 +623,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_host_transport_refuses_other_origin() = neutral {
+    fun test_host_transport_refuses_other_origin() = runBlocking<Unit> {
         val other = "https://elsewhere.invalid/v1/chat/completions"
         val done = listOf("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
         val transport = StubTransport(done, headUrl = other)
@@ -658,7 +633,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_host_transport_streams_chunks() = neutral {
+    fun test_host_transport_streams_chunks() = runBlocking<Unit> {
         val transport = StubTransport(answerChunks())
         val events = pullAll(cloudAgent(transport).build().stream("hi"))
         assertEquals(ANSWER_PARTS.joinToString(""), deltaText(events))
@@ -666,7 +641,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_full_buffer_drops_deltas_not_lifecycle() = neutral {
+    fun test_full_buffer_drops_deltas_not_lifecycle() = runBlocking<Unit> {
         assumeTrue("runtime set up before this runner", ContractRuntime.bufferSet)
         val chatty = ScriptedModel(listOf("x".repeat(500)))
         val stream = hostAgent(chatty).build().stream("hi")
@@ -678,7 +653,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_callback_from_worker_thread_no_deadlock() = neutral {
+    fun test_callback_from_worker_thread_no_deadlock() = runBlocking<Unit> {
         val caller = Thread.currentThread()
         val call = toolReply("echo", mapOf("text" to "hi"))
         val model = ScriptedModel(listOf(call, answerReply("done")))
@@ -689,7 +664,7 @@ abstract class ContractCases {
     }
 
     @Test
-    fun test_concurrent_runs_on_one_handle() = neutral {
+    fun test_concurrent_runs_on_one_handle() = runBlocking<Unit> {
         val model = ScriptedModel(listOf("parallel"))
         val agent: AgentHandle = hostAgent(model).build()
         val answers = coroutineScope {
@@ -754,8 +729,7 @@ object ContractRuntime {
             initialize(settings)
             bufferSet = true
         } catch (error: TroupekitException.Failure) {
-            val expected = setOf(CODES["Unsupported"], CODES["InvalidArgument"])
-            check(error.code in expected) { "initialize failed: ${error.detail}" }
+            check(error.code == CODES["InvalidArgument"]) { "initialize failed: ${error.detail}" }
         }
     }
 

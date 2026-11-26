@@ -368,16 +368,6 @@ func scratch() throws -> URL {
     return url
 }
 
-/// Skips a case while the neutral call it reaches is still a stub.
-/// Input: the error a case caught. Output: an `XCTSkip` for code
-/// `Unsupported`, else the error itself, rethrown.
-func skipIfUnbuilt(_ error: Error) throws -> Never {
-    if case let TroupekitError.Failure(code, message, _) = error, code == codes["Unsupported"] {
-        throw XCTSkip("not built in troupekit-ffi-core yet: \(message)")
-    }
-    throw error
-}
-
 /// The 25 contract cases of `troupekit-ffi-core/contract/cases.txt`, through
 /// the UniFFI Swift bindings. The runtime is set once with a 16-event
 /// buffer, small enough for the full-buffer case and enough for the others.
@@ -397,20 +387,7 @@ final class ContractTests: XCTestCase {
             guard case let TroupekitError.Failure(code, _, _) = error else {
                 fatalError("initialize threw a non-TroupekitError: \(error)")
             }
-            precondition(
-                code == codes["Unsupported"] || code == codes["InvalidArgument"],
-                "initialize failed: \(error)")
-        }
-    }
-
-    /// Runs one case body and turns an `Unsupported` failure into a skip.
-    /// Input: the body. Output: none; any other error fails the case.
-    /// Mirrors `pending.needs_neutral` of the Python runner.
-    func neutral(_ body: () async throws -> Void) async throws {
-        do {
-            try await body()
-        } catch {
-            try skipIfUnbuilt(error)
+            precondition(code == codes["InvalidArgument"], "initialize failed: \(error)")
         }
     }
 
@@ -421,233 +398,195 @@ final class ContractTests: XCTestCase {
     }
 
     func test_missing_model_is_config_error() async throws {
-        try await neutral {
-            let (code, _) = await expectFailure {
-                _ = try await AgentBuilder(name: "helper").instructions(text: "Help.").build()
-            }
-            try rethrowUnbuilt(code, "build")
-            XCTAssertEqual(code, codes["Config"])
+        let (code, _) = await expectFailure {
+            _ = try await AgentBuilder(name: "helper").instructions(text: "Help.").build()
         }
+        XCTAssertEqual(code, codes["Config"])
     }
 
     func test_missing_key_names_env_not_value() async throws {
-        try await neutral {
-            unsetenv(missingEnv)
-            let keyed = { AgentBuilder(name: "helper").instructions(text: "Help.")
-                .model(selector: selector)
-                .catalogToml(text: catalog(auth: "bearer", base: "https://127.0.0.1:9/v1")) }
-            let (code, message) = await expectFailure {
-                _ = try await keyed().apiKeyEnv(name: missingEnv).build().run(input: "hi")
-            }
-            try rethrowUnbuilt(code, message)
-            XCTAssertEqual(code, codes["MissingKey"])
-            XCTAssertTrue(message.contains(missingEnv))
-            let transport = StubTransport(chunks: [], failure: "connection refused")
-            let (_, leaked) = await expectFailure {
-                let agent = keyed().apiKey(key: secret).hostTransport(transport: transport)
-                _ = try await agent.build().run(input: "hi")
-            }
-            XCTAssertFalse(leaked.contains(secret))
+        unsetenv(missingEnv)
+        let keyed = { AgentBuilder(name: "helper").instructions(text: "Help.")
+            .model(selector: selector)
+            .catalogToml(text: catalog(auth: "bearer", base: "https://127.0.0.1:9/v1")) }
+        let (code, message) = await expectFailure {
+            _ = try await keyed().apiKeyEnv(name: missingEnv).build().run(input: "hi")
         }
+        XCTAssertEqual(code, codes["MissingKey"])
+        XCTAssertTrue(message.contains(missingEnv))
+        let transport = StubTransport(chunks: [], failure: "connection refused")
+        let (_, leaked) = await expectFailure {
+            let agent = keyed().apiKey(key: secret).hostTransport(transport: transport)
+            _ = try await agent.build().run(input: "hi")
+        }
+        XCTAssertFalse(leaked.contains(secret))
     }
 
     func test_host_model_run_returns_text() async throws {
-        try await neutral {
-            let model = ScriptedModel(["Hello from the host model"])
-            let answer = try await hostAgent(model).build().run(input: "hi")
-            XCTAssertEqual(answer, "Hello from the host model")
-            XCTAssertEqual(model.requests.count, 1)
-        }
+        let model = ScriptedModel(["Hello from the host model"])
+        let answer = try await hostAgent(model).build().run(input: "hi")
+        XCTAssertEqual(answer, "Hello from the host model")
+        XCTAssertEqual(model.requests.count, 1)
     }
 
     func test_host_tool_called_with_json_args() async throws {
-        try await neutral {
-            let model = ScriptedModel([toolReply("echo", ["text": "hi"]), answerReply("done")])
-            let tool = RecordingTool()
-            let answer = try await hostAgent(model, [tool]).build().run(input: "echo hi")
-            XCTAssertEqual(answer, "done")
-            XCTAssertEqual(tool.calls.map { $0.0 }, [["text": "hi"]])
-            XCTAssertEqual(model.requests.count, 2)
-        }
+        let model = ScriptedModel([toolReply("echo", ["text": "hi"]), answerReply("done")])
+        let tool = RecordingTool()
+        let answer = try await hostAgent(model, [tool]).build().run(input: "echo hi")
+        XCTAssertEqual(answer, "done")
+        XCTAssertEqual(tool.calls.map { $0.0 }, [["text": "hi"]])
+        XCTAssertEqual(model.requests.count, 2)
     }
 
     func test_host_tool_error_reaches_model() async throws {
-        try await neutral {
-            let model = ScriptedModel([toolReply("echo", ["text": "hi"]), answerReply("recovered")])
-            let tool = RecordingTool(behaviour: .hostError("echo is offline"))
-            let answer = try await hostAgent(model, [tool]).build().run(input: "echo hi")
-            XCTAssertEqual(answer, "recovered")
-            XCTAssertTrue(model.requests[1].contains("echo is offline"))
-        }
+        let model = ScriptedModel([toolReply("echo", ["text": "hi"]), answerReply("recovered")])
+        let tool = RecordingTool(behaviour: .hostError("echo is offline"))
+        let answer = try await hostAgent(model, [tool]).build().run(input: "echo hi")
+        XCTAssertEqual(answer, "recovered")
+        XCTAssertTrue(model.requests[1].contains("echo is offline"))
     }
 
     func test_host_tool_throw_does_not_crash() async throws {
-        try await neutral {
-            let call = toolReply("echo", ["text": "hi"])
-            let model = ScriptedModel([call, answerReply("still here")])
-            let tool = RecordingTool(behaviour: .crash)
-            let answer = try await hostAgent(model, [tool]).build().run(input: "echo hi")
-            XCTAssertEqual(answer, "still here")
-            XCTAssertEqual(tool.calls.count, 1)
-            XCTAssertEqual(model.requests.count, 2)
-        }
+        let call = toolReply("echo", ["text": "hi"])
+        let model = ScriptedModel([call, answerReply("still here")])
+        let tool = RecordingTool(behaviour: .crash)
+        let answer = try await hostAgent(model, [tool]).build().run(input: "echo hi")
+        XCTAssertEqual(answer, "still here")
+        XCTAssertEqual(tool.calls.count, 1)
+        XCTAssertEqual(model.requests.count, 2)
     }
 
     func test_stream_yields_deltas_then_finished() async throws {
-        try await neutral {
-            let transport = StubTransport(chunks: answerChunks())
-            let stream = try await cloudAgent(transport).build().stream(input: "hi")
-            let events = try await pullAll(stream)
-            let deltas = events.compactMap { event -> String? in
-                if case let .textDelta(text) = event.kind { return text }
-                return nil
-            }
-            XCTAssertEqual(deltas.joined(), answerParts.joined())
-            XCTAssertEqual(events.first.map { kindName($0.kind) }, "runStarted")
-            XCTAssertEqual(events.last.map { kindName($0.kind) }, "runFinished")
-            XCTAssertEqual(stream.droppedDeltas(), 0)
+        let transport = StubTransport(chunks: answerChunks())
+        let stream = try await cloudAgent(transport).build().stream(input: "hi")
+        let events = try await pullAll(stream)
+        let deltas = events.compactMap { event -> String? in
+            if case let .textDelta(text) = event.kind { return text }
+            return nil
         }
+        XCTAssertEqual(deltas.joined(), answerParts.joined())
+        XCTAssertEqual(events.first.map { kindName($0.kind) }, "runStarted")
+        XCTAssertEqual(events.last.map { kindName($0.kind) }, "runFinished")
+        XCTAssertEqual(stream.droppedDeltas(), 0)
     }
 
     func test_listener_sees_same_events_as_pull() async throws {
-        try await neutral {
-            let first = try await hostAgent(ScriptedModel(["same"])).build()
-            let pulled = try await pullAll(first.stream(input: "hi"))
-            let collector = Collector()
-            let stream = try await hostAgent(ScriptedModel(["same"])).build().stream(input: "hi")
-            try stream.setListener(listener: collector)
-            _ = try await stream.result()
-            await fulfillment(of: [collector.finished], timeout: 30)
-            XCTAssertEqual(collector.kinds, pulled.map { kindName($0.kind) })
-        }
+        let first = try await hostAgent(ScriptedModel(["same"])).build()
+        let pulled = try await pullAll(first.stream(input: "hi"))
+        let collector = Collector()
+        let stream = try await hostAgent(ScriptedModel(["same"])).build().stream(input: "hi")
+        try stream.setListener(listener: collector)
+        _ = try await stream.result()
+        await fulfillment(of: [collector.finished], timeout: 30)
+        XCTAssertEqual(collector.kinds, pulled.map { kindName($0.kind) })
     }
 
     func test_start_returns_run_id_before_model_call() async throws {
-        try await neutral {
-            let transport = StubTransport(chunks: answerChunks())
-            let database = try scratch().appendingPathComponent("runs.db").path
-            let runId = try await cloudAgent(transport, sqlite: database).build().start(input: "hi")
-            XCTAssertFalse(runId.isEmpty)
-            XCTAssertEqual(transport.requests.count, 0)
-        }
+        let transport = StubTransport(chunks: answerChunks())
+        let database = try scratch().appendingPathComponent("runs.db").path
+        let runId = try await cloudAgent(transport, sqlite: database).build().start(input: "hi")
+        XCTAssertFalse(runId.isEmpty)
+        XCTAssertEqual(transport.requests.count, 0)
     }
 
     func test_resume_after_handles_dropped() async throws {
-        try await neutral {
-            let transport = StubTransport(chunks: answerChunks())
-            let database = try scratch().appendingPathComponent("runs.db").path
-            var first: AgentHandle? = try await cloudAgent(transport, sqlite: database).build()
-            let runId = try await first!.start(input: "hi")
-            first = nil
-            let second = try await cloudAgent(transport, sqlite: database).build()
-            let answer = try await second.resume(runId: runId)
-            XCTAssertNil(first)
-            XCTAssertEqual(answer, answerParts.joined())
-            XCTAssertEqual(transport.requests.count, 1)
-        }
+        let transport = StubTransport(chunks: answerChunks())
+        let database = try scratch().appendingPathComponent("runs.db").path
+        var first: AgentHandle? = try await cloudAgent(transport, sqlite: database).build()
+        let runId = try await first!.start(input: "hi")
+        first = nil
+        let second = try await cloudAgent(transport, sqlite: database).build()
+        let answer = try await second.resume(runId: runId)
+        XCTAssertNil(first)
+        XCTAssertEqual(answer, answerParts.joined())
+        XCTAssertEqual(transport.requests.count, 1)
     }
 
     func test_resume_for_zero_budget_is_pending() async throws {
-        try await neutral {
-            let transport = StubTransport(chunks: answerChunks())
-            let database = try scratch().appendingPathComponent("runs.db").path
-            let agent = try await cloudAgent(transport, sqlite: database).build()
-            let runId = try await agent.start(input: "hi")
-            let progress = try await agent.resumeFor(runId: runId, budgetMs: 0)
-            guard case let .pending(pendingId) = progress else {
-                return XCTFail("expected Progress.pending, got \(progress)")
-            }
-            XCTAssertEqual(pendingId, runId)
-            XCTAssertEqual(transport.requests.count, 0)
+        let transport = StubTransport(chunks: answerChunks())
+        let database = try scratch().appendingPathComponent("runs.db").path
+        let agent = try await cloudAgent(transport, sqlite: database).build()
+        let runId = try await agent.start(input: "hi")
+        let progress = try await agent.resumeFor(runId: runId, budgetMs: 0)
+        guard case let .pending(pendingId) = progress else {
+            return XCTFail("expected Progress.pending, got \(progress)")
         }
+        XCTAssertEqual(pendingId, runId)
+        XCTAssertEqual(transport.requests.count, 0)
     }
 
     func test_cancel_keeps_checkpoint_and_resumes() async throws {
-        try await neutral {
-            let transport = StubTransport(chunks: answerChunks())
-            let database = try scratch().appendingPathComponent("runs.db").path
-            let agent = try await cloudAgent(transport, sqlite: database).build()
-            let stream = try await agent.stream(input: "hi")
-            stream.cancel()
-            let (code, message) = await expectFailure { _ = try await stream.result() }
-            try rethrowUnbuilt(code, message)
-            XCTAssertEqual(code, codes["Cancelled"])
-            let answer = try await agent.resume(runId: stream.runId())
-            XCTAssertEqual(answer, answerParts.joined())
-        }
+        let transport = StubTransport(chunks: answerChunks())
+        let database = try scratch().appendingPathComponent("runs.db").path
+        let agent = try await cloudAgent(transport, sqlite: database).build()
+        let stream = try await agent.stream(input: "hi")
+        stream.cancel()
+        let (code, _) = await expectFailure { _ = try await stream.result() }
+        XCTAssertEqual(code, codes["Cancelled"])
+        let answer = try await agent.resume(runId: stream.runId())
+        XCTAssertEqual(answer, answerParts.joined())
     }
 
     func test_toml_agent_runs() async throws {
-        try await neutral {
-            let text = try String(contentsOf: fixture("agent.toml"), encoding: .utf8)
-            let builder = AgentBuilder.fromToml(text: text).catalogToml(text: catalog())
-                .hostTransport(transport: StubTransport(chunks: answerChunks()))
-            let answer = try await builder.build().run(input: "hi")
-            XCTAssertEqual(answer, answerParts.joined())
-        }
+        let text = try String(contentsOf: fixture("agent.toml"), encoding: .utf8)
+        let builder = AgentBuilder.fromToml(text: text).catalogToml(text: catalog())
+            .hostTransport(transport: StubTransport(chunks: answerChunks()))
+        let answer = try await builder.build().run(input: "hi")
+        XCTAssertEqual(answer, answerParts.joined())
     }
 
     func test_toml_over_cap_refused() async throws {
-        try await neutral {
-            let text = try String(contentsOf: fixture("agent.toml"), encoding: .utf8)
-                + "\n" + String(repeating: "a", count: 1_048_576)
-            let (code, message) = await expectFailure {
-                _ = try await AgentBuilder.fromToml(text: text).build()
-            }
-            try rethrowUnbuilt(code, message)
-            XCTAssertTrue([codes["Config"], codes["InvalidArgument"]].contains(code))
-            XCTAssertTrue(message.contains("MiB"))
+        let text = try String(contentsOf: fixture("agent.toml"), encoding: .utf8)
+            + "\n" + String(repeating: "a", count: 1_048_576)
+        let (code, message) = await expectFailure {
+            _ = try await AgentBuilder.fromToml(text: text).build()
         }
+        XCTAssertTrue([codes["Config"], codes["InvalidArgument"]].contains(code))
+        XCTAssertTrue(message.contains("MiB"))
     }
 
     func test_graph_agent_then_step_runs() async throws {
-        try await neutral {
-            let writer = hostAgent(ScriptedModel(["draft"]))
-            let stamp = RecordingTool(name: "stamp", behaviour: .output("stamped"))
-            let graph = GraphBuilder(name: "flow").agent(id: "writer", agent: writer)
-                .step(id: "stamp", tool: stamp).edge(from: "writer", to: "stamp")
-            let result = try await graph.build().runResult(input: "go")
-            XCTAssertEqual(stamp.calls.count, 1)
-            XCTAssertTrue(result.outputJson.contains("stamped"))
-        }
+        let writer = hostAgent(ScriptedModel(["draft"]))
+        let stamp = RecordingTool(name: "stamp", behaviour: .output("stamped"))
+        let graph = GraphBuilder(name: "flow").agent(id: "writer", agent: writer)
+            .step(id: "stamp", tool: stamp).edge(from: "writer", to: "stamp")
+        let result = try await graph.build().runResult(input: "go")
+        XCTAssertEqual(stamp.calls.count, 1)
+        XCTAssertTrue(result.outputJson.contains("stamped"))
     }
 
     func test_knowledge_with_host_embedder_finds_doc() async throws {
-        try await neutral {
-            let root = try scratch()
-            let docs = root.appendingPathComponent("docs")
-            try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
-            try "The secret fruit is pineapple.\n".write(
-                to: docs.appendingPathComponent("fruit.md"), atomically: true, encoding: .utf8)
-            let embedder = HashEmbedder()
-            let search = toolReply("search_knowledge", ["query": "secret fruit pineapple"])
-            let model = ScriptedModel([search, answerReply("pineapple")])
-            let config = KnowledgeConfig(dir: docs.path, index: nil, store: nil, allowFailed: false)
-            let agent = hostAgent(model, sqlite: root.appendingPathComponent("kb.db").path)
-                .knowledge(config: config, embedder: embedder)
-            let answer = try await agent.build().run(input: "What is the secret fruit?")
-            XCTAssertEqual(answer, "pineapple")
-            XCTAssertGreaterThan(embedder.calls, 0)
-            XCTAssertTrue(model.requests[1].contains("The secret fruit is pineapple"))
-        }
+        let root = try scratch()
+        let docs = root.appendingPathComponent("docs")
+        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        try "The secret fruit is pineapple.\n".write(
+            to: docs.appendingPathComponent("fruit.md"), atomically: true, encoding: .utf8)
+        let embedder = HashEmbedder()
+        let search = toolReply("search_knowledge", ["query": "secret fruit pineapple"])
+        let model = ScriptedModel([search, answerReply("pineapple")])
+        let config = KnowledgeConfig(dir: docs.path, index: nil, store: nil, allowFailed: false)
+        let agent = hostAgent(model, sqlite: root.appendingPathComponent("kb.db").path)
+            .knowledge(config: config, embedder: embedder)
+        let answer = try await agent.build().run(input: "What is the secret fruit?")
+        XCTAssertEqual(answer, "pineapple")
+        XCTAssertGreaterThan(embedder.calls, 0)
+        XCTAssertTrue(model.requests[1].contains("The secret fruit is pineapple"))
     }
 
     func test_memory_facts_persist_between_runs() async throws {
-        try await neutral {
-            let database = try scratch().appendingPathComponent("memory.db").path
-            let config = MemoryConfig(
-                user: "user-1", session: "session-1", sqlite: database, preamble: true)
-            let remember = toolReply("remember_fact", ["key": "name", "value": "Ada Lovelace"])
-            let first = ScriptedModel([remember, answerReply("noted")])
-            let rememberer = try await hostAgent(first).memory(config: config).build()
-            let noted = try await rememberer.run(input: "My name is Ada Lovelace")
-            XCTAssertEqual(noted, "noted")
-            let second = ScriptedModel(["Hello Ada"])
-            let recaller = try await hostAgent(second).memory(config: config).build()
-            let hello = try await recaller.run(input: "Who am I?")
-            XCTAssertEqual(hello, "Hello Ada")
-            XCTAssertTrue(second.requests[0].contains("Ada Lovelace"))
-        }
+        let database = try scratch().appendingPathComponent("memory.db").path
+        let config = MemoryConfig(
+            user: "user-1", session: "session-1", sqlite: database, preamble: true)
+        let remember = toolReply("remember_fact", ["key": "name", "value": "Ada Lovelace"])
+        let first = ScriptedModel([remember, answerReply("noted")])
+        let rememberer = try await hostAgent(first).memory(config: config).build()
+        let noted = try await rememberer.run(input: "My name is Ada Lovelace")
+        XCTAssertEqual(noted, "noted")
+        let second = ScriptedModel(["Hello Ada"])
+        let recaller = try await hostAgent(second).memory(config: config).build()
+        let hello = try await recaller.run(input: "Who am I?")
+        XCTAssertEqual(hello, "Hello Ada")
+        XCTAssertTrue(second.requests[0].contains("Ada Lovelace"))
     }
 
     func test_error_codes_are_stable() {
@@ -666,83 +605,69 @@ final class ContractTests: XCTestCase {
     }
 
     func test_laws_path_with_dotdot_refused() async throws {
-        try await neutral {
-            let agent = hostAgent(ScriptedModel(["x"])).laws(path: "../laws.bend")
-            let (code, message) = await expectFailure { _ = try await agent.build() }
-            try rethrowUnbuilt(code, message)
-            XCTAssertTrue([codes["Config"], codes["InvalidArgument"]].contains(code))
-            XCTAssertTrue(message.contains(".."))
-        }
+        let agent = hostAgent(ScriptedModel(["x"])).laws(path: "../laws.bend")
+        let (code, message) = await expectFailure { _ = try await agent.build() }
+        XCTAssertTrue([codes["Config"], codes["InvalidArgument"]].contains(code))
+        XCTAssertTrue(message.contains(".."))
     }
 
     func test_host_transport_refuses_other_origin() async throws {
-        try await neutral {
-            let other = "https://elsewhere.invalid/v1/chat/completions"
-            let transport = StubTransport(chunks: [Data("data: [DONE]\n\n".utf8)], headUrl: other)
-            let (code, message) = await expectFailure {
-                _ = try await cloudAgent(transport).build().run(input: "hi")
-            }
-            try rethrowUnbuilt(code, message)
-            XCTAssertNotEqual(code, 0)
-            XCTAssertEqual(transport.requests.count, 1)
+        let other = "https://elsewhere.invalid/v1/chat/completions"
+        let transport = StubTransport(chunks: [Data("data: [DONE]\n\n".utf8)], headUrl: other)
+        let (code, _) = await expectFailure {
+            _ = try await cloudAgent(transport).build().run(input: "hi")
         }
+        XCTAssertNotEqual(code, 0)
+        XCTAssertEqual(transport.requests.count, 1)
     }
 
     func test_host_transport_streams_chunks() async throws {
-        try await neutral {
-            let transport = StubTransport(chunks: answerChunks())
-            let events = try await pullAll(cloudAgent(transport).build().stream(input: "hi"))
-            let deltas = events.compactMap { event -> String? in
-                if case let .textDelta(text) = event.kind { return text }
-                return nil
-            }
-            XCTAssertEqual(deltas.joined(), answerParts.joined())
-            XCTAssertTrue(transport.requests[0].hasPrefix(stubBase))
+        let transport = StubTransport(chunks: answerChunks())
+        let events = try await pullAll(cloudAgent(transport).build().stream(input: "hi"))
+        let deltas = events.compactMap { event -> String? in
+            if case let .textDelta(text) = event.kind { return text }
+            return nil
         }
+        XCTAssertEqual(deltas.joined(), answerParts.joined())
+        XCTAssertTrue(transport.requests[0].hasPrefix(stubBase))
     }
 
     func test_full_buffer_drops_deltas_not_lifecycle() async throws {
         try XCTSkipUnless(ContractTests.bufferSet, "runtime set up before this runner")
-        try await neutral {
-            let chatty = ScriptedModel([String(repeating: "x", count: 500)])
-            let stream = try await hostAgent(chatty).build().stream(input: "hi")
-            _ = try await stream.result()
-            let kinds = try await pullAll(stream).map { kindName($0.kind) }
-            XCTAssertEqual(kinds.first, "runStarted")
-            XCTAssertEqual(kinds.last, "runFinished")
-            XCTAssertLessThanOrEqual(kinds.filter { $0 == "textDelta" }.count, 16)
-        }
+        let chatty = ScriptedModel([String(repeating: "x", count: 500)])
+        let stream = try await hostAgent(chatty).build().stream(input: "hi")
+        _ = try await stream.result()
+        let kinds = try await pullAll(stream).map { kindName($0.kind) }
+        XCTAssertEqual(kinds.first, "runStarted")
+        XCTAssertEqual(kinds.last, "runFinished")
+        XCTAssertLessThanOrEqual(kinds.filter { $0 == "textDelta" }.count, 16)
     }
 
     func test_callback_from_worker_thread_no_deadlock() async throws {
-        try await neutral {
-            let model = ScriptedModel([toolReply("echo", ["text": "hi"]), answerReply("done")])
-            let tool = RecordingTool()
-            let agent = try await hostAgent(model, [tool]).build()
-            let answer = try await agent.run(input: "echo hi")
-            XCTAssertEqual(answer, "done")
-            XCTAssertEqual(tool.calls.count, 1)
-            XCTAssertFalse(tool.calls[0].1)
-        }
+        let model = ScriptedModel([toolReply("echo", ["text": "hi"]), answerReply("done")])
+        let tool = RecordingTool()
+        let agent = try await hostAgent(model, [tool]).build()
+        let answer = try await agent.run(input: "echo hi")
+        XCTAssertEqual(answer, "done")
+        XCTAssertEqual(tool.calls.count, 1)
+        XCTAssertFalse(tool.calls[0].1)
     }
 
     func test_concurrent_runs_on_one_handle() async throws {
-        try await neutral {
-            let model = ScriptedModel(["parallel"])
-            let agent = try await hostAgent(model).build()
-            let answers = try await withThrowingTaskGroup(of: String.self) { group in
-                for _ in 0..<concurrentRuns {
-                    group.addTask { try await agent.run(input: "hi") }
-                }
-                var out: [String] = []
-                for try await answer in group {
-                    out.append(answer)
-                }
-                return out
+        let model = ScriptedModel(["parallel"])
+        let agent = try await hostAgent(model).build()
+        let answers = try await withThrowingTaskGroup(of: String.self) { group in
+            for _ in 0..<concurrentRuns {
+                group.addTask { try await agent.run(input: "hi") }
             }
-            XCTAssertEqual(answers, Array(repeating: "parallel", count: concurrentRuns))
-            XCTAssertEqual(model.requests.count, concurrentRuns)
+            var out: [String] = []
+            for try await answer in group {
+                out.append(answer)
+            }
+            return out
         }
+        XCTAssertEqual(answers, Array(repeating: "parallel", count: concurrentRuns))
+        XCTAssertEqual(model.requests.count, concurrentRuns)
     }
 
     func test_host_request_debug_hides_key() {
@@ -776,15 +701,6 @@ final class ContractTests: XCTestCase {
         })
         let missing = names.filter { !methods.contains("test_\($0)") }
         XCTAssertEqual(missing, [])
-    }
-}
-
-/// Rethrows an `Unsupported` failure a case caught itself, so it skips.
-/// Input: the caught code and message. Output: none; throws for
-/// `Unsupported` only, so the case's own assertions run otherwise.
-func rethrowUnbuilt(_ code: UInt32, _ message: String) throws {
-    if code == codes["Unsupported"] {
-        throw TroupekitError.Failure(code: code, detail: message, runId: nil)
     }
 }
 
