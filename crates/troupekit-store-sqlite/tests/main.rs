@@ -4,3 +4,4 @@ mod queue;
 mod schema;
 mod smoke;
 mod stores;
+mod vectors;

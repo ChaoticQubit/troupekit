@@ -1,0 +1,316 @@
+{
+  "author": "eng-02b",
+  "date": "2026-11-25",
+  "written_before_any_hybrid_run": true,
+  "corpus": "crates/troupekit/examples/support/docs",
+  "grades": "2 answers the query, 1 related, missing means 0",
+  "queries": [
+    {
+      "query": "how many days do I have to return an item",
+      "kind": "lexical",
+      "relevance": {
+        "returns-window.md": 2,
+        "returns-international.md": 1,
+        "returns-start.md": 1
+      }
+    },
+    {
+      "query": "print the prepaid return label",
+      "kind": "lexical",
+      "relevance": {
+        "returns-start.md": 2,
+        "returns-international.md": 1
+      }
+    },
+    {
+      "query": "when does the refund show on my card",
+      "kind": "lexical",
+      "relevance": {
+        "returns-refund-timing.md": 2,
+        "billing-double-charge.md": 1
+      }
+    },
+    {
+      "query": "item arrived broken photo of the fault",
+      "kind": "lexical",
+      "relevance": {
+        "returns-damaged.md": 2
+      }
+    },
+    {
+      "query": "exchange for a different size",
+      "kind": "lexical",
+      "relevance": {
+        "returns-exchange.md": 2,
+        "trouble-size-guide.md": 1
+      }
+    },
+    {
+      "query": "standard delivery working days",
+      "kind": "lexical",
+      "relevance": {
+        "shipping-times.md": 2,
+        "shipping-costs.md": 1,
+        "shipping-international.md": 1
+      }
+    },
+    {
+      "query": "free shipping threshold 50 euros",
+      "kind": "lexical",
+      "relevance": {
+        "shipping-costs.md": 2,
+        "returns-exchange.md": 1
+      }
+    },
+    {
+      "query": "tracking link not updated",
+      "kind": "lexical",
+      "relevance": {
+        "shipping-tracking.md": 2,
+        "trouble-email-not-arriving.md": 1
+      }
+    },
+    {
+      "query": "import duty outside the EU",
+      "kind": "lexical",
+      "relevance": {
+        "shipping-international.md": 2,
+        "returns-international.md": 1
+      }
+    },
+    {
+      "query": "edit delivery address after order",
+      "kind": "lexical",
+      "relevance": {
+        "shipping-address-change.md": 2
+      }
+    },
+    {
+      "query": "forgot password reset link",
+      "kind": "lexical",
+      "relevance": {
+        "account-password-reset.md": 2,
+        "trouble-login-locked.md": 1
+      }
+    },
+    {
+      "query": "authenticator app backup codes",
+      "kind": "lexical",
+      "relevance": {
+        "account-two-factor.md": 2
+      }
+    },
+    {
+      "query": "delete my account",
+      "kind": "lexical",
+      "relevance": {
+        "account-delete.md": 2,
+        "account-data-export.md": 1
+      }
+    },
+    {
+      "query": "unsubscribe from marketing emails",
+      "kind": "lexical",
+      "relevance": {
+        "account-newsletter.md": 2
+      }
+    },
+    {
+      "query": "download a PDF invoice with VAT number",
+      "kind": "lexical",
+      "relevance": {
+        "billing-invoice.md": 2
+      }
+    },
+    {
+      "query": "charged twice duplicate charge",
+      "kind": "lexical",
+      "relevance": {
+        "billing-double-charge.md": 2
+      }
+    },
+    {
+      "query": "discount code refused at checkout",
+      "kind": "lexical",
+      "relevance": {
+        "billing-promo-codes.md": 2,
+        "trouble-checkout-error.md": 1
+      }
+    },
+    {
+      "query": "pay in three interest-free instalments",
+      "kind": "lexical",
+      "relevance": {
+        "billing-instalments.md": 2,
+        "billing-payment-methods.md": 1
+      }
+    },
+    {
+      "query": "app closes on start android",
+      "kind": "lexical",
+      "relevance": {
+        "trouble-app-crash.md": 2
+      }
+    },
+    {
+      "query": "account locked after wrong passwords",
+      "kind": "lexical",
+      "relevance": {
+        "trouble-login-locked.md": 2,
+        "account-password-reset.md": 1
+      }
+    },
+    {
+      "query": "can I send back something I bought three weeks ago",
+      "kind": "paraphrase",
+      "relevance": {
+        "returns-window.md": 2,
+        "returns-start.md": 1
+      }
+    },
+    {
+      "query": "my money still has not come back after I mailed the parcel",
+      "kind": "paraphrase",
+      "relevance": {
+        "returns-refund-timing.md": 2,
+        "returns-start.md": 1
+      }
+    },
+    {
+      "query": "the lamp I got does not turn on",
+      "kind": "paraphrase",
+      "relevance": {
+        "returns-damaged.md": 2
+      }
+    },
+    {
+      "query": "I live in Canada and want to give something back",
+      "kind": "paraphrase",
+      "relevance": {
+        "returns-international.md": 2,
+        "shipping-international.md": 1
+      }
+    },
+    {
+      "query": "how fast can I get it if I need it tomorrow",
+      "kind": "paraphrase",
+      "relevance": {
+        "shipping-times.md": 2,
+        "shipping-costs.md": 1
+      }
+    },
+    {
+      "query": "the courier says it was handed over but I have nothing",
+      "kind": "paraphrase",
+      "relevance": {
+        "shipping-missing-parcel.md": 2,
+        "shipping-tracking.md": 1
+      }
+    },
+    {
+      "query": "I moved house, can the order go to my new flat",
+      "kind": "paraphrase",
+      "relevance": {
+        "shipping-address-change.md": 2
+      }
+    },
+    {
+      "query": "do you send orders to Switzerland",
+      "kind": "paraphrase",
+      "relevance": {
+        "shipping-international.md": 2
+      }
+    },
+    {
+      "query": "I cannot get into my profile and my phone is gone",
+      "kind": "paraphrase",
+      "relevance": {
+        "account-two-factor.md": 2,
+        "account-password-reset.md": 1,
+        "trouble-login-locked.md": 1
+      }
+    },
+    {
+      "query": "I want a copy of everything you store about me",
+      "kind": "paraphrase",
+      "relevance": {
+        "account-data-export.md": 2,
+        "account-delete.md": 1
+      }
+    },
+    {
+      "query": "update the address where you write to me",
+      "kind": "paraphrase",
+      "relevance": {
+        "account-email-change.md": 2
+      }
+    },
+    {
+      "query": "can I pay with my phone wallet",
+      "kind": "paraphrase",
+      "relevance": {
+        "billing-payment-methods.md": 2
+      }
+    },
+    {
+      "query": "there are two identical payments on my bank statement",
+      "kind": "paraphrase",
+      "relevance": {
+        "billing-double-charge.md": 2
+      }
+    },
+    {
+      "query": "I have a voucher from my aunt, does it expire",
+      "kind": "paraphrase",
+      "relevance": {
+        "billing-gift-cards.md": 2,
+        "billing-promo-codes.md": 1
+      }
+    },
+    {
+      "query": "spread the cost of a big order over months",
+      "kind": "paraphrase",
+      "relevance": {
+        "billing-instalments.md": 2
+      }
+    },
+    {
+      "query": "payment keeps failing when I try to buy",
+      "kind": "paraphrase",
+      "relevance": {
+        "trouble-checkout-error.md": 2,
+        "billing-payment-methods.md": 1
+      }
+    },
+    {
+      "query": "I never got the confirmation message for my purchase",
+      "kind": "paraphrase",
+      "relevance": {
+        "trouble-email-not-arriving.md": 2,
+        "shipping-tracking.md": 1
+      }
+    },
+    {
+      "query": "pages take forever and pictures are missing",
+      "kind": "paraphrase",
+      "relevance": {
+        "trouble-website-slow.md": 2
+      }
+    },
+    {
+      "query": "which measurements should I use for a jacket",
+      "kind": "paraphrase",
+      "relevance": {
+        "trouble-size-guide.md": 2,
+        "returns-exchange.md": 1
+      }
+    },
+    {
+      "query": "stop sending me offers",
+      "kind": "paraphrase",
+      "relevance": {
+        "account-newsletter.md": 2
+      }
+    }
+  ]
+}

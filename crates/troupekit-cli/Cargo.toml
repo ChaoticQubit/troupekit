@@ -1,0 +1,28 @@
+[package]
+name = "troupekit-cli"
+description = "Command line for Troupekit: ingest a folder of documents into a searchable index in one SQLite file."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version = "1.89"
+autotests = false
+
+[[bin]]
+name = "troupekit"
+path = "src/main.rs"
+
+[dependencies]
+troupekit = { path = "../troupekit", version = "0.1.0", features = ["knowledge"] }
+troupekit-providers = { path = "../troupekit-providers", version = "0.1.0", features = ["embeddings", "reqwest"] }
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
