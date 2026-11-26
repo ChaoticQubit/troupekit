@@ -1040,11 +1040,21 @@ impl<'a> Graph<'a> {
         }
         let j = join.expect("a fan-out has branches");
         let inputs: Vec<&str> = self
-            .edges
+            .specs
             .iter()
-            .filter(|e| e.to == j)
-            .map(|e| e.from.as_str())
+            .flat_map(|s| {
+                let from = s.id.as_str();
+                self.outs(from)
+                    .iter()
+                    .filter(|t| **t == j)
+                    .map(move |_| from)
+            })
             .collect();
+        assert_eq!(
+            inputs.len(),
+            self.in_degree(j),
+            "join inputs count every edge, goto edges included"
+        );
         if inputs.len() != tails.len() || inputs.iter().any(|i| !tails.contains(i)) {
             return Err(nf(
                 j,

@@ -619,3 +619,33 @@ fn flow_parse_rejects_unknown_keys() {
         "switch, map, flow",
     );
 }
+
+#[test]
+fn goto_into_a_join_is_an_input_from_outside_the_fan_out() {
+    let text = |target: &str| {
+        format!(
+            "{}{}{}{}{}",
+            head("r", ""),
+            nodes(&[
+                "id = 'r'\nkind = 'router'\ncondition = 'flag(ok)'",
+                TOOL_A,
+                "id = 'b'\nkind = 'tool'\ntool = 't'",
+                "id = 'c'\nkind = 'tool'\ntool = 't'",
+                JOIN,
+                &format!(
+                    "id = 'g'\nkind = 'agent'\npersona = 'p'\nprompt = 'Go.'\ngoto = ['{target}']"
+                ),
+                END
+            ]),
+            routed("r", "a", "true"),
+            routed("r", "g", "false"),
+            edges(&[("a", "b"), ("a", "c"), ("b", "j"), ("c", "j"), ("j", "e")])
+        )
+    };
+    parse(&text("e")).unwrap();
+    refused(
+        &text("j"),
+        "nodes.j",
+        "inputs from outside the fan-out at `a`",
+    );
+}
