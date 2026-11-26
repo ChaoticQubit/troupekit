@@ -315,6 +315,8 @@ pub struct GraphRun {
     flow: Option<Box<Flow>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     split: Option<BudgetSplit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<(RunId, u64)>,
     #[serde(skip)]
     marks: Option<Marks>,
     #[serde(skip)]
@@ -455,6 +457,7 @@ impl GraphRun {
             registries: NodeTools::default(),
             scratch: Map::new(),
             split: None,
+            parent: None,
         })
     }
 
@@ -698,6 +701,150 @@ impl GraphRun {
     /// Starts at 0.
     pub fn steps(&self) -> u64 {
         self.steps
+    }
+
+    /// Starts a new run from checkpoint `cp`: a new run id, steps and seq
+    /// at 0, call keys cleared, subflow runs re-keyed, the parent link set
+    /// to `cp`. It waits for the same human if `cp` did, keeps a finished
+    /// status and is queued otherwise. The parent is never written.
+    /// Returns the fork, or `Checkpoint` for a bad checkpoint.
+    pub fn fork(cp: &Checkpoint) -> Result<GraphRun, GraphError> {
+        let mut run = GraphRun::from_checkpoint(cp)?;
+        run.rekey(RunId::new())?;
+        run.parent = Some((cp.run_id, cp.step));
+        assert_ne!(run.run_id, cp.run_id, "a fork has its own run id");
+        Ok(run)
+    }
+
+    fn rekey(&mut self, run_id: RunId) -> Result<(), GraphError> {
+        self.run_id = run_id;
+        self.steps = 0;
+        self.seq = 0;
+        self.parent = None;
+        self.marks = None;
+        self.reserve = None;
+        for (i, b) in self.branches.iter_mut().enumerate() {
+            b.call = None;
+            match &mut b.at {
+                At::Agent { .. } => {
+                    return Err(GraphError::Checkpoint(format!(
+                        "node `{}`: forking an agent branch mid-run needs AgentRun::fork (0.5 B1)",
+                        b.node
+                    )))
+                }
+                At::Flow { run } => run.rekey(RunId::derived(run_id, &format!("fork:{i}")))?,
+                _ => {}
+            }
+        }
+        if !matches!(
+            self.status,
+            GraphStatus::WaitingHuman { .. } | GraphStatus::Done | GraphStatus::Failed { .. }
+        ) {
+            self.status = GraphStatus::Queued;
+        }
+        Ok(())
+    }
+
+    /// Returns the run and step this run was forked from.
+    /// It is `None` for a run that was started, not forked.
+    /// It never changes.
+    pub fn parent(&self) -> Option<(RunId, u64)> {
+        self.parent
+    }
+
+    /// Walks the parent links of run `run_id` through the latest checkpoint
+    /// of each run in `store`, nearest parent first, at most 64 hops. A
+    /// parent whose checkpoints are gone ends the walk. Returns the links,
+    /// or `Checkpoint` for an unknown run or a deeper chain.
+    pub async fn lineage(
+        store: &dyn CheckpointStore,
+        run_id: RunId,
+    ) -> Result<Vec<(RunId, u64)>, GraphError> {
+        let mut out: Vec<(RunId, u64)> = Vec::new();
+        let mut at = run_id;
+        for _ in 0..=MAX_LINEAGE {
+            let Some(cp) = store.latest(at).await? else {
+                if at == run_id {
+                    return Err(GraphError::Checkpoint(format!("no checkpoint for run {run_id}")));
+                }
+                return Ok(out);
+            };
+            let Some(link) = GraphRun::from_checkpoint(&cp)?.parent else {
+                return Ok(out);
+            };
+            if out.len() == MAX_LINEAGE {
+                return Err(GraphError::Checkpoint(format!(
+                    "the lineage of run {run_id} is deeper than {MAX_LINEAGE}"
+                )));
+            }
+            out.push(link);
+            at = link.0;
+        }
+        unreachable!("the loop returns within MAX_LINEAGE + 1 hops")
+    }
+
+    /// Writes `value` to state key `key` between steps, as node `as_node`
+    /// would (its reducer applies), as a durable change: steps + 1, status
+    /// queued. Refuses a finished run, an undeclared, untracked or mistyped
+    /// key, a key an approval node writes and a node that does not write
+    /// `key`. Returns `Resume` with the reason on a refusal.
+    pub fn update_state(
+        &mut self,
+        key: &str,
+        value: Value,
+        as_node: Option<&str>,
+    ) -> Result<(), GraphError> {
+        let bad = |m: String| Err(GraphError::Resume(m));
+        assert_ne!(self.status, GraphStatus::Running, "state is edited between steps");
+        if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
+            return bad("the run is finished".into());
+        }
+        if !self.workflow.state.contains_key(key) {
+            return bad(format!("`{key}` is not declared in [state]"));
+        }
+        if let Some(n) = self.workflow.nodes.iter().find(|n| {
+            matches!(n.kind, NodeKind::Human { ask: Ask::Approval, .. }) && n.writes.as_deref() == Some(key)
+        }) {
+            return bad(format!("`{key}` is written by approval node `{}`; only its human sets it", n.id));
+        }
+        if self.untracked(key) {
+            return bad(format!("`{key}` is untracked; an edit would not be durable"));
+        }
+        let mut value = value;
+        if let Some(id) = as_node {
+            let Some(node) = self.workflow.node(id) else {
+                return bad(format!("there is no node `{id}`"));
+            };
+            if node.writes.as_deref() != Some(key) {
+                return bad(format!("node `{id}` does not write `{key}`"));
+            }
+            if let Some(reducer) = self.reducer(key) {
+                value = reducer
+                    .reduce(self.state.get(key), &[(0, value)])
+                    .map_err(|e| GraphError::Resume(format!("reducing `{key}`: {e}")))?;
+            }
+        }
+        let errs = self.workflow.check_value(key, &value);
+        if !errs.is_empty() {
+            return bad(format!("value does not match `{key}`: {}", errs.join("; ")));
+        }
+        self.state.insert(key.to_string(), value);
+        self.queue();
+        Ok(())
+    }
+
+    /// Returns the last checkpoint of `history` (ascending steps of one
+    /// run) before the first one in which a branch sits at `node`, so a
+    /// fork of it runs `node` again. Returns `None` when no checkpoint has
+    /// a branch there or the first one does.
+    pub fn checkpoint_before<'a>(history: &'a [Checkpoint], node: &str) -> Option<&'a Checkpoint> {
+        let at = |cp: &Checkpoint| {
+            cp.state["branches"]
+                .as_array()
+                .is_some_and(|bs| bs.iter().any(|b| b["node"].as_str() == Some(node)))
+        };
+        let entered = history.iter().position(at)?;
+        entered.checked_sub(1).map(|i| &history[i])
     }
 
     /// Returns the workflow snapshot the run started with.
@@ -2131,6 +2278,8 @@ fn unsupported(flow: &Flow) -> Option<String> {
     })?;
     Some(format!("node `{}` of a 0.5 kind or option", node.id))
 }
+
+const MAX_LINEAGE: usize = 64;
 
 fn node_limits(
     base: &Limits,
