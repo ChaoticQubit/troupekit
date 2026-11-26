@@ -383,7 +383,7 @@ final class ContractTests: XCTestCase {
         super.setUp()
         let settings = RuntimeSettings(workerThreads: 2, maxInputBytes: 1_048_576, eventBuffer: 16)
         do {
-            try initialize(settings: settings)
+            try Troupekit.initialize(settings: settings)
             bufferSet = true
         } catch {
             guard case let TroupekitError.Failure(code, _, _) = error else {
@@ -394,7 +394,7 @@ final class ContractTests: XCTestCase {
     }
 
     func test_version_matches_core() {
-        let parts = version().split(separator: ".")
+        let parts = Troupekit.version().split(separator: ".")
         XCTAssertEqual(parts.count, 3)
         XCTAssertTrue(parts.allSatisfy { UInt($0) != nil })
     }

@@ -130,7 +130,7 @@ final class OverheadTests: XCTestCase {
 
         var versions = 0
         _ = try await benchmark("version", count, label) {
-            XCTAssertFalse(version().isEmpty)
+            XCTAssertFalse(Troupekit.version().isEmpty)
             versions += 1
         }
         XCTAssertEqual(versions, count)
