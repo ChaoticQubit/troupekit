@@ -183,8 +183,8 @@ impl Graph {
         }
         let order = self.chain().map_err(fail)?;
         let laws = Laws::check(&owner, &self.law_paths, &self.inline_laws, self.auto_laws)?;
-        let names = self.persona_names(&order)?;
-        let workflow = self.workflow(&order, &names)?;
+        let (names, outputs) = self.persona_names(&order)?;
+        let workflow = self.workflow(&order, &names, &outputs)?;
         let mut registry = ToolRegistry::new();
         let mut agent_io = SimpleIo::new(ToolRegistry::new());
         let mut files: HashMap<String, String> = HashMap::new();
@@ -249,6 +249,12 @@ impl Graph {
                     }
                 }
                 Node::Step(tool) => {
+                    if outputs.contains_key(feeder) {
+                        return Err(fail(format!(
+                            "step `{id}` is fed by agent node `{feeder}`, which has typed \
+                             output; steps take text, so feed it from an agent without [output]"
+                        )));
+                    }
                     let args = arg_names(tool.spec());
                     if args != [feeder] {
                         return Err(fail(format!(
@@ -379,27 +385,35 @@ impl Graph {
         Ok(order)
     }
 
-    fn persona_names(&self, order: &[String]) -> Result<HashMap<String, String>, KitError> {
+    fn persona_names(&self, order: &[String]) -> Result<(Names, Outputs), KitError> {
         let mut names = HashMap::with_capacity(order.len());
+        let mut outputs = HashMap::new();
         for id in order {
             if let Node::Agent(agent) = self.node(id) {
-                names.insert(id.clone(), agent.persona_name()?);
+                let (name, output) = agent.persona_identity()?;
+                names.insert(id.clone(), name);
+                if let Some(output) = output.as_ref().and_then(object_type) {
+                    outputs.insert(id.clone(), output);
+                }
             }
         }
         assert!(names.len() <= order.len());
-        Ok(names)
+        assert!(outputs.keys().all(|id| names.contains_key(id)));
+        Ok((names, outputs))
     }
 
     fn workflow(
         &self,
         order: &[String],
-        names: &HashMap<String, String>,
+        names: &Names,
+        outputs: &Outputs,
     ) -> Result<Workflow, KitError> {
         let mut state = toml::Table::new();
         state.insert(INPUT.into(), Toml::String("string".into()));
         let mut nodes = Vec::with_capacity(order.len() + 1);
         for (i, id) in order.iter().enumerate() {
-            state.insert(id.clone(), Toml::String("string".into()));
+            let kind = outputs.get(id).map_or("string", String::as_str);
+            state.insert(id.clone(), Toml::String(kind.into()));
             let mut node = toml::Table::new();
             node.insert("id".into(), Toml::String(id.clone()));
             match self.node(id) {
@@ -730,6 +744,21 @@ fn input_state(text: &str) -> Map<String, Value> {
     let mut state = Map::new();
     state.insert(INPUT.into(), Value::String(text.to_string()));
     state
+}
+
+type Names = HashMap<String, String>;
+type Outputs = HashMap<String, String>;
+
+/// Writes a persona `[output]` table as one workflow state type, the
+/// object form `{field: type, ..}`. Returns `None` when a field type is
+/// not text, so the persona check at `prepare` reports it instead.
+fn object_type(output: &toml::Table) -> Option<String> {
+    let mut fields = Vec::with_capacity(output.len());
+    for (field, kind) in output {
+        fields.push(format!("{field}: {}", kind.as_str()?));
+    }
+    assert_eq!(fields.len(), output.len());
+    Some(format!("{{{}}}", fields.join(", ")))
 }
 
 fn takes_text(schema: &Value) -> bool {

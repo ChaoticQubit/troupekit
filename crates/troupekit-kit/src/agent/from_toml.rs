@@ -69,15 +69,16 @@ impl Agent {
         }
     }
 
-    /// Returns the persona name a graph knows this agent by: the TOML
-    /// `name` for a TOML agent, the builder name otherwise. Reads the
-    /// persona source, so it fails as `build` would on a bad source.
-    pub(crate) fn persona_name(&self) -> Result<String, KitError> {
+    /// Returns what a graph needs to know of this agent before `build`:
+    /// the persona name (the TOML `name`, else the builder name) and the
+    /// TOML `[output]` table of a typed persona. Fails as `build` would.
+    pub(crate) fn persona_identity(&self) -> Result<(String, Option<toml::Table>), KitError> {
         let Some((source, table)) = self.toml_source()? else {
-            return Ok(self.name.clone());
+            return Ok((self.name.clone(), None));
         };
+        let output = table.get("output").and_then(Toml::as_table).cloned();
         match table.get("name").and_then(Toml::as_str) {
-            Some(name) if !name.trim().is_empty() => Ok(name.to_string()),
+            Some(name) if !name.trim().is_empty() => Ok((name.to_string(), output)),
             _ => Err(KitError::config(&source, "persona needs name = \"...\"")),
         }
     }
