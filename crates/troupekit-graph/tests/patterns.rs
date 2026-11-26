@@ -1,6 +1,6 @@
 use toml::{Table, Value};
-use troupekit_graph::patterns::compile;
-use troupekit_graph::WorkflowError;
+use troupekit_graph::patterns::{compile, load};
+use troupekit_graph::{Flow, FlowKind, JoinMode, Reducer, WorkflowError};
 
 const FILE: &str = "test/team.toml";
 
@@ -713,4 +713,132 @@ fn feedback_route_cannot_skip_a_writer() {
         compile(FILE, PIPELINE).is_ok(),
         "routing back or to the next step stays valid"
     );
+}
+
+fn loaded(text: &str) -> Flow {
+    load(FILE, text).unwrap_or_else(|e| panic!("does not load as a flow: {e}\n{text}"))
+}
+
+#[test]
+fn every_team_mode_parses_as_a_flow() {
+    let route = loaded(ROUTE);
+    assert_eq!(route.start(), "triage_lead");
+    assert!(
+        matches!(route.kind("triage_lead"), Some(FlowKind::Agent { goto, .. })
+        if goto == &["approve_billing", "tech", "sales"])
+    );
+    assert!(matches!(
+        route.kind("check_billing"),
+        Some(FlowKind::Switch { .. })
+    ));
+    let coordinate = loaded(COORDINATE);
+    assert!(
+        matches!(coordinate.kind("lead"), Some(FlowKind::Agent { delegates, .. })
+        if delegates == &["billing", "tech"])
+    );
+    let collaborate = loaded(PANEL);
+    assert!(matches!(
+        collaborate.kind("gather"),
+        Some(FlowKind::Join {
+            mode: JoinMode::All,
+            ..
+        })
+    ));
+    let broadcast = loaded(&PANEL.replace("collaborate", "broadcast"));
+    assert_eq!(broadcast.reducer("answers"), Some(Reducer::Append));
+    for table in [
+        "team_route",
+        "team_coordinate",
+        "team_collaborate",
+        "team_broadcast",
+    ] {
+        let path = format!(
+            "{}/tests/fixtures/patterns/{table}.toml",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        Flow::parse(&path, &text).unwrap_or_else(|e| panic!("golden {table}: {e}"));
+    }
+}
+
+#[test]
+fn every_crew_parses_as_a_flow() {
+    let report = loaded(REPORT);
+    assert_eq!(report.start(), "research");
+    assert!(matches!(
+        report.kind("join_fact_check"),
+        Some(FlowKind::Join { .. })
+    ));
+    assert!(matches!(
+        report.kind("when_write"),
+        Some(FlowKind::Switch { .. })
+    ));
+    assert!(matches!(
+        report.kind("review_write"),
+        Some(FlowKind::Human { .. })
+    ));
+    let hierarchy = loaded(HIERARCHY);
+    assert!(
+        matches!(hierarchy.kind("manager"), Some(FlowKind::Agent { delegates, model, .. })
+        if delegates == &["researcher", "checker", "writer"]
+            && model.as_deref() == Some("openai/gpt-6-luna"))
+    );
+    let spans = crew(&[
+        &task("a", ""),
+        &task("check", "context = ['a']\nasync = true"),
+        &task("outline", "context = ['a']"),
+        &task(
+            "write",
+            "context = ['check', 'outline']\nhuman_input = true",
+        ),
+    ]);
+    loaded(&spans);
+    loaded(&crew(&[
+        &task("a", "human_input = true"),
+        &task("b", "context = ['a']"),
+    ]));
+    loaded(&crew(&[
+        &task("a", ""),
+        &task("b", "async = true"),
+        &task("c", ""),
+    ]));
+    for table in ["crew_sequential", "crew_hierarchical"] {
+        let path = format!(
+            "{}/tests/fixtures/patterns/{table}.toml",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        Flow::parse(&path, &text).unwrap_or_else(|e| panic!("golden {table}: {e}"));
+    }
+}
+
+#[test]
+fn every_shortcut_parses_as_a_flow() {
+    let pipeline = loaded(PIPELINE);
+    assert!(matches!(
+        pipeline.kind("review"),
+        Some(FlowKind::Join { .. })
+    ));
+    assert!(matches!(pipeline.kind("ok"), Some(FlowKind::Human { .. })));
+    assert!(matches!(
+        pipeline.kind("route_ok"),
+        Some(FlowKind::Switch { .. })
+    ));
+    loaded(
+        "name = 'p'\n[state]\ngo = 'bool'\n\
+         [[steps]]\nid = 'a'\nagent = 'x'\nprompt = 'Go.'\n\
+         [[steps]]\nid = 'b'\nagent = 'y'\nwhen = 'go'\n\
+         [[steps]]\nid = 'c'\nagent = 'z'\n",
+    );
+    loaded(
+        "name = 'p'\n[[steps]]\nid = 'draft'\nagent = 'writer'\n\
+         [[steps]]\nid = 'ok'\n\
+         feedback = { prompt = 'Done?', routes = { yes = 'end', no = 'draft' } }\n",
+    );
+    let path = format!(
+        "{}/tests/fixtures/patterns/steps_pipeline.toml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    Flow::parse(&path, &text).unwrap();
 }
