@@ -717,3 +717,78 @@ fn unbound_target_is_a_build_error() {
         .unwrap();
     assert!(matches!(err, RouteError::Bind { ref target, .. } if target == "local"));
 }
+
+use crate::common::{golden_text, scripted_model};
+use troupekit_providers::transport::{Scripted as Http, ScriptedTransport};
+use troupekit_providers::wire::Protocol;
+
+fn http_pair(
+    local_replies: usize,
+    cloud: Vec<Http>,
+) -> (
+    RoutedModel,
+    Arc<ScriptedTransport>,
+    Arc<ScriptedTransport>,
+    Arc<FixedClock>,
+    NetworkState,
+) {
+    let ok = || Http::body(200, golden_text("openai_reply.json"));
+    let (local, local_wire) =
+        scripted_model(Protocol::OpenAi, (0..local_replies).map(|_| ok()).collect());
+    let (cloud, cloud_wire) = scripted_model(Protocol::OpenAi, cloud);
+    let clock = Arc::new(FixedClock::new(1_800_000_000_000));
+    let state = NetworkState::new();
+    let model = RoutedModel::builder(pair_policy(""))
+        .on_device("local", Arc::new(local), Price::FREE)
+        .remote("cloud", Arc::new(cloud), price(1, 2))
+        .network(Arc::new(state.clone()))
+        .clock(clock.clone())
+        .build()
+        .unwrap();
+    (model, local_wire, cloud_wire, clock, state)
+}
+
+#[tokio::test]
+async fn private_never_routes_remote() {
+    let ok = Http::body(200, golden_text("openai_reply.json"));
+    let (model, local_wire, cloud_wire, _, state) = http_pair(1, vec![ok]);
+    state.set(Some(true));
+    let private = model.view(RouteTags::default().with_private(true));
+    private.complete(&req()).await.unwrap();
+    assert_eq!(local_wire.sent().len(), 1);
+    assert!(cloud_wire.sent().is_empty());
+}
+
+#[tokio::test]
+async fn offline_state_uses_local_transport_only() {
+    let ok = Http::body(200, golden_text("openai_reply.json"));
+    let (model, local_wire, cloud_wire, _, state) = http_pair(1, vec![ok]);
+    state.set(Some(false));
+    model.complete(&req()).await.unwrap();
+    assert_eq!(local_wire.sent().len(), 1);
+    assert!(cloud_wire.sent().is_empty());
+}
+
+#[tokio::test]
+async fn remote_failure_falls_back_to_local() {
+    let (model, local_wire, cloud_wire, _, _) =
+        http_pair(1, vec![Http::body(503, "upstream down")]);
+    model.complete(&req()).await.unwrap();
+    assert_eq!(cloud_wire.sent().len(), 1);
+    assert_eq!(local_wire.sent().len(), 1);
+}
+
+#[tokio::test]
+async fn network_errors_flip_passive_probe_offline() {
+    let (model, local_wire, cloud_wire, clock, _) = http_pair(3, vec![]);
+    model.complete(&req()).await.unwrap();
+    assert_eq!(cloud_wire.sent().len(), 1);
+    assert_eq!(local_wire.sent().len(), 1);
+    model.complete(&req()).await.unwrap();
+    assert_eq!(cloud_wire.sent().len(), 1);
+    assert_eq!(local_wire.sent().len(), 2);
+    clock.advance(30_000);
+    model.complete(&req()).await.unwrap();
+    assert_eq!(cloud_wire.sent().len(), 2);
+    assert_eq!(local_wire.sent().len(), 3);
+}
