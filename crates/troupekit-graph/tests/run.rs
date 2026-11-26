@@ -1397,3 +1397,28 @@ async fn max_steps_law_event_is_emitted() {
     let edges = named(&records, "graph.edge");
     assert!(edges.iter().any(|r| r["fields"]["from"] == "r" && r["fields"]["label"] == "true"));
 }
+
+#[tokio::test]
+async fn agent_node_applies_persona_trace_keys() {
+    let (mut f, _) = linear();
+    f.io.personas = PersonaLoader::new(vec![Arc::new(MemorySource::new(
+        "test",
+        [persona("planner", "trace = ['models']\n[output]\nsteps = 'list'")],
+    ))]);
+    let mut run = GraphRun::new(wf(LINEAR), input(&[("goal", json!("run 5k"))]), Limits::default(), &f.io)
+        .await
+        .unwrap();
+    let sink = Arc::new(troupekit_trace::MemorySink::default());
+    let tracer = troupekit_trace::Tracer::builder()
+        .categories(troupekit_trace::TraceSet::none())
+        .sink(sink.clone())
+        .build()
+        .unwrap();
+    let out = tracer.in_scope(drive(&mut run, &f.io)).await;
+    drop(tracer);
+    assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
+    let records = trace_records(&sink);
+    assert_eq!(named(&records, "model.call").len(), 1, "the persona's keys add models");
+    assert!(named(&records, "graph.step").is_empty(), "the host scope keeps graphs off");
+    assert!(named(&records, "tool.call").is_empty());
+}

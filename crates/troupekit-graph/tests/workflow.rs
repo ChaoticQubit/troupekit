@@ -453,3 +453,20 @@ fn flag_condition_routes_on_bool() {
     assert!(c.register("Bad", always).is_err());
     assert!(c.get("always").is_some());
 }
+
+#[test]
+fn workflow_trace_keys_parse() {
+    use troupekit_trace::{Trace, TraceSet};
+    let body = format!("{}\n[[edges]]\nfrom = 'a'\nto = 'e'\n", nodes(&[TOOL_A, END]));
+    let with = |keys: &str| format!("{}{body}", HEAD.replacen("start = 'a'\n", &format!("start = 'a'\n{keys}"), 1));
+    let plain = with("");
+    assert_eq!(troupekit_graph::workflow::trace_spec("w.toml", &plain).unwrap(), None);
+    let keyed = with("trace = ['graphs', 'tools']\ntrace_content = true\ntrace_file = 'traces/w.jsonl'\n");
+    assert_eq!(parse(&keyed).unwrap(), parse(&plain).unwrap());
+    let spec = troupekit_graph::workflow::trace_spec("w.toml", &keyed).unwrap().unwrap();
+    assert_eq!(spec.categories(), TraceSet::none().with(Trace::Graphs).with(Trace::Tools));
+    assert!(spec.content());
+    assert_eq!(spec.file(), Some("traces/w.jsonl"));
+    assert_eq!(field_of(&with("trace = true\ntrace_file = '../w.jsonl'\n")), "trace_file");
+    assert_eq!(field_of(&with("trace_content = true\n")), "trace_content");
+}

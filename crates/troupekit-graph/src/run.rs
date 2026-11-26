@@ -11,7 +11,8 @@ use troupekit_core::ids::RunId;
 use troupekit_core::message::{Message, Role};
 use troupekit_core::store::Checkpoint;
 use troupekit_tools::{fence_untrusted, ToolContext, ToolError};
-use troupekit_trace::{content, trace, trace_span, Span, Trace};
+use troupekit_agent::persona::{open_trace, SavedTrace};
+use troupekit_trace::{content, trace, trace_span, Span, Trace, TraceSpec};
 
 /// Version of the serialized graph run.
 /// `from_checkpoint` refuses any other, so a deploy never resumes
@@ -200,6 +201,8 @@ pub struct GraphRun {
     stopped: Option<Stop>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace: Option<SavedTrace>,
 }
 
 impl GraphRun {
@@ -270,7 +273,24 @@ impl GraphRun {
             active_ms: 0,
             stopped: None,
             failure: None,
+            trace: None,
         })
+    }
+
+    /// Traces this run with `spec` from its next step on; the spec is kept
+    /// in the checkpoint, so a resumed run keeps it. Input: the spec.
+    /// Output: none.
+    pub fn set_trace(&mut self, spec: TraceSpec) {
+        self.trace = Some(SavedTrace::from_spec(&spec));
+        assert_eq!(self.trace(), Some(spec));
+    }
+
+    /// Returns the trace spec set with `set_trace`, if any.
+    /// Input: none. Output: the spec.
+    pub fn trace(&self) -> Option<TraceSpec> {
+        self.trace
+            .as_ref()
+            .map(|saved| saved.spec().expect("trace spec checked when set or loaded"))
     }
 
     /// Sets the active-work time limit: the run stops once its steps have
@@ -389,6 +409,9 @@ impl GraphRun {
         }
         if run.status == GraphStatus::Running {
             return Err(bad("a checkpoint never holds a running step".into()));
+        }
+        if let Some(saved) = &run.trace {
+            saved.spec().map_err(bad)?;
         }
         for b in &run.branches {
             if let At::Agent { run: agent, .. } = &b.at {
@@ -549,7 +572,23 @@ impl GraphRun {
     /// Runs one step: one unit of work (one agent step or one tool call)
     /// for every branch that can work, concurrently, with control nodes
     /// resolved before and after. Waiting and final runs change nothing.
+    /// With a trace spec the step nests in the active scope, or writes its file.
     pub async fn step(&mut self, io: &dyn GraphIo) -> GraphOutcome {
+        let working = matches!(self.status, GraphStatus::Queued | GraphStatus::Checkpointed);
+        let Some(spec) = self.trace().filter(|_| working) else {
+            return self.step_once(io).await;
+        };
+        if let Some(scope) = troupekit_trace::current() {
+            let nested = scope.nest(spec.categories(), Some(spec.content()));
+            return nested.in_scope(self.step_once(io)).await;
+        }
+        match open_trace(&spec, &self.workflow.name, self.run_id) {
+            Ok(tracer) => tracer.in_scope(self.step_once(io)).await,
+            Err(_) => self.step_once(io).await,
+        }
+    }
+
+    async fn step_once(&mut self, io: &dyn GraphIo) -> GraphOutcome {
         match &self.status {
             GraphStatus::Done => return GraphOutcome::Done(self.state.clone()),
             GraphStatus::Failed { error } => return GraphOutcome::Failed(error.clone()),
@@ -846,9 +885,12 @@ impl GraphRun {
                             run_cap,
                         );
                         let input = vec![agent_input(prompt.as_deref(), data)];
-                        let run = AgentRun::new(&p, input, limits, io.agent())
+                        let mut run = AgentRun::new(&p, input, limits, io.agent())
                             .await
                             .map_err(|e| fail(e.to_string()))?;
+                        if let Some(spec) = io.persona_trace(persona).await {
+                            run.set_trace(spec);
+                        }
                         self.branches[i].at = At::Agent {
                             run: Box::new(run),
                             call_cap,

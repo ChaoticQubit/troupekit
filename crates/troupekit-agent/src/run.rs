@@ -3,7 +3,7 @@ use crate::dsl::Call;
 use crate::error::AgentError;
 use crate::eval::{judge_request, judge_verdict, repair_message};
 use crate::io::{AgentIo, ModelHandle};
-use crate::persona::Persona;
+use crate::persona::{open_trace, Persona, SavedTrace};
 use crate::schema::{parse_json, validate};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use troupekit_core::message::{ContentPart, Message, Role};
 use troupekit_core::store::{Checkpoint, CheckpointStore};
 use troupekit_providers::{CompletionRequest, CompletionResponse, Delta, StopReason};
 use troupekit_tools::{ToolContext, ToolOutput};
-use troupekit_trace::{content, trace, trace_span, Trace};
+use troupekit_trace::{content, trace, trace_span, Trace, TraceSpec};
 
 /// Version of the serialized run.
 /// `from_checkpoint` refuses any other, so a deploy never resumes
@@ -120,6 +120,8 @@ pub struct AgentRun {
     usage: Usage,
     seq: u64,
     steps: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace: Option<SavedTrace>,
 }
 
 impl AgentRun {
@@ -174,6 +176,7 @@ impl AgentRun {
             usage: Usage::default(),
             seq: 0,
             steps: 0,
+            trace: None,
         })
     }
 
@@ -193,6 +196,9 @@ impl AgentRun {
             return Err(AgentError::Checkpoint(
                 "checkpoint header does not match its state".into(),
             ));
+        }
+        if let Some(saved) = &run.trace {
+            saved.spec().map_err(AgentError::Checkpoint)?;
         }
         Ok(run)
     }
@@ -255,10 +261,45 @@ impl AgentRun {
         Ok(())
     }
 
+    /// Traces this run with `spec` from its next step on; the spec is kept
+    /// in the checkpoint, so a resumed run keeps it. Input: the spec.
+    /// Output: none.
+    pub fn set_trace(&mut self, spec: TraceSpec) {
+        self.trace = Some(SavedTrace::from_spec(&spec));
+        assert_eq!(self.trace(), Some(spec));
+    }
+
+    /// Returns the trace spec set with `set_trace`, if any.
+    /// Input: none. Output: the spec.
+    pub fn trace(&self) -> Option<TraceSpec> {
+        self.trace
+            .as_ref()
+            .map(|saved| saved.spec().expect("trace spec checked when set or loaded"))
+    }
+
     /// Runs one step: one model call, one tool batch, one output check or
     /// one repair prompt, emitting its events through `io`. Final and paused
-    /// runs return their outcome again and change nothing.
+    /// runs return their outcome again and change nothing. With a trace
+    /// spec the step nests in the active scope, or writes its trace file.
     pub async fn step(&mut self, io: &dyn AgentIo) -> StepOutcome {
+        let working = !matches!(
+            self.state,
+            RunState::Done { .. } | RunState::Failed { .. } | RunState::Paused { .. }
+        );
+        let Some(spec) = self.trace().filter(|_| working) else {
+            return self.step_once(io).await;
+        };
+        if let Some(scope) = troupekit_trace::current() {
+            let nested = scope.nest(spec.categories(), Some(spec.content()));
+            return nested.in_scope(self.step_once(io)).await;
+        }
+        match open_trace(&spec, &self.spec.persona, self.run_id) {
+            Ok(tracer) => tracer.in_scope(self.step_once(io)).await,
+            Err(_) => self.step_once(io).await,
+        }
+    }
+
+    async fn step_once(&mut self, io: &dyn AgentIo) -> StepOutcome {
         match &self.state {
             RunState::Done { output } => return StepOutcome::Done(output.clone()),
             RunState::Failed { error } => return StepOutcome::Failed(error.clone()),

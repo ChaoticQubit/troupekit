@@ -9,6 +9,7 @@ use troupekit_core::clock::Clock;
 use troupekit_core::event::{Event, EventBody};
 use troupekit_core::ids::RunId;
 use troupekit_tools::ToolRegistry;
+use troupekit_trace::TraceSpec;
 
 /// Everything live a graph run needs, supplied by the host on every step:
 /// the `AgentIo` its agent and tool nodes use, persona loading by name
@@ -18,6 +19,13 @@ pub trait GraphIo: Send + Sync {
     fn agent(&self) -> &dyn AgentIo;
     async fn persona(&self, name: &str) -> Result<Persona, AgentError>;
     fn conditions(&self) -> &Conditions;
+
+    /// Returns the trace settings of persona `name`, applied to the agent
+    /// run of every node using it. The default is `None`, no tracing.
+    /// Input: the persona name. Output: the spec.
+    async fn persona_trace(&self, _name: &str) -> Option<TraceSpec> {
+        None
+    }
 }
 
 /// A `GraphIo` built from plain fields: an agent io, a persona loader and
@@ -54,6 +62,10 @@ impl GraphIo for SimpleGraphIo {
 
     fn conditions(&self) -> &Conditions {
         &self.conditions
+    }
+
+    async fn persona_trace(&self, name: &str) -> Option<TraceSpec> {
+        self.personas.trace_spec(name).await.ok().flatten()
     }
 }
 

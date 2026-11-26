@@ -1242,3 +1242,38 @@ async fn failed_step_error_is_content() {
     assert!(failed[0]["fields"]["error"]["bytes"].as_u64().unwrap() > 0);
     assert!(sink.lines().iter().all(|l| !l.contains("has 1 items")));
 }
+
+#[tokio::test]
+async fn checkpoint_without_trace_has_no_trace_key() {
+    let s = setup(vec![text("hi")], PRICE);
+    let mut run = AgentRun::new(&persona(""), ask(), Limits::default(), &s.io)
+        .await
+        .unwrap();
+    assert_eq!(run.trace(), None);
+    assert!(run.checkpoint().state.get("trace").is_none());
+    run.set_trace(troupekit_trace::TraceSpec::default().with_content(true));
+    assert_eq!(run.checkpoint().state["trace"]["content"], true);
+}
+
+#[tokio::test]
+async fn resumed_run_keeps_its_trace_spec() {
+    use troupekit_trace::{Trace, TraceSet, TraceSpec};
+    let s = setup(vec![calls(&[("c1", "echo")]), text("done")], PRICE);
+    let store = InMemCheckpoints::default();
+    let spec = TraceSpec::new(TraceSet::none().with(Trace::Tools)).with_file("traces/coach.jsonl");
+    let mut run = AgentRun::new(&persona("tools = ['echo']"), ask(), Limits::default(), &s.io)
+        .await
+        .unwrap();
+    run.set_trace(spec.clone());
+    store.save(run.checkpoint()).await.unwrap();
+    let (tracer, sink) = traced(false);
+    assert_eq!(tracer.in_scope(run.step(&s.io)).await, StepOutcome::Continue);
+    store.save(run.checkpoint()).await.unwrap();
+    let cp = store.latest(run.run_id()).await.unwrap().unwrap();
+    let mut resumed = AgentRun::from_checkpoint(&cp).unwrap();
+    assert_eq!(resumed.trace(), Some(spec));
+    tracer.in_scope(step_to_end(&mut resumed, &s.io)).await;
+    drop(tracer);
+    let records = trace_records(&sink);
+    assert_eq!(starts(&records, "tool.call").len(), 1, "the resumed run still traces tools");
+}

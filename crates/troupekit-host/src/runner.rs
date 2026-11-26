@@ -10,7 +10,7 @@ use troupekit_core::error::CoreError;
 use troupekit_core::ids::RunId;
 use troupekit_core::store::CheckpointStore;
 use troupekit_graph::{GraphIo, GraphOutcome, GraphRun, Stop};
-use troupekit_trace::{trace_span, Trace};
+use troupekit_trace::{trace_span, Trace, TraceSink, Tracer};
 
 const DEFAULT_LEASE_MS: i64 = 300_000;
 const STORE_RETRY_MS: i64 = 1_000;
@@ -79,6 +79,7 @@ pub struct Runner {
     checkpoints: Arc<dyn CheckpointStore>,
     io: Arc<dyn GraphIo>,
     lease_ms: i64,
+    trace_sink: Option<Arc<dyn TraceSink>>,
 }
 
 impl Runner {
@@ -95,6 +96,33 @@ impl Runner {
             checkpoints,
             io,
             lease_ms: DEFAULT_LEASE_MS,
+            trace_sink: None,
+        }
+    }
+
+    /// Sends the trace of every run with a trace spec (set in code or by
+    /// the workflow's `trace` keys) to `sink` instead of its JSONL file.
+    /// Returns the runner.
+    pub fn with_trace_sink(mut self, sink: Arc<dyn TraceSink>) -> Self {
+        self.trace_sink = Some(sink);
+        self
+    }
+
+    async fn step(&self, run: &mut GraphRun) -> GraphOutcome {
+        let io = self.io.as_ref();
+        let scope = troupekit_trace::current();
+        let (Some(sink), Some(spec), None) = (&self.trace_sink, run.trace(), scope) else {
+            return run.step(io).await;
+        };
+        let tracer = Tracer::builder()
+            .categories(spec.categories())
+            .content(spec.content())
+            .name(&run.workflow().name)
+            .sink(sink.clone())
+            .build();
+        match tracer {
+            Ok(tracer) => tracer.in_scope(run.step(io)).await,
+            Err(_) => run.step(io).await,
         }
     }
 
@@ -158,10 +186,10 @@ impl Runner {
         let outcome = if run.over_time() {
             let limit_ms = run.time_limit_ms().expect("only a limited run is over time");
             let _finished = run.stop(Stop::TimeLimit { limit_ms });
-            run.step(self.io.as_ref()).await
+            self.step(&mut run).await
         } else {
             let started = self.now();
-            let outcome = run.step(self.io.as_ref()).await;
+            let outcome = self.step(&mut run).await;
             run.add_active_ms(u64::try_from(self.now() - started).unwrap_or(0));
             outcome
         };
