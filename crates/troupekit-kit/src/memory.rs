@@ -111,7 +111,11 @@ pub(crate) async fn attach(mut agent: Agent) -> Result<(Agent, Option<KnowledgeK
                 .or_else(|| agent.storage.sqlite_path().map(Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_STORE));
             tools.push(SEARCH_KNOWLEDGE);
-            Some((open_knowledge(&name, k, &store_path).await?, store_path))
+            let embedder = match k.embedder.clone() {
+                Some(embedder) => embedder,
+                None => agent.default_embedder()?,
+            };
+            Some((open_knowledge(k, embedder, &store_path).await?, store_path))
         }
         None => None,
     };
@@ -184,13 +188,11 @@ struct Opened {
     scope: String,
 }
 
-async fn open_knowledge(name: &str, k: &Knowledge, path: &Path) -> Result<Opened, KitError> {
-    let Some(embedder) = k.embedder.clone() else {
-        return Err(KitError::config(
-            name,
-            "knowledge needs an embedder: call Knowledge::embedder(..)",
-        ));
-    };
+async fn open_knowledge(
+    k: &Knowledge,
+    embedder: Arc<dyn Embedder>,
+    path: &Path,
+) -> Result<Opened, KitError> {
     let store = SqliteStore::open(path).await?;
     let vectors = store
         .vectors(&k.index, VectorSettings::new(embedder.dims()))

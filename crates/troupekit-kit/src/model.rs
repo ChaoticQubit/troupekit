@@ -68,6 +68,54 @@ pub(crate) fn resolve(choice: ModelChoice<'_>) -> Result<ModelHandle, KitError> 
     })
 }
 
+#[cfg(feature = "knowledge")]
+pub(crate) fn default_embedder(
+    choice: ModelChoice<'_>,
+) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
+    let agent = choice.agent;
+    let none = |why: String| {
+        KitError::config(
+            agent,
+            format!("knowledge needs an embedder: {why}; call Knowledge::embedder(..)"),
+        )
+    };
+    let Some((vendor_id, _)) = choice.selector.split_once('/') else {
+        return Err(none(format!(
+            "model alias `{}` names no vendor",
+            choice.selector
+        )));
+    };
+    let Some(spec) = choice
+        .catalog
+        .embedding_specs()
+        .iter()
+        .find(|e| e.vendor == vendor_id)
+    else {
+        return Err(none(format!(
+            "vendor `{vendor_id}` has no embedding model in the catalog"
+        )));
+    };
+    let vendor = choice.catalog.vendor(vendor_id);
+    assert!(
+        vendor.is_some(),
+        "a catalog embedding row names a catalog vendor"
+    );
+    let key = match vendor.map(|v| v.auth) {
+        Some(AuthStyle::NoKey) => None,
+        _ => Some(key_for(vendor_id, choice.api_key, choice.api_key_env)?),
+    };
+    let transport = match choice.transport {
+        Some(t) => t,
+        None => default_transport(agent)?,
+    };
+    let selector = format!("{}/{}", spec.vendor, spec.id);
+    let embedder = choice
+        .catalog
+        .embedder_with(&selector, key, transport)
+        .map_err(|source| catalog_error(agent, choice.catalog, source))?;
+    Ok(Arc::new(embedder))
+}
+
 fn key_for(vendor: &str, key: Option<Secret>, env: Option<&str>) -> Result<Secret, KitError> {
     if let Some(key) = key {
         return Ok(key);

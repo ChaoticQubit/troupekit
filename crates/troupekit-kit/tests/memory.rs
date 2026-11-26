@@ -187,7 +187,7 @@ async fn knowledge_dir_ingests_once_then_skips() {
 }
 
 #[tokio::test]
-async fn knowledge_without_embedder_fails_at_build() {
+async fn knowledge_without_a_catalog_embedder_fails_at_build() {
     let dir = tempfile::tempdir().unwrap();
     let agent = Agent::new("reader")
         .instructions("Read.")
@@ -196,8 +196,25 @@ async fn knowledge_without_embedder_fails_at_build() {
         .knowledge(Knowledge::dir(docs(dir.path())).store(dir.path().join("kb.db")));
     assert_eq!(
         build_error(agent).await.to_string(),
-        "agent `reader`: knowledge needs an embedder: call Knowledge::embedder(..)"
+        "agent `reader`: knowledge needs an embedder: vendor `fake` has no embedding model in the catalog; call Knowledge::embedder(..)"
     );
+}
+
+#[tokio::test]
+async fn knowledge_defaults_to_the_catalog_embedder_for_the_agent_vendor() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let built = Agent::new("reader")
+        .instructions("Read.")
+        .model("openai/gpt-6-luna")
+        .api_key(crate::common::secret("test-key"))
+        .transport(crate::common::scripted())
+        .knowledge(Knowledge::dir(&empty).store(dir.path().join("kb.db")))
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(built.persona().tools, ["search_knowledge".to_string()]);
 }
 
 #[tokio::test]

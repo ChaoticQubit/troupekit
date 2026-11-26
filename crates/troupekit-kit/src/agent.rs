@@ -438,6 +438,22 @@ impl Agent {
             && self.catalog == other.catalog
     }
 
+    #[cfg(feature = "knowledge")]
+    pub(crate) fn default_embedder(
+        &self,
+    ) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
+        crate::model::default_embedder(ModelChoice {
+            agent: &self.name,
+            selector: self.model.as_deref().unwrap_or_default(),
+            catalog: self.catalog.as_ref().unwrap_or_else(|| builtin_catalog()),
+            client: None,
+            price: None,
+            api_key: self.api_key.clone(),
+            api_key_env: self.api_key_env.as_deref(),
+            transport: self.transport.clone(),
+        })
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.name
     }

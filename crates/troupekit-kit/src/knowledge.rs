@@ -226,7 +226,7 @@ fn ingest_hash(content_hash: &str, settings: &IngestSettings) -> String {
 /// A folder an agent can search: `Knowledge::dir("docs")` plus settings.
 /// At `build` the folder is ingested into index `index` of the store file
 /// (unchanged files skipped) and the agent gets the `search_knowledge`
-/// tool. `embedder` is required in 0.2.
+/// tool. The embedder defaults to the catalog's for the agent's vendor.
 #[derive(Clone)]
 pub struct Knowledge {
     pub(crate) dir: PathBuf,
@@ -269,8 +269,9 @@ impl Knowledge {
         self
     }
 
-    /// Sets the embedder for the folder and for searches. Required in 0.2;
-    /// the dimensions must match an existing index of the same name.
+    /// Sets the embedder for the folder and for searches, overriding the
+    /// catalog embedder of the agent's vendor; dimensions must match an
+    /// existing index of the same name.
     /// Returns the settings.
     pub fn embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
