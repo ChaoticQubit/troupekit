@@ -581,10 +581,8 @@ async fn whole_steps_store_keeps_the_0_1_seq_after_restore() {
     let before = sink.events().len();
     let next = sink.events().iter().map(|e| e.seq).max().unwrap() + 1;
     run = GraphRun::restore(&store, id).await.unwrap();
-    assert_eq!(
-        run.step_durable(&io, &store).await.unwrap(),
-        GraphOutcome::Continue
-    );
+    let out = run.step_durable(&io, &store).await.unwrap();
+    assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
     let after: Vec<u64> = sink.events()[before..].iter().map(|e| e.seq).collect();
     assert_eq!(
         after.first(),

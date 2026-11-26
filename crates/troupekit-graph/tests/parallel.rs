@@ -105,7 +105,7 @@ async fn reducer_result_is_independent_of_finish_order() {
         ),
         (
             "extend",
-            "list",
+            "list<int>",
             [json!([1]), json!([2, 3]), json!([4])],
             json!([1, 2, 3, 4]),
         ),
@@ -561,13 +561,14 @@ async fn map_item_that_breaks_the_item_type_fails_the_run() {
     let gates = GatedTool::new();
     let io = map_io(&gates);
     let mut input = Map::new();
-    input.insert("xs".into(), json!(["a", 7]));
-    let mut run = map_run(&map_flow("", None), input, &io).await;
+    input.insert("xs".into(), json!([1, 2]));
+    let text = map_flow("", None).replace("xs = 'list'", "xs = 'list<int>'");
+    let mut run = map_run(&text, input, &io).await;
     let GraphOutcome::Failed(e) = run.step(&io).await else {
         panic!("an item of the wrong type fails the run");
     };
     assert!(
-        e.contains("node `m`") && e.contains("item 1") && e.contains("`x`"),
+        e.contains("node `m`") && e.contains("item 0") && e.contains("`x`"),
         "{e}"
     );
     assert!(gates.calls("w/a").is_empty(), "no item runs");
