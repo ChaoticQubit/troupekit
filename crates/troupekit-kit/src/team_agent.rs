@@ -37,7 +37,8 @@ pub(crate) struct Members {
 /// How a leader works with its `members`: `Route` picks one member,
 /// `Coordinate` delegates to them, `Collaborate` briefs all and combines
 /// their answers, `Broadcast` briefs all and keeps every answer. `Tasks`
-/// delegates in passes until the leader says it is done, at most 5.
+/// delegates in passes until the leader says it is done; the run's steps,
+/// not its passes, are capped (96 at the default `max_iterations`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TeamMode {
     Route,
@@ -123,8 +124,8 @@ impl Agent {
 
     /// Lets this agent answer a request itself or hand it to one of
     /// `agents`, which then answers it. The agents build into one flow from
-    /// the handoff pattern, bounded by its default `max_handoffs`, and run
-    /// as a graph behind `run` and `run_with`, like a team of `members`.
+    /// the handoff pattern, whose steps (not hops) are capped from its
+    /// default `max_handoffs`, and run behind `run` and `run_with`.
     pub fn handoffs(mut self, agents: impl IntoIterator<Item = Agent>) -> Self {
         self.members.handoffs.extend(agents);
         self

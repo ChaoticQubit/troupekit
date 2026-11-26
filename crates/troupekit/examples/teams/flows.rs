@@ -47,7 +47,13 @@ pub fn io(troupe: &Troupe, model: Arc<dyn Model>, price: Price) -> Arc<SimpleGra
 /// `input`, saves it and enqueues it on the troupe's queue.
 /// Input: troupe, io, file name, pattern TOML and request.
 /// Output: the run id, or the first pattern, flow or store error.
-pub async fn start(troupe: &Troupe, io: Arc<SimpleGraphIo>, file: &str, text: &str, input: &str) -> Outcome<RunId> {
+pub async fn start(
+    troupe: &Troupe,
+    io: Arc<SimpleGraphIo>,
+    file: &str,
+    text: &str,
+    input: &str,
+) -> Outcome<RunId> {
     let flow = patterns::load(file, text)?;
     let mut state = Map::new();
     state.insert("input".into(), Value::String(input.to_string()));
@@ -82,7 +88,13 @@ pub async fn work(troupe: &Troupe, io: Arc<SimpleGraphIo>, id: RunId) -> Outcome
 /// Answers the human approval node `node` of run `id` with `yes` and
 /// enqueues the run again. Input: troupe, io, run id, node id and answer.
 /// Output: nothing, or the runner's error for a run that does not wait.
-pub async fn approve(troupe: &Troupe, io: Arc<SimpleGraphIo>, id: RunId, node: &str, yes: bool) -> Outcome<()> {
+pub async fn approve(
+    troupe: &Troupe,
+    io: Arc<SimpleGraphIo>,
+    id: RunId,
+    node: &str,
+    yes: bool,
+) -> Outcome<()> {
     assert!(!node.is_empty(), "an approval node has an id");
     troupe.runner(io).resume(id, node, Value::Bool(yes)).await?;
     Ok(())

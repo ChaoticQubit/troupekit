@@ -181,7 +181,11 @@ fn reception() {}
 
 #[tokio::test]
 async fn macro_handoffs_key_reaches_builder() {
-    let built = reception().model_client(echo_model()).build().await.unwrap();
+    let built = reception()
+        .model_client(echo_model())
+        .build()
+        .await
+        .unwrap();
     let by_hand = Agent::new("reception")
         .instructions("Answer or hand the request to a desk.")
         .model("fake/m")
@@ -197,7 +201,10 @@ async fn macro_handoffs_key_reaches_builder() {
         .build()
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("two team agents are named"), "{err}");
+    assert!(
+        err.to_string().contains("two team agents are named"),
+        "{err}"
+    );
 }
 
 /// Send each request to the right desk.

@@ -131,12 +131,14 @@ impl FlowTable {
         }
     }
 
-
     /// Sets the flow's `max_steps`, the bound on every step the run takes.
     /// Patterns with a cycle set it from their own limit.
     /// `steps` must be 1 to 10 000, the range `Flow::parse` accepts.
     pub(crate) fn max_steps(&mut self, steps: i64) {
-        assert!((1..=10_000).contains(&steps), "max_steps fits the flow range");
+        assert!(
+            (1..=10_000).contains(&steps),
+            "max_steps fits the flow range"
+        );
         self.head.insert("max_steps".into(), Value::Integer(steps));
     }
 
@@ -157,8 +159,13 @@ impl FlowTable {
     /// fan-out may all write it.
     /// The key must be declared first.
     pub(crate) fn reducer(&mut self, key: &str, reducer: &str) {
-        assert!(self.state.contains_key(key), "a reducer names a declared key");
-        let old = self.reducers.insert(key.into(), Value::String(reducer.into()));
+        assert!(
+            self.state.contains_key(key),
+            "a reducer names a declared key"
+        );
+        let old = self
+            .reducers
+            .insert(key.into(), Value::String(reducer.into()));
         assert!(old.is_none(), "one reducer per key");
     }
 

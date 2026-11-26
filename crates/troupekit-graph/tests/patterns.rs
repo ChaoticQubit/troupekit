@@ -764,7 +764,10 @@ fn tasks_compiles_to_bounded_leader_loop() {
     assert_eq!(table, golden("team_tasks.toml"));
     assert_eq!(table["max_steps"].as_integer(), Some(96));
     let lead = node(&table, "lead");
-    assert!(lead.get("writes").is_none(), "the leader writes through `sets`");
+    assert!(
+        lead.get("writes").is_none(),
+        "the leader writes through `sets`"
+    );
     assert_eq!(strs(&lead["reads"]), ["input", "tasks"]);
     let three = compile(FILE, &format!("{text}max_iterations = 3\n")).unwrap();
     assert_eq!(three["max_steps"].as_integer(), Some(64));
@@ -779,7 +782,10 @@ fn tasks_compiles_to_bounded_leader_loop() {
         "between 1 and 100",
     );
     let flow = loaded(&text);
-    assert!(matches!(flow.kind("check_done"), Some(FlowKind::Switch { .. })));
+    assert!(matches!(
+        flow.kind("check_done"),
+        Some(FlowKind::Switch { .. })
+    ));
 }
 
 #[test]

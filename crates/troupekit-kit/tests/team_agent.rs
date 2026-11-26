@@ -346,7 +346,7 @@ fn team_config(err: KitError) -> String {
 async fn members_route_in_one_line() {
     let (billing, tech) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let router = Arc::new(FnModel::new("fake/m", |_req| {
-        text_reply("{\"next\":\"tech\"}", 10)
+        text_reply(r#"{"next":"tech","reason":"broken device"}"#, 10)
     }));
     let built = team_agent("desk", router)
         .members(
@@ -410,11 +410,17 @@ async fn handoffs_in_one_line() {
     assert_eq!(out.messages().len(), 2);
     let both = team_agent("desk", counted_reply(desk.clone(), to_tech))
         .handoffs([team_agent("tech", counted_reply(tech.clone(), fixed))])
-        .members([team_agent("billing", counted_reply(billing, fixed))], TeamMode::Route)
+        .members(
+            [team_agent("billing", counted_reply(billing, fixed))],
+            TeamMode::Route,
+        )
         .build()
         .await;
     let message = team_config(both.err().expect("members and handoffs together"));
-    assert!(message.contains("members or handoffs, not both"), "{message}");
+    assert!(
+        message.contains("members or handoffs, not both"),
+        "{message}"
+    );
 }
 
 #[tokio::test]
@@ -452,14 +458,20 @@ async fn members_tasks_loops_until_done() {
     let count = passes.clone();
     let leader = Arc::new(FnModel::new("fake/m", move |_req| {
         if count.fetch_add(1, Ordering::SeqCst) == 0 {
-            text_reply(r#"{"done":false,"tasks":["check the bill"],"answer":""}"#, 10)
+            text_reply(
+                r#"{"done":false,"tasks":["check the bill"],"answer":""}"#,
+                10,
+            )
         } else {
             text_reply(r#"{"done":true,"tasks":[],"answer":"All settled."}"#, 10)
         }
     }));
     let member = Arc::new(AtomicUsize::new(0));
     let built = team_agent("lead", leader)
-        .members([team_agent("billing", counted_echo(member.clone()))], TeamMode::Tasks)
+        .members(
+            [team_agent("billing", counted_echo(member.clone()))],
+            TeamMode::Tasks,
+        )
         .build()
         .await
         .unwrap();
@@ -471,7 +483,10 @@ async fn members_tasks_loops_until_done() {
         text_reply(r#"{"done":false,"tasks":["more"],"answer":""}"#, 10)
     }));
     let looping = team_agent("lead", stuck)
-        .members([team_agent("billing", counted_echo(member))], TeamMode::Tasks)
+        .members(
+            [team_agent("billing", counted_echo(member))],
+            TeamMode::Tasks,
+        )
         .build()
         .await
         .unwrap();

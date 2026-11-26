@@ -25,12 +25,19 @@ async fn run() -> flows::Outcome<()> {
     if topic.trim().is_empty() {
         return Err("usage: crew_report <topic>".into());
     }
-    let selector = std::env::var("TROUPEKIT_MODEL").map_err(|_| "set TROUPEKIT_MODEL to vendor/model")?;
-    let key = std::env::var("TROUPEKIT_API_KEY").ok().map(Secret::new).transpose()?;
+    let selector =
+        std::env::var("TROUPEKIT_MODEL").map_err(|_| "set TROUPEKIT_MODEL to vendor/model")?;
+    let key = std::env::var("TROUPEKIT_API_KEY")
+        .ok()
+        .map(Secret::new)
+        .transpose()?;
     let catalog = Catalog::load(CATALOG)?;
     let price = catalog.price(&selector)?;
     let model = Arc::from(catalog.connect(&selector, key)?);
-    let db = std::env::var_os("TROUPEKIT_DB").map_or_else(|| std::env::temp_dir().join("troupekit-crew.db"), PathBuf::from);
+    let db = std::env::var_os("TROUPEKIT_DB").map_or_else(
+        || std::env::temp_dir().join("troupekit-crew.db"),
+        PathBuf::from,
+    );
     let troupe = Troupe::builder().sqlite(&db).build().await?;
     let io = flows::io(&troupe, model, price);
     let id = flows::start(&troupe, io.clone(), "report.toml", flows::REPORT, &topic).await?;
