@@ -139,6 +139,9 @@ enum At {
     Human {
         data: Map<String, Value>,
     },
+    Flow {
+        run: Box<GraphRun>,
+    },
     Joined,
     Left,
 }
@@ -195,6 +198,7 @@ impl Branch {
 
 enum Work {
     Idle,
+    Flow(GraphOutcome),
     Agent(StepOutcome),
     Tool(Result<Value, ToolFailure>),
 }
@@ -362,7 +366,9 @@ impl GraphRun {
     ) -> Result<GraphRun, GraphError> {
         let setup = |id: &str, m: String| GraphError::Setup(format!("node `{id}`: {m}"));
         for n in &workflow.nodes {
-            if flow.is_some_and(|f| matches!(f.kind(&n.id), Some(FlowKind::Map { .. } | FlowKind::Switch { .. }))) {
+            if flow.is_some_and(|f| {
+                matches!(f.kind(&n.id), Some(FlowKind::Map { .. } | FlowKind::Switch { .. } | FlowKind::Flow { .. }))
+            }) {
                 continue;
             }
             match &n.kind {
@@ -458,6 +464,17 @@ impl GraphRun {
                 flow.name()
             )));
         }
+        let mut path = vec![flow.name().to_string()];
+        check_children(&flow, io, &mut path).await?;
+        GraphRun::start_child(flow, input, limits, io).await
+    }
+
+    async fn start_child(
+        flow: Flow,
+        input: Map<String, Value>,
+        limits: Limits,
+        io: &dyn GraphIo,
+    ) -> Result<GraphRun, GraphError> {
         let mut run = GraphRun::setup(flow.workflow().clone(), Some(&flow), input, limits, io).await?;
         if !flow.is_v1() {
             run.format = GRAPH_FORMAT_FLOW;
@@ -653,6 +670,7 @@ impl GraphRun {
     pub fn usage(&self) -> Usage {
         self.branches.iter().fold(self.usage, |acc, b| match &b.at {
             At::Agent { run, .. } => acc + run.usage(),
+            At::Flow { run } => acc + run.usage(),
             _ => acc,
         })
     }
@@ -979,7 +997,26 @@ impl GraphRun {
         for (i, w) in results.into_iter().enumerate() {
             let node = self.node(&self.branches[i].node).clone();
             match w {
-                Work::Idle | Work::Agent(StepOutcome::Continue | StepOutcome::Paused(_)) => {}
+                Work::Idle
+                | Work::Agent(StepOutcome::Continue | StepOutcome::Paused(_))
+                | Work::Flow(GraphOutcome::Continue | GraphOutcome::Waiting(_)) => {}
+                Work::Flow(GraphOutcome::Failed(e) | GraphOutcome::RetryAt { error: e, .. }) => {
+                    return self.fail_after(reduced, format!("node `{}`: subflow: {e}", node.id));
+                }
+                Work::Flow(GraphOutcome::Done(child)) => {
+                    let At::Flow { run } = &self.branches[i].at else {
+                        unreachable!("flow work comes from flow branches");
+                    };
+                    self.usage += run.usage();
+                    let Some(FlowKind::Flow { returns, .. }) = self.flow_kind(&node.id) else {
+                        unreachable!("flow branches sit at flow nodes");
+                    };
+                    let value = child.get(returns).cloned().unwrap_or(Value::Null);
+                    self.branches[i].at = At::Left;
+                    if let Err(e) = self.write(&node, i, value, &mut reduced) {
+                        return GraphOutcome::Failed(e);
+                    }
+                }
                 Work::Agent(StepOutcome::Retry {
                     error,
                     retry_after_ms,
@@ -1077,11 +1114,16 @@ impl GraphRun {
                 Ask::Question => PauseReason::Question { node },
             });
         }
-        let reason = self
-            .branches
-            .iter()
-            .find_map(Branch::budget_paused)
-            .expect("a run that cannot work waits for a human or a budget");
+        let child = self.branches.iter().find_map(|b| match &b.at {
+            At::Flow { run } => match &run.status {
+                GraphStatus::WaitingHuman { reason } | GraphStatus::WaitingBudget { reason } => Some(reason),
+                _ => None,
+            },
+            _ => None,
+        });
+        let reason = child
+            .or_else(|| self.branches.iter().find_map(Branch::budget_paused))
+            .expect("a run that cannot work waits for a human, a budget or a waiting subflow");
         GraphOutcome::Waiting(reason.clone())
     }
 
@@ -1089,6 +1131,7 @@ impl GraphRun {
         match &b.at {
             At::Agent { .. } => b.budget_paused().is_none(),
             At::Enter => matches!(self.node(&b.node).kind, NodeKind::Tool { .. }),
+            At::Flow { run } => matches!(run.status, GraphStatus::Queued | GraphStatus::Checkpointed),
             At::Human { .. } | At::Joined | At::Left => false,
         }
     }
@@ -1237,8 +1280,10 @@ impl GraphRun {
                 continue;
             }
             first.get_or_insert(kept.len());
-            if let At::Agent { run, .. } = &b.at {
-                self.usage += run.usage();
+            match &b.at {
+                At::Agent { run, .. } => self.usage += run.usage(),
+                At::Flow { run } => self.usage += run.usage(),
+                _ => {}
             }
         }
         let at = first.expect("the join has a parked branch");
@@ -1426,6 +1471,10 @@ impl GraphRun {
                         return (Work::Idle, None);
                     }
                     let node = wf.node(&b.node).expect("branches sit at workflow nodes");
+                    if let At::Flow { run } = &mut b.at {
+                        let out = Box::pin(run.step(io)).await;
+                        return (Work::Flow(out), None);
+                    }
                     let (work, finished) = match (&mut b.at, &node.kind) {
                         (At::Agent { run, .. }, NodeKind::Agent { persona, .. }) => {
                             let nio = NodeIo::new(em, &node.id, persona).with_tools(regs.get(&node.id).map(|r| r.as_ref()));
@@ -1592,6 +1641,22 @@ impl GraphRun {
                     self.expand_map(i)?;
                     changed = true;
                     break;
+                }
+                if let Some(FlowKind::Flow { flow: name, .. }) = self.flow_kind(&node.id) {
+                    if !window[i] {
+                        continue;
+                    }
+                    let name = name.clone();
+                    let item = self.branches[i].item.clone();
+                    let mut input = reads(&self.workflow, &self.state, &node.reads, item.as_deref()).map_err(fail)?;
+                    input.retain(|_, v| !v.is_null());
+                    let child = io.flow(&name).await.map_err(|e| fail(e.to_string()))?;
+                    let limits = node_limits(&self.limits, self.usage().cost_usd_micros, None, None);
+                    let mut child = GraphRun::start_child(child, input, limits, io).await.map_err(|e| fail(e.to_string()))?;
+                    child.run_id = RunId::derived(self.run_id, &format!("{}:{}:{i}", node.id, self.steps));
+                    self.branches[i].at = At::Flow { run: Box::new(child) };
+                    changed = true;
+                    continue;
                 }
                 if let Some(FlowKind::Switch { on }) = self.flow_kind(&node.id) {
                     let to = self.switch_to(&node.id, on).map_err(fail)?;
@@ -1822,6 +1887,44 @@ fn run_plain(kind: &FlowKind) -> FlowKind {
     }
 }
 
+const MAX_SUBFLOW_DEPTH: usize = 4;
+
+fn check_children<'a>(
+    flow: &'a Flow,
+    io: &'a dyn GraphIo,
+    path: &'a mut Vec<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), GraphError>> + Send + 'a>> {
+    Box::pin(async move {
+        assert!(path.len() <= MAX_SUBFLOW_DEPTH + 1, "deeper paths are refused before recursing");
+        for n in &flow.workflow().nodes {
+            let Some(FlowKind::Flow { flow: name, returns, .. }) = flow.kind(&n.id) else {
+                continue;
+            };
+            let setup = |m: String| GraphError::Setup(format!("node `{}`: {m}", n.id));
+            if path.contains(name) {
+                return Err(setup(format!("flow `{name}` reaches itself: {} > {name}", path.join(" > "))));
+            }
+            if path.len() > MAX_SUBFLOW_DEPTH {
+                return Err(setup(format!(
+                    "subflows nest deeper than {MAX_SUBFLOW_DEPTH}: {} > {name}",
+                    path.join(" > ")
+                )));
+            }
+            let child = io.flow(name).await.map_err(|e| setup(e.to_string()))?;
+            if let Some(feature) = unsupported(&child) {
+                return Err(setup(format!("flow `{name}`: {feature} is not run by this engine yet")));
+            }
+            if !child.workflow().state.contains_key(returns) {
+                return Err(setup(format!("flow `{name}` has no state key `{returns}` to return")));
+            }
+            path.push(name.clone());
+            check_children(&child, io, path).await?;
+            path.pop();
+        }
+        Ok(())
+    })
+}
+
 fn unsupported(flow: &Flow) -> Option<String> {
     if flow.budget_split() == BudgetSplit::Shared {
         return Some("a shared budget split".into());
@@ -1830,7 +1933,7 @@ fn unsupported(flow: &Flow) -> Option<String> {
         return Some("untracked state".into());
     }
     let node = flow.workflow().nodes.iter().find(|n| match flow.kind(&n.id) {
-        Some(FlowKind::Map { .. } | FlowKind::Switch { .. }) => false,
+        Some(FlowKind::Map { .. } | FlowKind::Switch { .. } | FlowKind::Flow { .. }) => false,
         kind => kind.map(run_plain) != Some(FlowKind::from_v1(&n.kind)),
     })?;
     Some(format!("node `{}` of a 0.5 kind or option", node.id))

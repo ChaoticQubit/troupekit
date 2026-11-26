@@ -1,4 +1,6 @@
 use crate::condition::Conditions;
+use crate::error::GraphError;
+use crate::flow::Flow;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,6 +34,13 @@ pub trait GraphIo: Send + Sync {
     /// without checkpoints.
     fn checkpoints(&self) -> Option<Arc<dyn CheckpointStore>> {
         None
+    }
+
+    /// Loads flow `name` for a subflow node. The default has no flows and
+    /// returns `Setup` "no flow source", so a flow with subflow nodes fails
+    /// at `GraphRun::start` over such an io.
+    async fn flow(&self, name: &str) -> Result<Flow, GraphError> {
+        Err(GraphError::Setup(format!("no flow source for `{name}`")))
     }
 }
 
