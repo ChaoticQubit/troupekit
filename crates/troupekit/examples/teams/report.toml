@@ -1,0 +1,24 @@
+name = "report"
+
+[crew]
+process = "sequential"
+
+[[crew.tasks]]
+id = "research"
+agent = "researcher"
+description = "Collect facts about the topic in the input."
+expected_output = "A short list of facts."
+
+[[crew.tasks]]
+id = "fact_check"
+agent = "checker"
+description = "Check each fact and mark the ones you cannot confirm."
+context = ["research"]
+async = true
+
+[[crew.tasks]]
+id = "write"
+agent = "writer"
+description = "Write a short report from the checked facts."
+expected_output = "Three to five sentences."
+context = ["research", "fact_check"]
