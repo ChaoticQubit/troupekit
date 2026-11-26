@@ -175,6 +175,16 @@ impl AgentRun {
         })
     }
 
+    /// Replaces the id of a run that has not stepped yet, such as a member
+    /// run whose id is derived from the call that started it.
+    /// Returns the run.
+    pub(crate) fn with_run_id(mut self, run_id: RunId) -> AgentRun {
+        assert_eq!(self.steps, 0, "only a fresh run takes a new id");
+        assert_eq!(self.seq, 0, "only a run without events takes a new id");
+        self.run_id = run_id;
+        self
+    }
+
     /// Restores a run from `cp`. Returns `Checkpoint` when the state does
     /// not parse, has unknown fields, has another `RUN_FORMAT`, or does not
     /// match the checkpoint's run id and step.
