@@ -18,6 +18,7 @@ use troupekit_providers::{Catalog, Model, Price, Transport};
 use troupekit_tools::{Tool, ToolRegistry, Toolkit};
 
 mod from_toml;
+mod start;
 
 pub use from_toml::MAX_PERSONA_BYTES;
 

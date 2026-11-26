@@ -13,6 +13,10 @@ use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::message::{Message, Role};
 use troupekit_core::store::CheckpointStore;
 
+mod start;
+
+pub use start::{Progress, MAX_STEPS_PER_WINDOW};
+
 const BASE_RETRY_MS: u64 = 500;
 const MAX_RETRY_MS: u64 = 30_000;
 
