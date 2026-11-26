@@ -852,18 +852,44 @@ impl GraphRun {
                 && n.writes.as_ref().is_some_and(|w| self.state.get(w).is_some_and(|v| !v.is_null()))
         });
         for a in answered {
-            let after = self.reachable(&a.id, true);
+            let after = self.with_bodies(self.reachable(&a.id, true));
             let before = self.reachable(&a.id, false);
-            let writers: Vec<&Node> = self.workflow.nodes.iter().filter(|n| n.writes.as_deref() == Some(key)).collect();
+            let writers: Vec<&Node> = self
+                .workflow
+                .nodes
+                .iter()
+                .filter(|n| n.writes.as_deref() == Some(key) || node_sets(self.flow.as_deref(), &n.id).values().any(|k| k == key))
+                .collect();
             let written_before = writers.is_empty() || writers.iter().any(|n| before.contains(&n.id));
             if !written_before {
                 continue;
             }
-            if let Some(r) = self.workflow.nodes.iter().find(|n| after.contains(&n.id) && n.reads.iter().any(|k| k == key)) {
+            if let Some(r) = self.workflow.nodes.iter().find(|n| after.contains(&n.id) && self.reads_key(n, key)) {
                 return Some((r.id.clone(), a.id.clone()));
             }
         }
         None
+    }
+
+    fn with_bodies(&self, mut nodes: BTreeSet<String>) -> BTreeSet<String> {
+        let mut todo: Vec<String> = nodes.iter().cloned().collect();
+        while let Some(id) = todo.pop() {
+            if let Some(FlowKind::Map { body, .. }) = self.flow_kind(&id) {
+                if nodes.insert(body.clone()) {
+                    todo.push(body.clone());
+                }
+            }
+        }
+        nodes
+    }
+
+    fn reads_key(&self, n: &Node, key: &str) -> bool {
+        n.reads.iter().any(|k| k == key)
+            || match self.flow_kind(&n.id) {
+                Some(FlowKind::Map { over, .. }) => over == key,
+                Some(FlowKind::Switch { on, .. }) => on == key,
+                _ => false,
+            }
     }
 
     fn reachable(&self, from: &str, forward: bool) -> BTreeSet<String> {

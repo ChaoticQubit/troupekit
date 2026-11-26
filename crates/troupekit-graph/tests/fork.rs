@@ -419,3 +419,76 @@ async fn edit_state_cannot_change_a_source_of_what_was_approved() {
     };
     assert_eq!(state["y"], json!("before approval!"));
 }
+
+async fn answered(text: &str, input: Value, io: &SimpleGraphIo) -> GraphRun {
+    let flow = Flow::parse("test/answered.toml", text).unwrap();
+    let Value::Object(input) = input else {
+        panic!("input is an object");
+    };
+    GraphRun::start(flow, input, Limits::default(), io)
+        .await
+        .unwrap()
+}
+
+fn refused_for(err: GraphError, key: &str, reader: &str) {
+    assert!(
+        matches!(&err, GraphError::Resume(m) if m.contains(&format!("`{key}`")) && m.contains(&format!("node `{reader}`")) && m.contains("approval node `h`")),
+        "{err}"
+    );
+}
+
+const MAP_AFTER: &str = "name = 'mapped'\nstart = 'h'\n[state]\nok = 'bool?'\nacct = 'string?'\nxs = 'list?'\nx = 'string?'\ny = 'string?'\nout = 'list?'\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'approval'\nwrites = 'ok'\n[[nodes]]\nid = 'm'\nkind = 'map'\nover = 'xs'\nitem = 'x'\nbody = 'pay'\nwrites = 'out'\n[[nodes]]\nid = 'pay'\nkind = 'tool'\ntool = 't2'\nreads = ['x', 'acct']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'h'\nto = 'm'\n[[edges]]\nfrom = 'm'\nto = 'e'\n";
+
+#[tokio::test]
+async fn edit_state_cannot_change_a_key_a_map_body_reads_after_approval() {
+    let gates = GatedTool::new();
+    let io = io(&gates);
+    let mut run = answered(
+        MAP_AFTER,
+        json!({"ok": true, "acct": "approved", "xs": ["a"]}),
+        &io,
+    )
+    .await;
+    let err = run.update_state("acct", json!("edited"), None).unwrap_err();
+    refused_for(err, "acct", "pay");
+}
+
+const SETS_BEFORE: &str = "name = 'set'\nstart = 'w'\n[state]\nok = 'bool?'\nx = 'string?'\ny = 'string?'\n[[nodes]]\nid = 'w'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Pick.'\nfields = { x = 'string' }\nsets = { x = 'x' }\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'approval'\nwrites = 'ok'\n[[nodes]]\nid = 'fix'\nkind = 'tool'\ntool = 't1'\nwrites = 'x'\n[[nodes]]\nid = 'pay'\nkind = 'tool'\ntool = 't2'\nreads = ['x']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'w'\nto = 'h'\n[[edges]]\nfrom = 'h'\nto = 'fix'\n[[edges]]\nfrom = 'fix'\nto = 'pay'\n[[edges]]\nfrom = 'pay'\nto = 'e'\n";
+
+#[tokio::test]
+async fn edit_state_cannot_change_a_key_set_before_approval() {
+    let gates = GatedTool::new();
+    gates.open("t1");
+    gates.open("t2");
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(gates.tool("t1", |_| ToolOutput::text("one")))
+        .unwrap();
+    tools
+        .register(gates.tool("t2", |_| ToolOutput::text("two")))
+        .unwrap();
+    let model = Arc::new(troupekit_graph::testing::FnModel::new("fake/m", |_| {
+        troupekit_graph::testing::text_reply(r#"{"x": "set"}"#, 10)
+    }));
+    let price = troupekit_providers::Price {
+        input_usd_micros_per_mtok: 1_000_000,
+        output_usd_micros_per_mtok: 2_000_000,
+        verified: true,
+        long_context: None,
+        search_usd_micros: 0,
+    };
+    let personas = PersonaLoader::new(vec![Arc::new(troupekit_agent::MemorySource::new(
+        "test",
+        [(
+            "writer.toml".to_string(),
+            "name = 'writer'\ndisplay_name = 'W'\nrole = 'Writes.'\ngoal = 'Done.'\ninstructions = 'Do it.'\nmodel = 'fake/m'\n".to_string(),
+        )],
+    ))]);
+    let io = SimpleGraphIo::new(
+        Arc::new(SimpleIo::new(tools).with_model("fake/m", model, price)),
+        personas,
+    );
+    let mut run = answered(SETS_BEFORE, json!({"ok": true, "x": "approved"}), &io).await;
+    let err = run.update_state("x", json!("edited"), None).unwrap_err();
+    refused_for(err, "x", "pay");
+}
