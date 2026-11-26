@@ -143,3 +143,109 @@ async fn keyword_store_is_object_safe() {
     assert_eq!(hits[0].meta, f.0);
     assert!(s.search_text("refund", 0, &f).await.unwrap().is_empty());
 }
+
+async fn save_steps(s: &InMemCheckpoints, run: RunId, steps: u64) {
+    for step in 0..steps {
+        s.save(Checkpoint { run_id: run, step, state: json!({"step": step}) }).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn default_inmem_keeps_latest_only() {
+    let s = InMemCheckpoints::default();
+    let run = RunId::new();
+    save_steps(&s, run, 3).await;
+    let history = s.history(run).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].step, 2);
+    let write = BranchWrite::new(0, "a", json!({"at": "leave"}));
+    assert!(!s.save_branch(run, 3, write).await.unwrap());
+    assert!(s.branch_writes(run, 3).await.unwrap().is_empty());
+    let child = RunId::new();
+    assert!(!s.link_fork(ForkLink::new(child, run, 1)).await.unwrap());
+    assert!(s.forks(run).await.unwrap().is_empty());
+    assert_eq!(s.prune(run, 1).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn with_history_lists_every_step() {
+    let s = InMemCheckpoints::with_history();
+    let run = RunId::new();
+    save_steps(&s, run, 3).await;
+    let history = s.history(run).await.unwrap();
+    let steps: Vec<u64> = history.iter().map(|cp| cp.step).collect();
+    assert_eq!(steps, vec![0, 1, 2]);
+    assert_eq!(history[1].state, json!({"step": 1}));
+    assert_eq!(s.latest(run).await.unwrap().unwrap().step, 2);
+    let err = s.save(Checkpoint { run_id: run, step: 5, state: json!(0) }).await.unwrap_err();
+    assert_eq!(err, CoreError::Conflict { expected: 3, actual: 5 });
+    assert!(s.history(RunId::new()).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn branch_writes_are_dropped_by_the_next_save() {
+    let s = InMemCheckpoints::with_history();
+    let run = RunId::new();
+    save_steps(&s, run, 1).await;
+    assert!(s.save_branch(run, 1, BranchWrite::new(1, "b", json!("b1"))).await.unwrap());
+    assert!(s.save_branch(run, 1, BranchWrite::new(0, "a", json!("a1"))).await.unwrap());
+    assert!(s.save_branch(run, 2, BranchWrite::new(0, "a", json!("a2"))).await.unwrap());
+    let writes = s.branch_writes(run, 1).await.unwrap();
+    let order: Vec<(u32, &str)> = writes.iter().map(|w| (w.branch(), w.node())).collect();
+    assert_eq!(order, vec![(0, "a"), (1, "b")]);
+    s.save(Checkpoint { run_id: run, step: 1, state: json!(1) }).await.unwrap();
+    assert!(s.branch_writes(run, 1).await.unwrap().is_empty());
+    assert_eq!(s.branch_writes(run, 2).await.unwrap(), vec![BranchWrite::new(0, "a", json!("a2"))]);
+    let err = s.save_branch(run, 1, BranchWrite::new(0, "a", json!("a1"))).await.unwrap_err();
+    assert_eq!(err, CoreError::Conflict { expected: 2, actual: 1 });
+    assert!(s.branch_writes(RunId::new(), 0).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn second_branch_write_is_a_retry_only_with_the_same_write() {
+    let s = InMemCheckpoints::with_history();
+    let run = RunId::new();
+    save_steps(&s, run, 1).await;
+    let write = BranchWrite::new(0, "a", json!({"out": 1}));
+    assert!(s.save_branch(run, 1, write.clone()).await.unwrap());
+    assert!(s.save_branch(run, 1, write.clone()).await.unwrap());
+    let other = BranchWrite::new(0, "a", json!({"out": 2}));
+    let err = s.save_branch(run, 1, other).await.unwrap_err();
+    assert!(matches!(err, CoreError::Conflict { .. }), "{err:?}");
+    assert_eq!(s.branch_writes(run, 1).await.unwrap(), vec![write]);
+}
+
+#[tokio::test]
+async fn fork_links_list_children() {
+    let s = InMemCheckpoints::with_history();
+    let (parent, other) = (RunId::new(), RunId::new());
+    let (first, second, third) = (RunId::new(), RunId::new(), RunId::new());
+    assert!(s.link_fork(ForkLink::new(first, parent, 4)).await.unwrap());
+    assert!(s.link_fork(ForkLink::new(third, other, 0)).await.unwrap());
+    assert!(s.link_fork(ForkLink::new(second, parent, 1)).await.unwrap());
+    assert!(s.link_fork(ForkLink::new(first, parent, 4)).await.unwrap());
+    let links = s.forks(parent).await.unwrap();
+    assert_eq!(links, vec![ForkLink::new(first, parent, 4), ForkLink::new(second, parent, 1)]);
+    assert_eq!(s.forks(other).await.unwrap(), vec![ForkLink::new(third, other, 0)]);
+    assert!(s.forks(first).await.unwrap().is_empty());
+    let err = s.link_fork(ForkLink::new(first, other, 4)).await.unwrap_err();
+    assert!(matches!(err, CoreError::Conflict { .. }), "{err:?}");
+    let err = s.link_fork(ForkLink::new(parent, parent, 0)).await.unwrap_err();
+    assert!(matches!(err, CoreError::Store(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn prune_keeps_latest_with_history() {
+    let s = InMemCheckpoints::with_history();
+    let run = RunId::new();
+    save_steps(&s, run, 5).await;
+    assert_eq!(s.prune(run, 2).await.unwrap(), 3);
+    let steps: Vec<u64> = s.history(run).await.unwrap().iter().map(|cp| cp.step).collect();
+    assert_eq!(steps, vec![3, 4]);
+    assert_eq!(s.prune(run, 10).await.unwrap(), 0);
+    s.save(Checkpoint { run_id: run, step: 5, state: json!(5) }).await.unwrap();
+    assert_eq!(s.latest(run).await.unwrap().unwrap().step, 5);
+    assert_eq!(s.prune(RunId::new(), 1).await.unwrap(), 0);
+    let err = s.prune(run, 0).await.unwrap_err();
+    assert!(matches!(err, CoreError::Store(_)), "{err:?}");
+}
