@@ -54,7 +54,8 @@ pub trait CheckpointStore: Send + Sync {
     }
 
     /// Returns the kept branch writes of step `step` of `run_id`, lowest
-    /// branch index first. The default keeps none and returns an empty list.
+    /// branch index first. The default keeps none and returns an empty
+    /// list, so a resumed run runs every branch of the step again.
     async fn branch_writes(&self, run_id: RunId, step: u64) -> Result<Vec<BranchWrite>, CoreError> {
         let _ = (run_id, step);
         Ok(Vec::new())
@@ -69,6 +70,7 @@ pub trait CheckpointStore: Send + Sync {
     }
 
     /// Returns the kept fork links whose parent is `parent`.
+    /// Children of children are not listed; walk them one level at a time.
     /// The default keeps none and returns an empty list.
     async fn forks(&self, parent: RunId) -> Result<Vec<ForkLink>, CoreError> {
         let _ = parent;
@@ -101,16 +103,22 @@ impl BranchWrite {
     }
 
     /// Returns the branch index within its step.
+    /// Indices follow the run's branch order at the start of the step.
+    /// A resumed run applies the write to the branch at this index.
     pub fn branch(&self) -> u32 {
         self.branch
     }
 
     /// Returns the id of the node the branch worked on.
+    /// A resumed run refuses the write when the branch at its index sits
+    /// at another node.
     pub fn node(&self) -> &str {
         &self.node
     }
 
     /// Returns the branch's serialized post-work state.
+    /// Its shape belongs to the engine that wrote it.
+    /// The store keeps it as opaque JSON.
     pub fn write(&self) -> &Value {
         &self.write
     }
@@ -139,16 +147,22 @@ impl ForkLink {
     }
 
     /// Returns the forked run.
+    /// It starts at step 0 with a copy of the parent checkpoint.
+    /// Its id differs from the parent's.
     pub fn child(&self) -> RunId {
         self.child
     }
 
     /// Returns the run the fork was taken from.
+    /// That run's checkpoints are never written by the fork.
+    /// Lineage walks from child to parent.
     pub fn parent(&self) -> RunId {
         self.parent
     }
 
     /// Returns the parent step the fork copied.
+    /// It names one checkpoint of the parent run.
+    /// The fork's own steps restart at 0.
     pub fn parent_step(&self) -> u64 {
         self.parent_step
     }
