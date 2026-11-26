@@ -447,10 +447,41 @@ async fn manages_runs_hierarchical_crew() {
 }
 
 #[tokio::test]
+async fn members_tasks_loops_until_done() {
+    let passes = Arc::new(AtomicUsize::new(0));
+    let count = passes.clone();
+    let leader = Arc::new(FnModel::new("fake/m", move |_req| {
+        if count.fetch_add(1, Ordering::SeqCst) == 0 {
+            text_reply(r#"{"done":false,"tasks":["check the bill"],"answer":""}"#, 10)
+        } else {
+            text_reply(r#"{"done":true,"tasks":[],"answer":"All settled."}"#, 10)
+        }
+    }));
+    let member = Arc::new(AtomicUsize::new(0));
+    let built = team_agent("lead", leader)
+        .members([team_agent("billing", counted_echo(member.clone()))], TeamMode::Tasks)
+        .build()
+        .await
+        .unwrap();
+    let out = built.run_with("Sort out my account").await.unwrap();
+    assert_eq!(out.text(), "All settled.");
+    assert_eq!(passes.load(Ordering::SeqCst), 2);
+    assert_eq!(member.load(Ordering::SeqCst), 0);
+    let stuck = Arc::new(FnModel::new("fake/m", |_req| {
+        text_reply(r#"{"done":false,"tasks":["more"],"answer":""}"#, 10)
+    }));
+    let looping = team_agent("lead", stuck)
+        .members([team_agent("billing", counted_echo(member))], TeamMode::Tasks)
+        .build()
+        .await
+        .unwrap();
+    let err = looping.run_with("Never done").await.unwrap_err();
+    assert!(matches!(err, KitError::Failed { .. }), "{err}");
+}
+
+#[tokio::test]
 async fn team_build_refusals() {
     let echo0 = || counted_echo(Arc::new(AtomicUsize::new(0)));
-    let tasks = team_agent("lead", echo0()).members([team_agent("a", echo0())], TeamMode::Tasks);
-    assert!(team_config(tasks.build().await.unwrap_err()).contains("tasks is not built yet"));
     let none = team_agent("lead", echo0()).members(Vec::<Agent>::new(), TeamMode::Route);
     assert!(team_config(none.build().await.unwrap_err()).contains("1 to 32 members"));
     let limited = team_agent("a", echo0()).limits(Limits {

@@ -12,6 +12,10 @@ const BRIEF_PROMPT: &str = "Write a short brief of the request for your team.";
 const SYNTHESIZE_PROMPT: &str = "Combine your team's answers into one final answer.";
 const COORDINATE_PROMPT: &str =
     "Hand parts of the request to your coworkers as needed, then give the final answer.";
+const TASKS_PROMPT: &str = "Work through the request with your coworkers. List the tasks \
+    still open in `tasks`. Set `done` to true and give the final answer in `answer` once \
+    nothing is left.";
+const STEPS_PER_ITERATION: i64 = 16;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,6 +68,7 @@ struct Team {
     leader: String,
     members: Vec<String>,
     approve: Vec<String>,
+    max_iterations: i64,
     state: Vec<(String, Value)>,
 }
 
@@ -78,11 +83,7 @@ pub fn compile(file: &str, text: &str) -> Result<Table, WorkflowError> {
         Mode::Route => route(file, &team),
         Mode::Coordinate => coordinate(file, &team),
         Mode::Collaborate | Mode::Broadcast => fan_out(file, &team),
-        Mode::Tasks => Err(WorkflowError::new(
-            file,
-            "team.mode",
-            "tasks is not built yet",
-        )),
+        Mode::Tasks => tasks(file, &team),
     }
 }
 
@@ -120,7 +121,7 @@ fn check(file: &str, raw: TeamFile) -> Result<Team, WorkflowError> {
         ));
     }
     check_approve(file, mode, &t.approve, &t.members)?;
-    check_iterations(file, mode, t.max_iterations)?;
+    let max_iterations = check_iterations(file, mode, t.max_iterations)?;
     let state = check_state(file, t.state)?;
     assert!(!t.members.is_empty(), "a team has members");
     assert!(
@@ -133,6 +134,7 @@ fn check(file: &str, raw: TeamFile) -> Result<Team, WorkflowError> {
         leader: t.leader,
         members: t.members,
         approve: t.approve,
+        max_iterations,
         state,
     })
 }
@@ -168,10 +170,12 @@ fn check_approve(
     Ok(())
 }
 
-fn check_iterations(file: &str, mode: Mode, n: Option<i64>) -> Result<(), WorkflowError> {
+/// Checks `max_iterations`: only for mode `tasks`, 1 to 100. Returns the
+/// value, or the default 5 when it is not set.
+fn check_iterations(file: &str, mode: Mode, n: Option<i64>) -> Result<i64, WorkflowError> {
     let field = "team.max_iterations";
     let n = match n {
-        None => return Ok(()),
+        None => return Ok(DEFAULT_MAX_ITERATIONS),
         Some(_) if mode != Mode::Tasks => {
             return Err(WorkflowError::new(file, field, "is only for mode `tasks`"))
         }
@@ -186,7 +190,7 @@ fn check_iterations(file: &str, mode: Mode, n: Option<i64>) -> Result<(), Workfl
         ));
     }
     assert!(MAX_ITERATIONS_RANGE.contains(&DEFAULT_MAX_ITERATIONS));
-    Ok(())
+    Ok(n)
 }
 
 fn check_state(file: &str, state: Table) -> Result<Vec<(String, Value)>, WorkflowError> {
@@ -312,6 +316,44 @@ fn coordinate(file: &str, team: &Team) -> Result<Table, WorkflowError> {
         !team.members.is_empty(),
         "a coordinating leader has delegates"
     );
+    Ok(t.finish())
+}
+
+/// Compiles `tasks`: the leader delegates to the members and replies with
+/// `done`, the open `tasks` and its `answer`, set to the state keys `done`,
+/// `tasks` and `output`. A switch on `done` ends the run or loops back to
+/// the leader, which reads the open tasks; `max_iterations` sets max_steps.
+fn tasks(file: &str, team: &Team) -> Result<Table, WorkflowError> {
+    let lead = node_id(&team.leader);
+    let (mut t, mut reads) = start(file, team, &lead)?;
+    assert!(MAX_ITERATIONS_RANGE.contains(&team.max_iterations));
+    t.max_steps((team.max_iterations + 1) * STEPS_PER_ITERATION);
+    t.state("team.mode", "done", Value::String("bool".into()))?;
+    t.state("team.mode", "tasks", Value::String("list?".into()))?;
+    reads.insert(1, "tasks".to_string());
+    let mut leader = agent(&lead, &team.leader, Some(TASKS_PROMPT), &reads, None);
+    leader.insert("delegates".into(), strings(&team.members));
+    let mut fields = Table::new();
+    fields.insert("done".into(), Value::String("bool".into()));
+    fields.insert("tasks".into(), Value::String("list<string>".into()));
+    fields.insert("answer".into(), Value::String("string".into()));
+    leader.insert("fields".into(), Value::Table(fields));
+    let mut sets = Table::new();
+    sets.insert("done".into(), Value::String("done".into()));
+    sets.insert("tasks".into(), Value::String("tasks".into()));
+    sets.insert("answer".into(), Value::String("output".into()));
+    leader.insert("sets".into(), Value::Table(sets));
+    t.node("team.leader", leader)?;
+    let mut switch = Table::new();
+    switch.insert("id".into(), Value::String("check_done".into()));
+    switch.insert("kind".into(), Value::String("switch".into()));
+    switch.insert("on".into(), Value::String("done".into()));
+    t.node("team.mode", switch)?;
+    t.edge(&lead, "check_done");
+    t.routed("check_done", END, "true");
+    t.routed("check_done", &lead, "false");
+    t.end("team")?;
+    assert_eq!(reads[1], "tasks", "the leader reads the open tasks");
     Ok(t.finish())
 }
 

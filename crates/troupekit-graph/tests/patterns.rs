@@ -758,6 +758,31 @@ fn loaded(text: &str) -> Flow {
 }
 
 #[test]
+fn tasks_compiles_to_bounded_leader_loop() {
+    let text = COORDINATE.replace("'coordinate'", "'tasks'");
+    let table = compile(FILE, &text).unwrap();
+    assert_eq!(table, golden("team_tasks.toml"));
+    assert_eq!(table["max_steps"].as_integer(), Some(96));
+    let lead = node(&table, "lead");
+    assert!(lead.get("writes").is_none(), "the leader writes through `sets`");
+    assert_eq!(strs(&lead["reads"]), ["input", "tasks"]);
+    let three = compile(FILE, &format!("{text}max_iterations = 3\n")).unwrap();
+    assert_eq!(three["max_steps"].as_integer(), Some(64));
+    refused(
+        &format!("{text}max_iterations = 0\n"),
+        "team.max_iterations",
+        "between 1 and 100",
+    );
+    refused(
+        &format!("{text}max_iterations = 101\n"),
+        "team.max_iterations",
+        "between 1 and 100",
+    );
+    let flow = loaded(&text);
+    assert!(matches!(flow.kind("check_done"), Some(FlowKind::Switch { .. })));
+}
+
+#[test]
 fn every_team_mode_parses_as_a_flow() {
     let route = loaded(ROUTE);
     assert_eq!(route.start(), "triage_lead");
@@ -789,6 +814,7 @@ fn every_team_mode_parses_as_a_flow() {
         "team_coordinate",
         "team_collaborate",
         "team_broadcast",
+        "team_tasks",
     ] {
         let path = format!(
             "{}/tests/fixtures/patterns/{table}.toml",

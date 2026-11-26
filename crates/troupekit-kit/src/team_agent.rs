@@ -37,7 +37,7 @@ pub(crate) struct Members {
 /// How a leader works with its `members`: `Route` picks one member,
 /// `Coordinate` delegates to them, `Collaborate` briefs all and combines
 /// their answers, `Broadcast` briefs all and keeps every answer. `Tasks`
-/// is refused at build until the engine runs it.
+/// delegates in passes until the leader says it is done, at most 5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TeamMode {
     Route,
@@ -294,8 +294,8 @@ impl Agent {
 
     /// Takes the team or the handoffs off this agent and returns the
     /// pattern TOML, the other agents and the state key of the answer:
-    /// `answers` for broadcast, else `output`. Fails for both at once and
-    /// for team mode `tasks`.
+    /// `answers` for broadcast, else `output`. Fails for members and
+    /// handoffs at once.
     fn pattern(&mut self) -> Result<(String, Vec<Agent>, &'static str), KitError> {
         let name = self.name().to_string();
         let team = self.members.team.take();
@@ -304,9 +304,6 @@ impl Agent {
             (Some(_), false) => {
                 let m = "an agent takes members or handoffs, not both";
                 Err(KitError::config(&name, m))
-            }
-            (Some((TeamMode::Tasks, _)), true) => {
-                Err(KitError::config(&name, "team mode tasks is not built yet"))
             }
             (Some((mode, members)), true) => {
                 let text = team_text(&name, mode, &members)?;
