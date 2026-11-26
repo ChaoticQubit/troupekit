@@ -9,4 +9,6 @@ mod kill_resume;
 #[cfg(all(unix, feature = "llama", feature = "sqlite"))]
 mod kill_model_call;
 #[cfg(feature = "knowledge")]
+mod offline;
+#[cfg(feature = "knowledge")]
 mod support;
