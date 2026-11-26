@@ -13,6 +13,10 @@ use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::message::{Message, Role};
 use troupekit_core::store::CheckpointStore;
 
+mod start;
+
+pub use start::{Progress, MAX_STEPS_PER_WINDOW};
+
 const BASE_RETRY_MS: u64 = 500;
 const MAX_RETRY_MS: u64 = 30_000;
 
@@ -232,6 +236,22 @@ impl BuiltAgent {
         &self.inner.laws
     }
 
+    /// Refuses a restored run whose saved retry count is past this agent's
+    /// cap, before any step: an earlier call already ended it with
+    /// `Retries`. A count equal to the cap may still take its last retry.
+    fn refuse_exhausted(&self, run: &AgentRun) -> Result<(), KitError> {
+        let retries = run.retries();
+        if retries <= self.inner.retries {
+            return Ok(());
+        }
+        assert!(retries > 0);
+        Err(KitError::Retries {
+            run_id: run.run_id(),
+            attempts: retries - 1,
+            last_error: "retries were used up by an earlier call".into(),
+        })
+    }
+
     async fn finish(
         &self,
         run: &mut AgentRun,
@@ -254,7 +274,7 @@ impl BuiltAgent {
             }
             _ => {}
         }
-        let mut attempts = 0u32;
+        self.refuse_exhausted(run)?;
         loop {
             match drive(run, io, store).await? {
                 StepOutcome::Done(output) => return Ok(outcome(run, output)),
@@ -262,6 +282,8 @@ impl BuiltAgent {
                     error,
                     retry_after_ms,
                 } => {
+                    assert!(run.retries() > 0);
+                    let attempts = run.retries() - 1;
                     if attempts >= self.inner.retries {
                         return Err(KitError::Retries {
                             run_id: run.run_id(),
@@ -270,7 +292,6 @@ impl BuiltAgent {
                         });
                     }
                     tokio::time::sleep(retry_delay(attempts, retry_after_ms)).await;
-                    attempts += 1;
                 }
                 StepOutcome::Paused(reason) => {
                     return Err(KitError::Paused {
@@ -288,7 +309,7 @@ impl BuiltAgent {
                     unreachable!("drive returns only a final, paused or retry outcome")
                 }
             }
-            assert!(attempts <= self.inner.retries);
+            assert!(run.retries() <= self.inner.retries);
         }
     }
 }

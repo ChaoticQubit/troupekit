@@ -15,8 +15,8 @@ mod tool;
 #[doc(hidden)]
 pub mod __private;
 
-pub use agent::Agent;
-pub use built::{BuiltAgent, Input, RunOutcome};
+pub use agent::{Agent, MAX_PERSONA_BYTES};
+pub use built::{BuiltAgent, Input, Progress, RunOutcome, MAX_STEPS_PER_WINDOW};
 pub use error::KitError;
 pub use graph::{BuiltGraph, Graph, GraphReport};
 #[cfg(feature = "knowledge")]

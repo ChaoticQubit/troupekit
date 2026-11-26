@@ -23,6 +23,8 @@ use troupekit_core::store::CheckpointStore;
 use troupekit_graph::{GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSpec};
 
+mod run_api;
+
 const MAX_NODES: usize = 64;
 const MAX_GRAPH_RETRIES: u32 = 50;
 const DEFAULT_GRAPH_RETRIES: u32 = 3;
@@ -53,6 +55,7 @@ pub struct Graph {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    events: Option<Arc<dyn troupekit_agent::EventSink>>,
 }
 
 impl Graph {
@@ -72,6 +75,7 @@ impl Graph {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            events: None,
         }
     }
 
@@ -179,7 +183,8 @@ impl Graph {
         }
         let order = self.chain().map_err(fail)?;
         let laws = Laws::check(&owner, &self.law_paths, &self.inline_laws, self.auto_laws)?;
-        let workflow = self.workflow(&order)?;
+        let names = self.persona_names(&order)?;
+        let workflow = self.workflow(&order, &names)?;
         let mut registry = ToolRegistry::new();
         let mut agent_io = SimpleIo::new(ToolRegistry::new());
         let mut files: HashMap<String, String> = HashMap::new();
@@ -192,21 +197,25 @@ impl Graph {
                     if let Some(what) = agent.graph_conflict() {
                         return Err(fail(format!("agent node `{id}` sets its own {what}")));
                     }
-                    let key = match keys.get(agent.name()) {
+                    let name = &names[id];
+                    let key = match keys.get(name) {
                         Some((key, first)) if first.same_model(agent) => key.clone(),
                         Some(_) => {
-                            return Err(fail(format!(
-                                "two different agents are named `{}`",
-                                agent.name()
-                            )));
+                            return Err(fail(format!("two different agents are named `{name}`")));
                         }
                         None => {
                             let key = format!("agent-{}", keys.len());
-                            keys.insert(agent.name().to_string(), (key.clone(), agent));
+                            keys.insert(name.clone(), (key.clone(), agent));
                             key
                         }
                     };
                     let prepared = agent.prepare(Some(&key))?;
+                    if prepared.persona.name != *name {
+                        return Err(fail(format!(
+                            "agent node `{id}` persona name changed from `{name}` to `{}` during build",
+                            prepared.persona.name
+                        )));
+                    }
                     for tool in &prepared.tools {
                         share(&mut registry, tool.clone()).map_err(fail)?;
                     }
@@ -257,7 +266,7 @@ impl Graph {
             }
         }
         agent_io.tools = registry;
-        agent_io.events = Arc::new(Discard);
+        agent_io.events = self.events.clone().unwrap_or_else(|| Arc::new(Discard));
         agent_io.ledger = self
             .ledger
             .clone()
@@ -370,7 +379,22 @@ impl Graph {
         Ok(order)
     }
 
-    fn workflow(&self, order: &[String]) -> Result<Workflow, KitError> {
+    fn persona_names(&self, order: &[String]) -> Result<HashMap<String, String>, KitError> {
+        let mut names = HashMap::with_capacity(order.len());
+        for id in order {
+            if let Node::Agent(agent) = self.node(id) {
+                names.insert(id.clone(), agent.persona_name()?);
+            }
+        }
+        assert!(names.len() <= order.len());
+        Ok(names)
+    }
+
+    fn workflow(
+        &self,
+        order: &[String],
+        names: &HashMap<String, String>,
+    ) -> Result<Workflow, KitError> {
         let mut state = toml::Table::new();
         state.insert(INPUT.into(), Toml::String("string".into()));
         let mut nodes = Vec::with_capacity(order.len() + 1);
@@ -379,9 +403,10 @@ impl Graph {
             let mut node = toml::Table::new();
             node.insert("id".into(), Toml::String(id.clone()));
             match self.node(id) {
-                Node::Agent(agent) => {
+                Node::Agent(_) => {
                     node.insert("kind".into(), Toml::String("agent".into()));
-                    node.insert("persona".into(), Toml::String(agent.name().to_string()));
+                    let name = names.get(id).expect("every agent node has a persona name");
+                    node.insert("persona".into(), Toml::String(name.clone()));
                 }
                 Node::Step(_) => {
                     node.insert("kind".into(), Toml::String("tool".into()));
