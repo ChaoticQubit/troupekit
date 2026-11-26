@@ -4,6 +4,7 @@
 
 mod error;
 mod model;
+pub mod sha256;
 
 pub use error::LocalError;
 pub use model::{
