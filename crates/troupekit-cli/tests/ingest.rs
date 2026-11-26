@@ -71,15 +71,31 @@ fn ingest_twice_skips_unchanged_files() {
 }
 
 #[test]
-fn failed_file_is_listed_and_exits_1() {
+fn failed_files_are_listed_and_exit_1() {
     let tmp = tempfile::tempdir().unwrap();
     let (dir, n) = corpus_copy(tmp.path());
-    std::fs::write(dir.join("broken.md"), [0xff, 0xfe, 0x00, 0x41]).unwrap();
-    let out = ingest(&dir, &tmp.path().join("kb.db"));
+    let catalog = tmp.path().join("catalog.toml");
+    std::fs::write(&catalog, UNREACHABLE).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_troupekit"))
+        .args(["ingest", dir.to_str().unwrap(), "--db", tmp.path().join("kb.db").to_str().unwrap(), "--embedder", "v/e", "--catalog", catalog.to_str().unwrap(), "--key-env", SET_KEY_VAR])
+        .env(SET_KEY_VAR, "sk-unused")
+        .output()
+        .expect("run binary");
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(1), "{stdout} {stderr}");
-    assert!(stdout.contains(&format!("{n} added, 0 replaced, 0 unchanged, 1 failed")), "{stdout}");
-    assert!(stderr.lines().any(|l| l.starts_with("failed: ") && l.contains("broken.md")), "{stderr}");
+    assert!(stdout.contains(&format!("0 added, 0 replaced, 0 unchanged, {n} failed")), "{stdout} {stderr}");
+    assert_eq!(stderr.lines().filter(|l| l.starts_with("failed: ") && l.contains(".md")).count(), n, "{stderr}");
+}
+
+#[test]
+fn non_utf8_file_exits_1_and_names_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, _) = corpus_copy(tmp.path());
+    std::fs::write(dir.join("broken.md"), [0xff, 0xfe, 0x00, 0x41]).unwrap();
+    let out = ingest(&dir, &tmp.path().join("kb.db"));
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("broken.md") && stderr.contains("UTF-8"), "{stderr}");
 }
 
 #[test]
