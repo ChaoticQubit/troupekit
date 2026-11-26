@@ -5,7 +5,7 @@ max_steps = 144
 [state]
 input = "string"
 output = "string"
-handoffs = "list?"
+handoffs = "list<{next, reason, answer}>?"
 
 [reducers]
 handoffs = "append"

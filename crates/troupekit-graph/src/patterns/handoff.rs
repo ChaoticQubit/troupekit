@@ -9,6 +9,7 @@ const DEFAULT_MAX_HANDOFFS: i64 = 8;
 const MAX_HANDOFFS_RANGE: std::ops::RangeInclusive<i64> = 1..=100;
 const STEPS_PER_HANDOFF: i64 = 16;
 const HANDOFFS_KEY: &str = "handoffs";
+const RECEIPTS_TYPE: &str = "list<{next, reason, answer}>?";
 const HANDOFF_PROMPT: &str =
     "Answer the request yourself, or hand it to a teammate who fits it better.";
 
@@ -59,7 +60,7 @@ pub fn compile(file: &str, text: &str) -> Result<Table, WorkflowError> {
         t.state(
             "handoff.receipts",
             HANDOFFS_KEY,
-            Value::String("list?".into()),
+            Value::String(RECEIPTS_TYPE.into()),
         )?;
         t.reducer(HANDOFFS_KEY, "append");
     }

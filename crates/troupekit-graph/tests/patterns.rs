@@ -971,7 +971,10 @@ fn handoff_to_unlisted_agent_is_refused() {
 #[test]
 fn handoff_receipts_append_from_to_reason() {
     let table = compile(FILE, SUPPORT).unwrap();
-    assert_eq!(table["state"]["handoffs"].as_str(), Some("list?"));
+    assert_eq!(
+        table["state"]["handoffs"].as_str(),
+        Some("list<{next, reason, answer}>?")
+    );
     assert_eq!(table["reducers"]["handoffs"].as_str(), Some("append"));
     for id in ["frontdesk", "billing", "tech"] {
         let n = node(&table, id);
