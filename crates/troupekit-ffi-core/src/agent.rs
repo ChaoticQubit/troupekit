@@ -2,6 +2,7 @@ use crate::error::{ErrorCode, FfiError};
 #[cfg(feature = "knowledge")]
 use crate::host::HostEmbedder;
 use crate::host::{HostModel, HostTool, HostTransport};
+use crate::host_transport::wrap_transport;
 #[cfg(feature = "knowledge")]
 use crate::records::{KnowledgeConfig, MemoryConfig};
 use crate::records::{Progress, RunResult};
@@ -12,15 +13,34 @@ use std::time::Duration;
 use troupekit_core::ids::RunId;
 use troupekit_core::secret::Secret;
 use troupekit_kit::{Agent, BuiltAgent, StreamSettings};
+use troupekit_providers::model::MAX_REPLY_BYTES;
+use troupekit_providers::wire::AuthStyle;
 use troupekit_providers::Catalog;
 use troupekit_providers::Price;
 
 /// Builds an agent in steps from the host language. Every setter
 /// returns the same builder, so calls chain; nothing is checked until
 /// `build`, which consumes the settings.
-#[derive(Debug)]
 pub struct AgentBuilder {
     state: Mutex<State>,
+    transport: Mutex<Option<Arc<dyn HostTransport>>>,
+}
+
+impl std::fmt::Debug for AgentBuilder {
+    /// Writes the builder state and whether a host transport is set.
+    /// Agent settings and keys are not shown.
+    /// Output: the debug text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let transport = self
+            .transport
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        f.debug_struct("AgentBuilder")
+            .field("state", &*state)
+            .field("host_transport", &transport.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -38,6 +58,7 @@ impl AgentBuilder {
         };
         Arc::new(AgentBuilder {
             state: Mutex::new(state),
+            transport: Mutex::new(None),
         })
     }
 
@@ -266,8 +287,12 @@ impl AgentBuilder {
     /// Sends model and embedding HTTP calls through the host's client.
     /// Only the resolved vendor's origin is allowed; tools never use it.
     /// Output: the same builder, for chaining.
-    pub fn host_transport(self: &Arc<Self>, _transport: Arc<dyn HostTransport>) -> Arc<Self> {
-        self.update(|_| Err(FfiError::unsupported("AgentBuilder::host_transport")))
+    pub fn host_transport(self: &Arc<Self>, transport: Arc<dyn HostTransport>) -> Arc<Self> {
+        *self
+            .transport
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(transport);
+        self.clone()
     }
 
     /// Adds the law file at `path`, a `.bend` file checked at build.
@@ -321,10 +346,30 @@ impl AgentBuilder {
     /// Makes no model call. Output: the agent handle, or the first
     /// problem found with its code.
     pub async fn build(self: &Arc<Self>) -> Result<Arc<AgentHandle>, FfiError> {
-        let agent = self.take()?;
+        let mut agent = self.take()?;
+        let transport = self
+            .transport
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(host) = transport {
+            agent = with_transport(agent, host)?;
+        }
         let built = spawn(async move { agent.build().await.map_err(FfiError::from) }).await?;
         Ok(Arc::new(AgentHandle { agent: built }))
     }
+}
+
+fn with_transport(agent: Agent, host: Arc<dyn HostTransport>) -> Result<Agent, FfiError> {
+    let Some(vendor) = troupekit_kit::__private::vendor_of(&agent) else {
+        return Err(FfiError::new(
+            ErrorCode::Config,
+            "host_transport needs .model(\"vendor/model\") of a catalog vendor",
+        ));
+    };
+    let plain_ok = vendor.base_url.starts_with("http://") && vendor.auth == AuthStyle::NoKey;
+    let transport = wrap_transport(host, &vendor.base_url, plain_ok, MAX_REPLY_BYTES);
+    Ok(agent.transport(transport))
 }
 
 /// A built agent, ready to run many times, also at once.

@@ -7,6 +7,9 @@ mod host_model;
 mod host_model_tests;
 #[cfg(test)]
 mod host_tests;
+mod host_transport;
+#[cfg(test)]
+mod host_transport_tests;
 mod records;
 mod runtime;
 mod stream;

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError};
+use troupekit_core::http::{HttpError, HttpErrorKind};
 use troupekit_core::tool::ToolSpec;
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput};
 
@@ -139,21 +140,108 @@ impl TokenSink {
 /// Where a host transport reports an HTTP response: `head` once with
 /// the status, the final URL and the headers, then `chunk` for each
 /// part of the body. Built by troupekit for each `send` call.
-#[derive(Debug)]
 pub struct HttpSink {
-    _private: (),
+    state: Mutex<SinkState>,
+    cap: usize,
+}
+
+struct SinkState {
+    head: Option<tokio::sync::oneshot::Sender<crate::host_transport::Head>>,
+    chunks: Option<tokio::sync::mpsc::Sender<Result<Vec<u8>, HttpError>>>,
+    bytes: usize,
+}
+
+impl std::fmt::Debug for HttpSink {
+    /// Writes the byte cap and the bytes taken so far.
+    /// The body is not shown.
+    /// Output: the debug text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bytes;
+        f.debug_struct("HttpSink")
+            .field("cap", &self.cap)
+            .field("bytes", &bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl HttpSink {
-    /// Reports the response head: `status`, the final `url` after any
-    /// redirect, and the `headers`. Call it once, before any chunk.
-    /// Output: none.
-    pub fn head(&self, _status: u16, _url: String, _headers: Vec<HostHeader>) {}
+    pub(crate) fn open(
+        head: tokio::sync::oneshot::Sender<crate::host_transport::Head>,
+        chunks: tokio::sync::mpsc::Sender<Result<Vec<u8>, HttpError>>,
+        cap: usize,
+    ) -> HttpSink {
+        HttpSink {
+            state: Mutex::new(SinkState {
+                head: Some(head),
+                chunks: Some(chunks),
+                bytes: 0,
+            }),
+            cap,
+        }
+    }
 
-    /// Reports the next part of the response body.
-    /// Input: the bytes, in order. Output: none; it blocks while the
+    pub(crate) fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.head = None;
+        state.chunks = None;
+    }
+
+    /// Reports the response head: `status`, the final `url` after any
+    /// redirect, and the `headers`. Call it once, before any chunk;
+    /// a second call is ignored. Output: none.
+    pub fn head(&self, status: u16, url: String, headers: Vec<HostHeader>) {
+        let sender = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .head
+            .take();
+        if let Some(sender) = sender {
+            let headers = headers.into_iter().map(|h| (h.name, h.value)).collect();
+            let _ = sender.send(crate::host_transport::Head {
+                status,
+                url,
+                headers,
+            });
+        }
+    }
+
+    /// Reports the next part of the response body. Call it from the
+    /// host's own thread, after `head`. Output: none; it blocks while the
     /// reader is behind, and bytes past the reply cap end the body.
-    pub fn chunk(&self, _bytes: Vec<u8>) {}
+    pub fn chunk(&self, bytes: Vec<u8>) {
+        let (sender, over) = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.head.is_some() {
+                return;
+            }
+            let total = state.bytes.saturating_add(bytes.len());
+            let over = total > self.cap;
+            state.bytes = total.min(self.cap.saturating_add(1));
+            let sender = if over {
+                state.chunks.take()
+            } else {
+                state.chunks.clone()
+            };
+            (sender, over)
+        };
+        let Some(sender) = sender else {
+            return;
+        };
+        let sent = if over {
+            Err(HttpError::new(
+                HttpErrorKind::Rejected,
+                "host transport reply is over the reply cap",
+            ))
+        } else {
+            Ok(bytes)
+        };
+        let _ = sender.blocking_send(sent);
+    }
 }
 
 /// Runs `call`, a read of host code, and turns a panic in it into a
