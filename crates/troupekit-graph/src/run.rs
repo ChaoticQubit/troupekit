@@ -747,7 +747,7 @@ impl GraphRun {
                         (At::Enter, NodeKind::Tool { tool }) => {
                             let key = b.call.unwrap_or(CallKey { step, index: i });
                             let ctx = ToolContext::for_call(run_id, key.step, key.index);
-                            Work::Tool(call_tool(io, em, node, tool, state, ctx).await)
+                            Work::Tool(call_tool(io, em, wf, node, tool, state, ctx).await)
                         }
                         _ => unreachable!("only agent and tool branches work"),
                     }
@@ -814,11 +814,11 @@ impl GraphRun {
                         self.branches[i] = Branch::enter(&edge.to);
                     }
                     NodeKind::Human { .. } => {
-                        let data = reads(&self.state, &node.reads).map_err(fail)?;
+                        let data = reads(&self.workflow, &self.state, &node.reads).map_err(fail)?;
                         self.branches[i].at = At::Human { data };
                     }
                     NodeKind::Agent { persona, prompt } => {
-                        let data = reads(&self.state, &node.reads).map_err(fail)?;
+                        let data = reads(&self.workflow, &self.state, &node.reads).map_err(fail)?;
                         let p = io.persona(persona).await.map_err(|e| fail(e.to_string()))?;
                         let (call_cap, run_cap) =
                             (p.budget.call_usd_micros, p.budget.run_usd_micros);
@@ -896,15 +896,25 @@ fn node_limits(
     })
 }
 
-fn reads(state: &Map<String, Value>, keys: &[String]) -> Result<Map<String, Value>, String> {
+fn reads(
+    workflow: &Workflow,
+    state: &Map<String, Value>,
+    keys: &[String],
+) -> Result<Map<String, Value>, String> {
     keys.iter()
-        .map(|k| {
-            state
-                .get(k)
-                .map(|v| (k.clone(), v.clone()))
-                .ok_or_else(|| format!("reads `{k}`, which is not set"))
+        .map(|k| match state.get(k) {
+            Some(v) => Ok((k.clone(), v.clone())),
+            None if nullable(workflow, k) => Ok((k.clone(), Value::Null)),
+            None => Err(format!("reads `{k}`, which is not set")),
         })
         .collect()
+}
+
+fn nullable(workflow: &Workflow, key: &str) -> bool {
+    workflow.state.get(key).is_some_and(|schema| match &schema["type"] {
+        Value::Array(types) => types.iter().any(|t| t == "null"),
+        _ => false,
+    })
 }
 
 fn agent_input(prompt: Option<&str>, data: Map<String, Value>) -> Message {
@@ -920,12 +930,13 @@ fn agent_input(prompt: Option<&str>, data: Map<String, Value>) -> Message {
 async fn call_tool(
     io: &dyn GraphIo,
     em: &Emitter<'_>,
+    workflow: &Workflow,
     node: &Node,
     tool: &str,
     state: &Map<String, Value>,
     ctx: ToolContext,
 ) -> Result<Value, ToolFailure> {
-    let args = reads(state, &node.reads).map_err(|message| ToolFailure {
+    let args = reads(workflow, state, &node.reads).map_err(|message| ToolFailure {
         message,
         transient: false,
     })?;
