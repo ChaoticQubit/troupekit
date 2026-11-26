@@ -1,6 +1,7 @@
 use crate::error::host_error;
 use crate::records::{Event, HostHeader, HostHttpRequest, HostModelCaps, HostReply, HostRequest};
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyTuple};
 use std::sync::Arc;
 use troupekit_ffi_core as neutral;
 
@@ -40,8 +41,12 @@ macro_rules! base_new {
         $(
             #[pymethods]
             impl $ty {
+                /// Creates the empty base. It takes and ignores any arguments,
+                /// so a subclass `__init__` with its own parameters works.
+                /// Input: the subclass constructor arguments. Output: the base.
                 #[new]
-                fn new() -> Self {
+                #[pyo3(signature = (*_args, **_kwargs))]
+                fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
                     Self
                 }
             }
