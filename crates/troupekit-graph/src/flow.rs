@@ -157,8 +157,8 @@ pub struct Flow {
 impl Flow {
     /// Parses and validates flow TOML `text` read from `file`, the
     /// superset of workflow TOML. A file with no flow key goes through
-    /// `Workflow::parse` first, so it gives an equal flow or the same error
-    /// unless only a flow feature (a nested fan-out) makes it valid.
+    /// `Workflow::parse` first, so it gives an equal flow or the same error,
+    /// except where a nested fan-out makes the 0.1 verdict wrong.
     pub fn parse(file: &str, text: &str) -> Result<Flow, WorkflowError> {
         let raw: FlowFile = match toml::from_str(text) {
             Ok(raw) => raw,
@@ -172,11 +172,11 @@ impl Flow {
             }
         };
         if !raw.is_workflow_file() {
-            return flow_check::check(file, raw);
+            return flow_check::check(file, raw).map_err(|r| r.error);
         }
         match Workflow::parse(file, text) {
             Ok(workflow) => Ok(Flow::from(workflow)),
-            Err(e) => flow_check::check(file, raw).map_err(|_| e),
+            Err(e) => flow_check::check(file, raw).map_err(|r| if r.nested { r.error } else { e }),
         }
     }
 

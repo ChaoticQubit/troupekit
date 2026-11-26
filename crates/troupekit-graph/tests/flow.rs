@@ -282,7 +282,7 @@ fn switch_edges_need_labels_and_cover_enum_values() {
     );
     let labelled_tool = format!(
         "{}{}{}",
-        head("a", ""),
+        head("a", "[budget]\n"),
         nodes(&[TOOL_A, END]),
         routed("a", "e", "x")
     );

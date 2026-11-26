@@ -3,6 +3,7 @@ use crate::flow::{BudgetSplit, Flow, FlowKind, JoinMode, Reducer};
 use crate::workflow::{Ask, Edge, Node, NodeKind, Workflow};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use troupekit_agent::dsl::{is_ident, parse_call};
 use troupekit_agent::persona::valid_name;
@@ -100,6 +101,14 @@ impl FlowFile {
 
 type Problem = (String, String);
 
+/// Why the flow checker refused a file: the error, and whether the graph
+/// check walked into a nested fan-out before failing, so `Flow::parse`
+/// knows a 0.1 error would be false for that file.
+pub(crate) struct Rejected {
+    pub(crate) error: WorkflowError,
+    pub(crate) nested: bool,
+}
+
 struct Spec {
     id: String,
     kind: FlowKind,
@@ -111,9 +120,15 @@ struct Spec {
 /// flow: header, nodes, reducers, untracked keys, budget, then the graph.
 /// Returns the flow, or the first problem naming file, dotted field and
 /// what is wrong.
-pub(crate) fn check(file: &str, raw: FlowFile) -> Result<Flow, WorkflowError> {
-    let err = |(field, message): Problem| WorkflowError::new(file, &field, message);
-    let header = header(file, &raw)?;
+pub(crate) fn check(file: &str, raw: FlowFile) -> Result<Flow, Rejected> {
+    let err = |(field, message): Problem| Rejected {
+        error: WorkflowError::new(file, &field, message),
+        nested: false,
+    };
+    let header = header(file, &raw).map_err(|error| Rejected {
+        error,
+        nested: false,
+    })?;
     let state = &header.state;
     if raw.nodes.is_empty() || raw.nodes.len() > 256 {
         return Err(err((
@@ -142,7 +157,10 @@ pub(crate) fn check(file: &str, raw: FlowFile) -> Result<Flow, WorkflowError> {
     let untracked = untracked(raw.untracked.unwrap_or_default(), state).map_err(err)?;
     let budget_split = budget(raw.budget).map_err(err)?;
     let graph = Graph::new(&specs, &raw.edges, &header.start);
-    let nested = graph.check(state, &reducers).map_err(err)?;
+    let nested = graph.check(state, &reducers).map_err(|p| Rejected {
+        nested: graph.nested_seen.get(),
+        ..err(p)
+    })?;
     let workflow = Workflow {
         name: header.name,
         start: header.start,
@@ -592,6 +610,7 @@ struct Graph<'a> {
     outs: HashMap<&'a str, Vec<&'a str>>,
     ins: HashMap<&'a str, usize>,
     bodies: BTreeMap<&'a str, &'a str>,
+    nested_seen: Cell<bool>,
 }
 
 struct FanOut<'a> {
@@ -630,6 +649,7 @@ impl<'a> Graph<'a> {
             outs,
             ins,
             bodies,
+            nested_seen: Cell::new(false),
         }
     }
 
@@ -984,6 +1004,7 @@ impl<'a> Graph<'a> {
                 }
                 let mut next = cur;
                 if self.outs(cur).len() >= 2 {
+                    self.nested_seen.set(true);
                     if depth + 1 > MAX_FAN_OUT_DEPTH {
                         return Err(nf(
                             f,
