@@ -22,7 +22,7 @@ const QUERIES_DEFAULT: usize = 2_000;
 const TOP_K: usize = 8;
 const BATCH: usize = 5_000;
 const SCOPE: &str = "docs";
-const SEED: u64 = 42;
+const SEED: u64 = 0x4C41_5459;
 const CLUSTERS: usize = 100;
 const SPREAD: f32 = 0.05;
 const WORDS: [&str; 32] = [
@@ -124,7 +124,9 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    println!("chunks {chunks}, queries {queries}, top_k {TOP_K}, dims {DIMS}");
+    println!("chunks={chunks} dims={DIMS} queries={queries} top_k={TOP_K}");
+    println!("| index | quant | p50 us | p99 us |");
+    println!("|---|---|---|---|");
     let kinds = [("brute_force", IndexKind::BruteForce), ("hnsw", IndexKind::Hnsw(HnswParams::default()))];
     let quants = [("f32", Quantization::F32), ("i8", Quantization::I8)];
     let mut failed = false;
@@ -132,10 +134,10 @@ async fn main() -> ExitCode {
         for (quant_name, quant) in &quants {
             let settings = VectorSettings::new(DIMS).with_kind(kind.clone()).with_quantization(*quant);
             match measure(chunks, queries, settings).await {
-                Ok((p50, p99)) => println!("{kind_name} {quant_name}: p50 {} us, p99 {} us", p50.as_micros(), p99.as_micros()),
+                Ok((p50, p99)) => println!("| {kind_name} | {quant_name} | {} | {} |", p50.as_micros(), p99.as_micros()),
                 Err(e) => {
                     failed = true;
-                    println!("{kind_name} {quant_name}: not measured: {e}");
+                    println!("| {kind_name} | {quant_name} | not measured: {e} | |");
                 }
             }
         }

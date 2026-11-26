@@ -487,9 +487,12 @@ impl VectorIndex for Hnsw {
         self.header_dirty = true;
         self.removed_since_build += 1;
         let limit = f64::from(self.params.max_deleted_fraction()) * self.node_count() as f64;
-        if self.node_count() > 0 && self.removed_since_build as f64 > limit {
+        if self.node_count() == 0 {
+            self.removed_since_build = 0;
+        } else if self.removed_since_build as f64 > limit {
             self.rebuild();
         }
+        assert!(self.removed_since_build as f64 <= f64::from(self.params.max_deleted_fraction()) * self.node_count() as f64, "removal count past the rebuild limit");
         self.assert_shape();
         true
     }

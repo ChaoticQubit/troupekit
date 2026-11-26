@@ -319,3 +319,17 @@ fn removal_count_above_the_rebuild_limit_is_corrupt() {
     header[19..27].copy_from_slice(&25u64.to_le_bytes());
     disk.restore(params()).1.unwrap();
 }
+
+#[test]
+fn index_emptied_by_removals_restores() {
+    let (mut index, mut disk, data) = built(5, 92);
+    for id in 1..=5u64 {
+        disk.remove(index.as_mut(), id);
+    }
+    assert!(index.is_empty());
+    let (mut restored, r) = disk.restore(params());
+    r.unwrap();
+    assert!(restored.is_empty());
+    restored.insert(9, &data[0]).unwrap();
+    assert_eq!(restored.search(&data[0], 1, None).unwrap()[0].id, 9);
+}

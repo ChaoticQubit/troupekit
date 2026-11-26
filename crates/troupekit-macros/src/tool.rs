@@ -803,7 +803,7 @@ mod tests {
         for part in [
             "#[doc = \"Adds two numbers.\"]",
             "pub struct add ;",
-            "impl add {pub async fn invoke (__troupekit_a0: i64 , __troupekit_a1: Option < u8 > , __troupekit_a2: ToolContext ,) -> i64 {#[allow(dead_code)] = __troupekit_a0; let o : Option < u8 > = __troupekit_a1; let ctx : ToolContext = __troupekit_a2; {a}}}",
+            "impl add {pub async fn invoke (__troupekit_a0: i64 , __troupekit_a1: Option < u8 > , __troupekit_a2: ToolContext ,) -> i64 {#[allow(dead_code)] async fn add (__troupekit_a0: i64 , __troupekit_a1: Option < u8 > , __troupekit_a2: ToolContext ,) -> i64 {add ::invoke(__troupekit_a0, __troupekit_a1, __troupekit_a2) .await} let a : i64 = __troupekit_a0; let o : Option < u8 > = __troupekit_a1; let ctx : ToolContext = __troupekit_a2; {a}}}",
             "struct __troupekit_args_add {a : i64 , #[serde(default)] o : Option < u8 > ,}",
             "#[serde(crate = \"::troupekit::__private::serde\", deny_unknown_fields)]",
             "let __troupekit_args: __troupekit_args_add =",

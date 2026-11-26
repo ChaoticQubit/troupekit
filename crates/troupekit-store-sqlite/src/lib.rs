@@ -55,8 +55,8 @@ pub(crate) struct Limits {
 
 /// Settings for `SqliteStore`, each with a safe default: full durability,
 /// the system clock, 64 MiB caps on one state and one blob, 100 000 history
-/// steps and a 5 000 ms busy timeout. `open` validates them and opens the
-/// file.
+/// steps, a 5 000 ms busy timeout and secure delete on. `open` validates
+/// them and opens the file.
 #[derive(Clone)]
 pub struct SqliteStoreBuilder {
     path: PathBuf,
@@ -64,6 +64,7 @@ pub struct SqliteStoreBuilder {
     clock: Arc<dyn Clock>,
     limits: Limits,
     busy_timeout_ms: u32,
+    secure_delete: bool,
     #[cfg(any(feature = "sqlcipher", feature = "sqlcipher-system"))]
     key: Option<Secret>,
 }
@@ -75,6 +76,7 @@ impl std::fmt::Debug for SqliteStoreBuilder {
             .field("durability", &self.durability)
             .field("limits", &self.limits)
             .field("busy_timeout_ms", &self.busy_timeout_ms)
+            .field("secure_delete", &self.secure_delete)
             .finish_non_exhaustive()
     }
 }
@@ -123,6 +125,16 @@ impl SqliteStoreBuilder {
         self
     }
 
+    /// Sets whether deleted rows are overwritten: SQLite `secure_delete` on
+    /// the connection and FTS5 `secure-delete` on the keyword index, so a
+    /// removed chunk's text and vector leave the file. Cost: every delete
+    /// writes zeros over freed space, more disk writes and slower deletes.
+    /// Input: on or off. Output: the builder. Default on.
+    pub fn secure_delete(mut self, on: bool) -> Self {
+        self.secure_delete = on;
+        self
+    }
+
     /// Opens the file encrypted with SQLCipher under `key`. The key is sent
     /// first on the connection and never appears in `Debug` or an error.
     /// Input: the key. Output: the builder. Default: no key, plain file.
@@ -147,6 +159,7 @@ impl SqliteStoreBuilder {
                 clock: self.clock,
                 limits: self.limits,
                 path: self.path,
+                secure_delete: self.secure_delete,
                 vectors: Mutex::new(HashMap::new()),
             }),
         })
@@ -231,6 +244,8 @@ fn open_connection(settings: &SqliteStoreBuilder) -> Result<Connection, CoreErro
         .map_err(db)?;
     conn.pragma_update(None, "trusted_schema", "OFF")
         .map_err(db)?;
+    conn.pragma_update(None, "secure_delete", settings.secure_delete)
+        .map_err(db)?;
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
         .map_err(db)?;
     let version = schema::migrate(&mut conn, schema::STEPS)?;
@@ -262,6 +277,7 @@ struct Inner {
     clock: Arc<dyn Clock>,
     limits: Limits,
     path: PathBuf,
+    secure_delete: bool,
     vectors: Mutex<HashMap<String, Arc<vectors::IndexState>>>,
 }
 
@@ -298,6 +314,7 @@ impl SqliteStore {
                 history_steps_max: HISTORY_STEPS_MAX_DEFAULT,
             },
             busy_timeout_ms: BUSY_TIMEOUT_MS_DEFAULT,
+            secure_delete: true,
             #[cfg(any(feature = "sqlcipher", feature = "sqlcipher-system"))]
             key: None,
         }
@@ -383,6 +400,7 @@ mod tests {
         assert_eq!(builder.limits.blob_bytes_max, 64 * 1024 * 1024);
         assert_eq!(builder.limits.history_steps_max, 100_000);
         assert_eq!(builder.busy_timeout_ms, 5_000);
+        assert!(builder.secure_delete);
         let before = SystemClock.now_ms();
         assert!(builder.clock.now_ms() >= before);
         let (_dir, store) = temp_store(|b| b).await;
@@ -391,6 +409,13 @@ mod tests {
         assert_eq!(pragma(&store, "checkpoint_fullfsync").await, 1);
         assert_eq!(pragma(&store, "busy_timeout").await, 5_000);
         assert_eq!(pragma(&store, "trusted_schema").await, 0);
+        assert_eq!(pragma(&store, "secure_delete").await, 1);
+    }
+
+    #[tokio::test]
+    async fn secure_delete_off_reaches_the_connection() {
+        let (_dir, store) = temp_store(|b| b.secure_delete(false)).await;
+        assert_eq!(pragma(&store, "secure_delete").await, 0);
     }
 
     #[tokio::test]
