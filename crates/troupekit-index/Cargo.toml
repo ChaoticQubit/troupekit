@@ -12,7 +12,7 @@ rust-version.workspace = true
 autotests = false
 
 [dependencies]
-troupekit-trace = { path = "../troupekit-trace", version = "0.1.0" }
+troupekit-trace = { path = "../troupekit-trace", version = "0.2.0" }
 thiserror.workspace = true
 
 [[test]]
