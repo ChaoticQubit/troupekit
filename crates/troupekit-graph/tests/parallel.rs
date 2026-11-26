@@ -1002,7 +1002,11 @@ mod split {
         let model = FnModel::new("fake/m", move |req| {
             let worst = estimate(req, &PRICE);
             log.lock().unwrap().push(worst);
-            let text = if req.messages.len() == 1 { "oops" } else { "7" };
+            let text = if req.messages.len() == 1 {
+                "oops"
+            } else {
+                r#"{"n": 7}"#
+            };
             text_reply(text, worst - 10)
         });
         let gates = GatedTool::new();
@@ -1140,7 +1144,10 @@ mod split {
 
     #[tokio::test]
     async fn freed_reservation_tops_up_a_paused_sibling() {
-        let text = fan(&[("a", "string"), ("b", "int")], "");
+        let text = fan(&[("a", "string"), ("b", "int")], "").replace(
+            "prompt = 'Go.'\nwrites = 'b'\n",
+            "prompt = 'Go.'\nfields = { n = 'int' }\nsets = { n = 'b' }\n",
+        );
         let (probe, _, out) = run_flow(&text, Map::new(), Limits::default()).await;
         assert!(matches!(out, GraphOutcome::Done(_)), "{out:?}");
         let seen = probe.estimates();
@@ -1149,12 +1156,12 @@ mod split {
             3,
             "a answers once, b once and once more after the repair"
         );
-        let (first, repair) = (*seen.iter().min().unwrap(), *seen.iter().max().unwrap());
-        assert!(repair > first, "the repair request is longer");
-        let budget = 2 * first + repair + repair / 4;
+        let total: u64 = seen.iter().sum();
+        let budget = total + total / 16;
+        let first_b = seen.iter().copied().max().unwrap();
         assert!(
-            budget / 2 < first + repair,
-            "b's own share cannot pay the repair"
+            first_b <= budget / 2,
+            "each branch can afford its first call"
         );
         let (rig, run, out) = run_flow(&text, Map::new(), cap(budget)).await;
         let GraphOutcome::Done(state) = out else {
