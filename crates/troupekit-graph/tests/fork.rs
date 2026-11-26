@@ -361,7 +361,11 @@ async fn edit_state_cannot_change_what_a_human_approved() {
     assert_eq!(out, approval());
     run.update_state("x", json!("before approval"), None)
         .expect("a value can change while its approval is still open");
-    assert_eq!(run.step(&io).await, approval(), "the human sees the edited value");
+    assert_eq!(
+        run.step(&io).await,
+        approval(),
+        "the human sees the edited value"
+    );
     run.resume("h", json!(true)).unwrap();
     let err = run
         .update_state("x", json!("after approval"), None)
@@ -386,4 +390,32 @@ async fn edit_state_cannot_change_what_a_human_approved() {
         json!("before approval!"),
         "t2 used the approved value"
     );
+}
+
+const DERIVED: &str = "name = 'derived'\nstart = 't1'\n[state]\nx = 'string'\ns = 'string'\nok = 'bool'\ny = 'string'\n[[nodes]]\nid = 't1'\nkind = 'tool'\ntool = 't1'\nwrites = 'x'\n[[nodes]]\nid = 'sum'\nkind = 'tool'\ntool = 't2'\nreads = ['x']\nwrites = 's'\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'approval'\nreads = ['s']\nwrites = 'ok'\n[[nodes]]\nid = 'pay'\nkind = 'tool'\ntool = 't2'\nreads = ['x']\nwrites = 'y'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 't1'\nto = 'sum'\n[[edges]]\nfrom = 'sum'\nto = 'h'\n[[edges]]\nfrom = 'h'\nto = 'pay'\n[[edges]]\nfrom = 'pay'\nto = 'e'\n";
+
+#[tokio::test]
+async fn edit_state_cannot_change_a_source_of_what_was_approved() {
+    let gates = GatedTool::new();
+    let io = io(&gates);
+    let flow = Flow::parse("test/derived.toml", DERIVED).unwrap();
+    let mut run = GraphRun::start(flow, Map::new(), Limits::default(), &io)
+        .await
+        .unwrap();
+    assert_eq!(drive(&mut run, &io).await, approval());
+    run.update_state("x", json!("before approval"), None)
+        .expect("before the answer an upstream value can change");
+    assert_eq!(run.step(&io).await, approval());
+    run.resume("h", json!(true)).unwrap();
+    let err = run
+        .update_state("x", json!("after approval"), None)
+        .unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Resume(m) if m.contains("`x`") && m.contains("node `pay`") && m.contains("approval node `h`")),
+        "{err}"
+    );
+    let GraphOutcome::Done(state) = drive(&mut run, &io).await else {
+        panic!("the approved run finishes");
+    };
+    assert_eq!(state["y"], json!("before approval!"));
 }

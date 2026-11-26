@@ -783,8 +783,9 @@ impl GraphRun {
     /// Writes `value` to state key `key` between steps, as node `as_node`
     /// would (its reducer applies), as a durable change: steps + 1, status
     /// queued. Refuses a finished run, an undeclared, untracked or mistyped
-    /// key, a key an approval node writes or read for an answer it gave,
-    /// and a node that does not write `key`. Returns `Resume` on a refusal.
+    /// key, a key an approval node writes or read for an answer it gave, a
+    /// key written before an answered approval and read after it, and a
+    /// node that does not write `key`. Returns `Resume` on a refusal.
     pub fn update_state(
         &mut self,
         key: &str,
@@ -817,6 +818,11 @@ impl GraphRun {
                 n.id
             ));
         }
+        if let Some((reader, approval)) = self.read_after_approval(key) {
+            return bad(format!(
+                "`{key}` was written before approval node `{approval}` answered and node `{reader}` reads it after; fork from a checkpoint before the approval to change it"
+            ));
+        }
         let mut value = value;
         if let Some(id) = as_node {
             let Some(node) = self.workflow.node(id) else {
@@ -838,6 +844,40 @@ impl GraphRun {
         self.state.insert(key.to_string(), value);
         self.queue();
         Ok(())
+    }
+
+    fn read_after_approval(&self, key: &str) -> Option<(String, String)> {
+        let answered = self.workflow.nodes.iter().filter(|n| {
+            matches!(n.kind, NodeKind::Human { ask: Ask::Approval, .. })
+                && n.writes.as_ref().is_some_and(|w| self.state.get(w).is_some_and(|v| !v.is_null()))
+        });
+        for a in answered {
+            let after = self.reachable(&a.id, true);
+            let before = self.reachable(&a.id, false);
+            let writers: Vec<&Node> = self.workflow.nodes.iter().filter(|n| n.writes.as_deref() == Some(key)).collect();
+            let written_before = writers.is_empty() || writers.iter().any(|n| before.contains(&n.id));
+            if !written_before {
+                continue;
+            }
+            if let Some(r) = self.workflow.nodes.iter().find(|n| after.contains(&n.id) && n.reads.iter().any(|k| k == key)) {
+                return Some((r.id.clone(), a.id.clone()));
+            }
+        }
+        None
+    }
+
+    fn reachable(&self, from: &str, forward: bool) -> BTreeSet<String> {
+        let mut seen = BTreeSet::new();
+        let mut todo = vec![from.to_string()];
+        while let Some(id) = todo.pop() {
+            for e in &self.workflow.edges {
+                let (at, to) = if forward { (&e.from, &e.to) } else { (&e.to, &e.from) };
+                if *at == id && seen.insert(to.clone()) {
+                    todo.push(to.clone());
+                }
+            }
+        }
+        seen
     }
 
     /// Returns the last checkpoint of `history` (ascending steps of one
