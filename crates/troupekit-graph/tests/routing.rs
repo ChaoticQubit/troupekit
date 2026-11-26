@@ -507,3 +507,138 @@ async fn an_override_equal_to_the_persona_model_never_asks_the_hook() {
         .await
         .is_ok());
 }
+
+mod fields {
+    use super::{io, run};
+    use serde_json::{json, Map, Value};
+    use std::sync::{Arc, Mutex};
+    use troupekit_graph::testing::{text_reply, FnModel};
+    use troupekit_graph::{Flow, GraphOutcome};
+
+    fn handoff(node_extra: &str, state_extra: &str) -> String {
+        format!(
+            "name = 'ho'\nstart = 'a'\n[state]\noutput = 'string?'\ndone = 'bool?'\ntasks = 'list?'\nl = 'string?'\nr = 'string?'\n{state_extra}[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Pick.'\ngoto = ['l', 'r']\n{node_extra}[[nodes]]\nid = 'l'\nkind = 'tool'\ntool = 'l'\nwrites = 'l'\n[[nodes]]\nid = 'r'\nkind = 'tool'\ntool = 'r'\nwrites = 'r'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'l'\nto = 'e'\n[[edges]]\nfrom = 'r'\nto = 'e'\n"
+        )
+    }
+
+    fn plain(node_extra: &str) -> String {
+        format!(
+            "name = 'pl'\nstart = 'a'\n[state]\noutput = 'string?'\ndone = 'bool?'\ntasks = 'list?'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Work.'\n{node_extra}[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n"
+        )
+    }
+
+    fn replying(text: &'static str) -> (Arc<FnModel>, Arc<Mutex<Vec<Option<Value>>>>) {
+        let schemas: Arc<Mutex<Vec<Option<Value>>>> = Arc::default();
+        let seen = schemas.clone();
+        let model = Arc::new(FnModel::new("fake/m", move |req| {
+            seen.lock().unwrap().push(req.output_schema.clone());
+            text_reply(text, 10)
+        }));
+        (model, schemas)
+    }
+
+    #[tokio::test]
+    async fn agent_fields_shape_the_reply_and_sets_write_each_key() {
+        let (model, schemas) = replying(r#"{"answer": "hi", "done": true, "tasks": ["a", "b"]}"#);
+        let io = io(&[("fake/m", model)]);
+        let text = plain(
+            "fields = { answer = 'string', done = 'bool', tasks = 'list' }\nsets = { answer = 'output', done = 'done', tasks = 'tasks' }\n",
+        );
+        let GraphOutcome::Done(state) = run(&text, Map::new(), &io).await else {
+            panic!("the run finishes");
+        };
+        assert_eq!(state["output"], json!("hi"));
+        assert_eq!(state["done"], json!(true));
+        assert_eq!(state["tasks"], json!(["a", "b"]));
+        let schema = schemas.lock().unwrap()[0].clone().expect("typed output");
+        assert_eq!(schema["properties"]["done"]["type"], json!("boolean"));
+        assert!(
+            schema["properties"].get("next").is_none(),
+            "no goto, no next field"
+        );
+    }
+
+    #[tokio::test]
+    async fn goto_agent_maps_answer_while_routing_on_next() {
+        let (model, schemas) = replying(r#"{"next": "r", "reason": "fits", "answer": "hello"}"#);
+        let io = io(&[("fake/m", model)]);
+        let text = handoff(
+            "fields = { answer = 'string' }\nsets = { answer = 'output' }\n",
+            "",
+        );
+        let GraphOutcome::Done(state) = run(&text, Map::new(), &io).await else {
+            panic!("the handoff finishes");
+        };
+        assert_eq!(
+            state["output"],
+            json!("hello"),
+            "the answer field lands in the string key"
+        );
+        assert_eq!(state["r"], json!("r!"), "the run routed on next");
+        assert_eq!(state.get("l"), None);
+        let schema = schemas.lock().unwrap()[0].clone().expect("typed output");
+        assert_eq!(schema["properties"]["next"]["enum"], json!(["l", "r"]));
+        assert_eq!(schema["properties"]["answer"]["type"], json!("string"));
+    }
+
+    #[tokio::test]
+    async fn set_value_of_the_wrong_type_fails_the_run() {
+        let (model, _) = replying(r#"{"answer": "hi", "done": "yes"}"#);
+        let io = io(&[("fake/m", model)]);
+        let text =
+            plain("fields = { answer = 'string', done = 'string' }\nsets = { done = 'done' }\n");
+        let GraphOutcome::Failed(e) = run(&text, Map::new(), &io).await else {
+            panic!("a mistyped set fails");
+        };
+        assert!(e.contains("node `a`") && e.contains("`done`"), "{e}");
+    }
+
+    #[test]
+    fn fields_and_sets_are_checked_at_parse() {
+        let bad = |text: &str, want: &str| {
+            let err = Flow::parse("test/f.toml", text).unwrap_err().to_string();
+            assert!(err.contains(want), "{want}: {err}");
+        };
+        bad(
+            &plain("sets = { answer = 'output' }\n"),
+            "`sets` needs `fields`",
+        );
+        bad(
+            &plain("fields = { answer = 'string' }\nsets = { other = 'output' }\n"),
+            "`other` is not a field",
+        );
+        bad(
+            &plain("fields = { answer = 'string' }\nsets = { answer = 'nope' }\n"),
+            "`nope` is not declared in [state]",
+        );
+        bad(&plain("fields = { answer = 'strang' }\n"), "fields");
+        bad(
+            &handoff("fields = { next = 'string' }\n", ""),
+            "`next` is set by goto",
+        );
+        bad(
+            &plain(
+                "fields = { answer = 'string' }\nsets = { answer = 'output' }\nwrites = 'output'\n",
+            ),
+            "`output` is written twice",
+        );
+        assert!(
+            Flow::parse(
+                "test/f.toml",
+                &handoff("sets = { next = 'output' }\nfields = {}\n", "")
+            )
+            .is_ok(),
+            "goto fields can be set"
+        );
+    }
+
+    #[test]
+    fn parallel_sets_of_one_key_need_a_reducer() {
+        let text = "name = 'p'\nstart = 's'\n[state]\nseed = 'string?'\nout = 'string?'\n[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 'l'\nwrites = 'seed'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'A.'\nfields = { answer = 'string' }\nsets = { answer = 'out' }\n[[nodes]]\nid = 'b'\nkind = 'tool'\ntool = 'r'\nwrites = 'out'\n[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 's'\nto = 'a'\n[[edges]]\nfrom = 's'\nto = 'b'\n[[edges]]\nfrom = 'a'\nto = 'j'\n[[edges]]\nfrom = 'b'\nto = 'j'\n[[edges]]\nfrom = 'j'\nto = 'e'\n";
+        let err = Flow::parse("test/p.toml", text).unwrap_err().to_string();
+        assert!(
+            err.contains("two branches of the fan-out write `out`"),
+            "{err}"
+        );
+    }
+}

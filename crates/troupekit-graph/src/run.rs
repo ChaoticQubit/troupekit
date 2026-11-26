@@ -1304,6 +1304,9 @@ impl GraphRun {
                             Err(e) => return self.fail_after(reduced, format!("node `{}`: {e}", node.id)),
                         },
                     };
+                    if let Err(e) = self.write_sets(&node, i, &output, &mut reduced) {
+                        return GraphOutcome::Failed(e);
+                    }
                     if let Err(e) = self.write(&node, i, output, &mut reduced) {
                         return GraphOutcome::Failed(e);
                     }
@@ -1723,6 +1726,7 @@ impl GraphRun {
         let state = merged.as_ref().unwrap_or(&self.state);
         let regs = &self.registries.0;
         let untracked: &[String] = self.flow.as_ref().map_or(&[], |f| f.untracked());
+        let flow = self.flow.as_deref();
         let futures = self
             .branches
             .iter_mut()
@@ -1763,7 +1767,8 @@ impl GraphRun {
                         }
                         _ => unreachable!("only agent and tool branches work"),
                     };
-                    let secret = node.writes.as_ref().is_some_and(|w| untracked.contains(w));
+                    let secret = node.writes.as_ref().is_some_and(|w| untracked.contains(w))
+                        || node_sets(flow, &node.id).values().any(|k| untracked.contains(k));
                     let (Some(store), Some(finished), false) = (store, finished, secret) else {
                         return (work, None);
                     };
@@ -1794,6 +1799,36 @@ impl GraphRun {
         let Some(key) = &node.writes else {
             return Ok(());
         };
+        self.write_key(node, key, branch, value, reduced)
+    }
+
+    fn write_sets(
+        &mut self,
+        node: &Node,
+        branch: usize,
+        output: &Value,
+        reduced: &mut Vec<Reduced>,
+    ) -> Result<(), String> {
+        let sets = node_sets(self.flow.as_deref(), &node.id);
+        assert!(
+            sets.is_empty() || self.branches[branch].item.is_none(),
+            "map bodies never set state keys, checked at parse"
+        );
+        for (field, key) in sets {
+            let value = output.get(&field).cloned().unwrap_or(Value::Null);
+            self.write_key(node, &key, branch, value, reduced)?;
+        }
+        Ok(())
+    }
+
+    fn write_key(
+        &mut self,
+        node: &Node,
+        key: &str,
+        branch: usize,
+        value: Value,
+        reduced: &mut Vec<Reduced>,
+    ) -> Result<(), String> {
         if self.branches[branch].item.is_some() {
             let errs = self.workflow.check_value(key, &value);
             if !errs.is_empty() {
@@ -1809,7 +1844,7 @@ impl GraphRun {
         }
         if self.reducer(key).is_some() {
             reduced.push(Reduced {
-                key: key.clone(),
+                key: key.to_string(),
                 branch,
                 node: node.id.clone(),
                 value,
@@ -1825,9 +1860,9 @@ impl GraphRun {
             ));
         }
         if self.untracked(key) {
-            self.scratch.insert(key.clone(), value);
+            self.scratch.insert(key.to_string(), value);
         } else {
-            self.state.insert(key.clone(), value);
+            self.state.insert(key.to_string(), value);
         }
         Ok(())
     }
@@ -2101,8 +2136,15 @@ fn apply_finished(b: &mut Branch, finished: Finished) -> Work {
     }
 }
 
+fn node_sets(flow: Option<&Flow>, id: &str) -> BTreeMap<String, String> {
+    match flow.and_then(|f| f.kind(id)) {
+        Some(FlowKind::Agent { sets, .. }) => sets.clone(),
+        _ => BTreeMap::new(),
+    }
+}
+
 fn node_persona(flow: Option<&Flow>, io: &dyn GraphIo, id: &str, mut p: Persona) -> Result<Persona, String> {
-    let Some(FlowKind::Agent { goto, model, .. }) = flow.and_then(|f| f.kind(id)) else {
+    let Some(FlowKind::Agent { goto, model, fields, .. }) = flow.and_then(|f| f.kind(id)) else {
         return Ok(p);
     };
     if let Some(model) = model.as_ref().filter(|m| **m != p.model) {
@@ -2111,11 +2153,16 @@ fn node_persona(flow: Option<&Flow>, io: &dyn GraphIo, id: &str, mut p: Persona)
         })?;
         p.model = model.clone();
     }
-    if !goto.is_empty() {
-        let mut fields = toml::Table::new();
-        fields.insert("next".into(), toml::Value::String(format!("enum({})", goto.join(", "))));
-        fields.insert("reason".into(), toml::Value::String("string".into()));
-        p.output = Some(compile_output(&fields).map_err(|e| format!("goto targets: {e}"))?);
+    if !goto.is_empty() || !fields.is_empty() {
+        let mut table: toml::Table = fields
+            .iter()
+            .map(|(k, v)| (k.clone(), toml::Value::String(v.clone())))
+            .collect();
+        if !goto.is_empty() {
+            table.insert("next".into(), toml::Value::String(format!("enum({})", goto.join(", "))));
+            table.insert("reason".into(), toml::Value::String("string".into()));
+        }
+        p.output = Some(compile_output(&table).map_err(|e| format!("reply fields: {e}"))?);
     }
     Ok(p)
 }
@@ -2187,6 +2234,8 @@ fn run_plain(kind: &FlowKind) -> FlowKind {
             delegates: Vec::new(),
             model: None,
             defer: false,
+            fields: BTreeMap::new(),
+            sets: BTreeMap::new(),
         },
         FlowKind::Tool { tool, .. } => FlowKind::Tool { tool, defer: false },
         FlowKind::Join { .. } => FlowKind::Join { mode: JoinMode::All },

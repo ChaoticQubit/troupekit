@@ -65,6 +65,8 @@ struct NodeFile {
     goto: Option<Vec<String>>,
     delegates: Option<Vec<String>>,
     model: Option<String>,
+    fields: Option<BTreeMap<String, String>>,
+    sets: Option<BTreeMap<String, String>>,
 }
 
 impl NodeFile {
@@ -84,6 +86,8 @@ impl NodeFile {
             || self.goto.is_some()
             || self.delegates.is_some()
             || self.model.is_some()
+            || self.fields.is_some()
+            || self.sets.is_some()
     }
 }
 
@@ -247,6 +251,52 @@ fn ranged(
     }
 }
 
+/// Checks an agent node's reply `fields` (name to type) and `sets`
+/// (reply field to state key) against its goto targets, its `writes` key
+/// and `state`. Returns both maps, or the field and what is wrong.
+fn reply_fields(
+    fields: Option<BTreeMap<String, String>>,
+    sets: Option<BTreeMap<String, String>>,
+    goto: &[String],
+    writes: Option<&str>,
+    state: &BTreeMap<String, Value>,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), Problem> {
+    let e = |f: &str, m: String| (f.to_string(), m);
+    let given = fields.is_some();
+    let (fields, sets) = (fields.unwrap_or_default(), sets.unwrap_or_default());
+    let routed = ["next", "reason"];
+    if let Some(f) = routed.iter().find(|f| !goto.is_empty() && fields.contains_key(**f)) {
+        return Err(e("fields", format!("`{f}` is set by goto")));
+    }
+    if given {
+        let mut table: toml::Table = fields
+            .iter()
+            .map(|(k, v)| (k.clone(), toml::Value::String(v.clone())))
+            .collect();
+        if !goto.is_empty() {
+            table.insert("next".into(), toml::Value::String(format!("enum({})", goto.join(", "))));
+            table.insert("reason".into(), toml::Value::String("string".into()));
+        }
+        troupekit_agent::compile_output(&table).map_err(|m| e("fields", m))?;
+    }
+    if !sets.is_empty() && !given {
+        return Err(e("sets", "`sets` needs `fields`".into()));
+    }
+    let mut keys: BTreeSet<&str> = writes.into_iter().collect();
+    for (field, key) in &sets {
+        if !fields.contains_key(field) && !(!goto.is_empty() && routed.contains(&field.as_str())) {
+            return Err(e("sets", format!("`{field}` is not a field of the reply")));
+        }
+        if !state.contains_key(key) {
+            return Err(e("sets", format!("`{key}` is not declared in [state]")));
+        }
+        if !keys.insert(key) {
+            return Err(e("sets", format!("`{key}` is written twice")));
+        }
+    }
+    Ok((fields, sets))
+}
+
 fn spec(n: NodeFile, state: &BTreeMap<String, Value>) -> Result<Spec, Problem> {
     let e = |f: &str, m: String| (f.to_string(), m);
     let set = [
@@ -270,9 +320,11 @@ fn spec(n: NodeFile, state: &BTreeMap<String, Value>) -> Result<Spec, Problem> {
         ("goto", n.goto.is_some()),
         ("delegates", n.delegates.is_some()),
         ("model", n.model.is_some()),
+        ("fields", n.fields.is_some()),
+        ("sets", n.sets.is_some()),
     ];
     let allowed: &[&str] = match n.kind.as_str() {
-        "agent" => &["persona", "prompt", "reads", "writes", "goto", "delegates", "model", "defer"],
+        "agent" => &["persona", "prompt", "reads", "writes", "goto", "delegates", "model", "defer", "fields", "sets"],
         "tool" => &["tool", "reads", "writes", "defer"],
         "human" => &["ask", "prompt", "reads", "writes"],
         "router" => &["condition"],
@@ -348,6 +400,7 @@ fn spec(n: NodeFile, state: &BTreeMap<String, Value>) -> Result<Spec, Problem> {
             if n.model.as_ref().is_some_and(|m| m.trim().is_empty()) {
                 return Err(e("model", "must not be blank".into()));
             }
+            let (fields, sets) = reply_fields(n.fields, n.sets, &goto, n.writes.as_deref(), state)?;
             FlowKind::Agent {
                 persona,
                 prompt: n.prompt,
@@ -355,6 +408,8 @@ fn spec(n: NodeFile, state: &BTreeMap<String, Value>) -> Result<Spec, Problem> {
                 delegates,
                 model: n.model,
                 defer,
+                fields,
+                sets,
             }
         }
         "tool" => {
@@ -852,6 +907,9 @@ impl<'a> Graph<'a> {
                     if self.is_choice(body) {
                         return Err(nf(&s.id, "body", format!("`{body}` has goto targets")));
                     }
+                    if matches!(&b.kind, FlowKind::Agent { sets, .. } if !sets.is_empty()) {
+                        return Err(nf(&s.id, "body", format!("`{body}` sets state keys; a map body writes only its item result")));
+                    }
                     if !b.reads.contains(item) {
                         return Err(nf(
                             &s.id,
@@ -1001,6 +1059,9 @@ impl<'a> Graph<'a> {
                 }
                 if let Some(w) = &s.writes {
                     writes.insert(w.as_str());
+                }
+                if let FlowKind::Agent { sets, .. } = &s.kind {
+                    writes.extend(sets.values().map(String::as_str));
                 }
                 let mut next = cur;
                 if self.outs(cur).len() >= 2 {
