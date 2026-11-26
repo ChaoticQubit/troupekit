@@ -10,3 +10,4 @@ mod embed;
 mod llama;
 mod model;
 mod sha256;
+mod tools;

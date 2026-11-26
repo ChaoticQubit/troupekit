@@ -8,7 +8,9 @@ mod catalog;
 mod embed;
 mod error;
 mod model;
+mod reply;
 pub mod sha256;
+mod tools;
 
 #[cfg(feature = "llama")]
 pub mod llama;
@@ -22,6 +24,8 @@ pub use model::{
     ChatMessage, ChatRole, Flow, GenParams, GenStop, Generation, Grammar, LocalInfo, LocalMetrics,
     LocalModel,
 };
+pub use reply::{parse_reply, REPLY_MAX_BYTES};
+pub use tools::{tool_prompt, ToolMode};
 
 use troupekit_providers as _;
 use troupekit_trace as _;
