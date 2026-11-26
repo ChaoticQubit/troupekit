@@ -290,7 +290,7 @@ impl AgentRun {
             return self.step_once(io).await;
         };
         if let Some(scope) = troupekit_trace::current() {
-            let nested = scope.nest(spec.categories(), Some(spec.content()));
+            let nested = scope.nest(spec.categories(), None);
             return nested.in_scope(self.step_once(io)).await;
         }
         match open_trace(&spec, &self.spec.persona, self.run_id) {
@@ -520,7 +520,7 @@ impl AgentRun {
         let mut span = trace_span!(
             Trace::Models,
             "model.call",
-            selector = handle.model.id(),
+            model = handle.model.id(),
             stream = stream,
             messages = content(serde_json::to_string(&req.messages).expect("messages serialize")),
         );

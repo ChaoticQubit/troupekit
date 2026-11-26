@@ -212,7 +212,10 @@ pub async fn hybrid_search(
     let result = span.instrument(search_scopes(vectors, keywords, embedder, query, scopes, base, cfg)).await;
     match &result {
         Ok(hits) => span.record("hits", hits.len()),
-        Err(e) => span.fail(e.to_string()),
+        Err(e) => {
+            span.fail("knowledge search failed");
+            span.record("error", content(e.to_string()));
+        }
     }
     result
 }

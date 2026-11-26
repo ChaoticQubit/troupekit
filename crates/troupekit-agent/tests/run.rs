@@ -1105,7 +1105,7 @@ async fn model_call_span_has_tokens_and_no_content_by_default() {
     let call = starts(&records, "model.call")[0];
     assert_eq!(call["parent"], step["span"]);
     assert_eq!(call["cat"], "models");
-    assert_eq!(call["fields"]["selector"], "fake/m");
+    assert_eq!(call["fields"]["model"], "fake/m");
     assert_eq!(call["fields"]["stream"], true);
     assert!(call["fields"]["messages"]["bytes"].as_u64().unwrap() > 0);
     let end = end_of(&records, call);
@@ -1276,4 +1276,17 @@ async fn resumed_run_keeps_its_trace_spec() {
     drop(tracer);
     let records = trace_records(&sink);
     assert_eq!(starts(&records, "tool.call").len(), 1, "the resumed run still traces tools");
+}
+
+#[tokio::test]
+async fn set_trace_accepts_an_absolute_file() {
+    let s = setup(vec![text("hi")], PRICE);
+    let mut run = AgentRun::new(&persona(""), ask(), Limits::default(), &s.io)
+        .await
+        .unwrap();
+    let spec = troupekit_trace::TraceSpec::default().with_file("/tmp/app sandbox/run.jsonl");
+    run.set_trace(spec.clone());
+    assert_eq!(run.trace(), Some(spec.clone()));
+    let restored = AgentRun::from_checkpoint(&run.checkpoint()).unwrap();
+    assert_eq!(restored.trace(), Some(spec));
 }

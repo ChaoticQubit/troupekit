@@ -346,14 +346,12 @@ impl SavedTrace {
         }
     }
 
-    /// Rebuilds the spec. Input: none. Output: the spec, or the reason a
-    /// category name or the file path is refused.
+    /// Rebuilds the spec. The file path is kept as set: a path from TOML
+    /// was checked by `trace_keys`, one set in code may be absolute.
+    /// Input: none. Output: the spec, or the unknown category name.
     pub fn spec(&self) -> Result<TraceSpec, String> {
         let mut spec = TraceSpec::parse_value(&self.categories).map_err(|e| e.to_string())?;
         if let Some(path) = &self.file {
-            if !valid_relative_path(path) {
-                return Err(format!("trace file `{path}` is not a safe relative path"));
-            }
             spec = spec.with_file(path.as_str());
         }
         Ok(spec.with_content(self.content))

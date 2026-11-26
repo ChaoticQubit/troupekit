@@ -579,7 +579,7 @@ impl GraphRun {
             return self.step_once(io).await;
         };
         if let Some(scope) = troupekit_trace::current() {
-            let nested = scope.nest(spec.categories(), Some(spec.content()));
+            let nested = scope.nest(spec.categories(), None);
             return nested.in_scope(self.step_once(io)).await;
         }
         match open_trace(&spec, &self.workflow.name, self.run_id) {
