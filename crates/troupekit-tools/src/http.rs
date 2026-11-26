@@ -9,6 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(feature = "reqwest")]
 use std::net::SocketAddr;
 use std::time::Duration;
+use troupekit_trace::{trace_span, url_for_trace, Trace};
 pub use troupekit_core::http::{
     media_type, read_limited, Body, ChunkBody, HttpError, HttpErrorKind, HttpRequest, HttpResponse,
     Method, Transport,
@@ -35,6 +36,25 @@ pub struct Received {
 /// `HttpLimits::default().max_body_bytes` even when the transport has no cap.
 /// Returns the answer, or the transport failure as a `ToolError`.
 pub async fn receive(http: &dyn Transport, req: HttpRequest) -> Result<Received, ToolError> {
+    let mut span = trace_span!(
+        Trace::Tools,
+        "tool.http",
+        method = req.method.as_str(),
+        url = url_for_trace(&req.url),
+    );
+    let result = span.instrument(receive_body(http, req)).await;
+    match &result {
+        Ok(res) => {
+            span.record("status", res.status);
+            span.record("body_bytes", res.body.len());
+            span.record("truncated", res.truncated);
+        }
+        Err(_) => span.fail("request failed"),
+    }
+    result
+}
+
+async fn receive_body(http: &dyn Transport, req: HttpRequest) -> Result<Received, ToolError> {
     let mut res = http.send(req).await?;
     let content_type = res.content_type();
     let (body, over) =
@@ -646,5 +666,45 @@ mod tests {
             dbg.contains("Authorization") && !dbg.contains("k-123"),
             "{dbg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn http_tool_span_has_no_headers_or_query() {
+        let http = FakeHttp::new(vec![FakeHttp::reply(200, "text/plain", "hello")]);
+        let sink = std::sync::Arc::new(troupekit_trace::MemorySink::default());
+        let tracer = troupekit_trace::Tracer::builder()
+            .content(true)
+            .sink(sink.clone())
+            .build()
+            .unwrap();
+        let mut req = HttpRequest::get("https://user:pw@api.example.com/v1/x?token=sekrit#frag");
+        req.headers
+            .push(("Authorization".into(), "Bearer sk-hidden".into()));
+        let got = tracer
+            .in_scope(receive(http.as_ref(), req))
+            .await
+            .unwrap();
+        drop(tracer);
+        assert_eq!(got.status, 200);
+        let lines = sink.lines();
+        let start = lines
+            .iter()
+            .find(|l| l.contains("\"t\":\"start\""))
+            .expect("one tool.http span");
+        assert!(start.contains("\"cat\":\"tools\"") && start.contains("\"name\":\"tool.http\""));
+        assert!(start.contains("\"method\":\"GET\""), "{start}");
+        assert!(start.contains("\"url\":\"https://api.example.com/v1/x\""), "{start}");
+        let end = lines.iter().find(|l| l.contains("\"t\":\"end\"")).unwrap();
+        assert!(end.contains("\"status\":200") && end.contains("\"body_bytes\":5"), "{end}");
+        for line in &lines {
+            for needle in ["sekrit", "sk-hidden", "Authorization", "pw@", "frag", "hello"] {
+                assert!(!line.contains(needle), "{needle} in {line}");
+            }
+        }
     }
 }

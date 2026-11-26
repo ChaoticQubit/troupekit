@@ -12,6 +12,7 @@ rust-version.workspace = true
 autotests = false
 
 [dependencies]
+troupekit-trace = { path = "../troupekit-trace", version = "0.2.0" }
 troupekit-core.workspace = true
 troupekit-providers = { path = "../troupekit-providers", version = "0.2.0", default-features = false }
 troupekit-tools = { path = "../troupekit-tools", version = "0.2.0", default-features = false }

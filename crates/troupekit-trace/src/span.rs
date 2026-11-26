@@ -1,8 +1,11 @@
 use crate::category::Trace;
 use crate::record;
-use crate::tracer::{current, Ctx, Instrumented};
+use crate::redact::FIELDS_MAX;
+use crate::tracer::{current, Ctx};
 use crate::value::Value;
-use std::future::Future;
+use std::future::{poll_fn, Future};
+use std::pin::pin;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 /// A span guard: writes a `start` record when opened and an `end` record
@@ -62,9 +65,19 @@ impl Span {
     /// Adds a field written in the `end` record.
     /// Input: the key and value. Output: none.
     pub fn record(&mut self, key: &str, value: impl Into<Value>) {
-        if let Some(open) = self.open.as_mut() {
-            open.fields.push((key.to_owned(), value.into()));
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        if open.fields.len() == FIELDS_MAX {
+            open.ctx
+                .inner
+                .shared
+                .dropped
+                .fetch_add(1, Ordering::Relaxed);
+            return;
         }
+        open.fields.push((key.to_owned(), value.into()));
+        assert!(open.fields.len() <= FIELDS_MAX);
     }
 
     /// Marks the span failed with `msg`; the `end` record has `ok: false`.
@@ -85,12 +98,17 @@ impl Span {
     }
 
     /// Wraps `fut` so this span is the current parent on every poll.
-    /// A disabled span leaves the caller's scope as it is.
-    /// Input: the future. Output: the wrapped future.
-    pub fn instrument<F: Future>(&self, fut: F) -> Instrumented<F> {
-        match &self.open {
-            Some(open) => open.ctx.in_scope(fut),
-            None => Instrumented::passthrough(fut),
+    /// A disabled span leaves the caller's scope as it is. Nothing is
+    /// boxed: the future is pinned inside the returned future.
+    pub fn instrument<F: Future>(&self, fut: F) -> impl Future<Output = F::Output> {
+        let ctx = self.open.as_ref().map(|open| open.ctx.clone());
+        async move {
+            let mut fut = pin!(fut);
+            poll_fn(|cx| match &ctx {
+                Some(ctx) => ctx.enter(|| fut.as_mut().poll(cx)),
+                None => fut.as_mut().poll(cx),
+            })
+            .await
         }
     }
 }

@@ -212,7 +212,8 @@ impl SpanTree {
         self.truncated
     }
 
-    /// Returns the footer's dropped-field and cut-string counts, if any.
+    /// Returns the dropped-field and cut-string counts summed over every
+    /// footer, so sessions appended to one file add up; `None` without one.
     pub fn footer_counts(&self) -> Option<(u64, u64)> {
         self.footer
     }
@@ -231,7 +232,11 @@ impl SpanTree {
             "event" => self.add(&rec, NodeKind::Event)?,
             "end" => self.end(&rec)?,
             "truncated" => self.truncated = true,
-            "footer" => self.footer = Some((rec.num("dropped")?, rec.num("truncated")?)),
+            "footer" => {
+                let (dropped, cut) = self.footer.unwrap_or((0, 0));
+                let more = (rec.num("dropped")?, rec.num("truncated")?);
+                self.footer = Some((dropped.saturating_add(more.0), cut.saturating_add(more.1)));
+            }
             _ => return Err(()),
         }
         Ok(())

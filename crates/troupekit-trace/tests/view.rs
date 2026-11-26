@@ -218,3 +218,37 @@ fn row_cap_prints_more_line() {
         3
     );
 }
+
+#[test]
+fn huge_line_limit_does_not_overflow() {
+    let text = start(1, 0, "a", 1) + &end(1, 2, 1);
+    let tree = read(&text, ViewLimits::default().with_line_bytes_max(usize::MAX));
+    assert_eq!(tree.roots().len(), 1);
+}
+
+#[test]
+fn appended_sessions_keep_both_trees_and_sum_footers() {
+    let _guard = lock();
+    let sink = Arc::new(MemorySink::new(1_000));
+    for session in 0..2u64 {
+        let tracer = Tracer::builder()
+            .categories(TraceSet::all())
+            .sink(sink.clone())
+            .build()
+            .unwrap();
+        tracer.enter(|| {
+            let mut span = trace_span!(Trace::Agents, "agent.step", session = session);
+            for i in 0..40u64 {
+                span.record("extra", i);
+            }
+            drop(span);
+        });
+    }
+    let text = sink.lines().join("\n") + "\n";
+    let tree = read(&text, ViewLimits::default());
+    let steps: Vec<_> = tree.nodes().iter().filter(|n| n.name() == "agent.step").collect();
+    assert_eq!(steps.len(), 2, "same span id in two traces stays two spans");
+    assert!(steps.iter().all(|n| n.kind() == NodeKind::Span && n.end_us().is_some()));
+    let (dropped, _) = tree.footer_counts().expect("footers read");
+    assert_eq!(dropped, 2 * 8, "each session dropped 8 end fields past the cap");
+}

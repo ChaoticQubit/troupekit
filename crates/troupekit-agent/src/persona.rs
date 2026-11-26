@@ -1,10 +1,13 @@
 use crate::dsl::{parse_call, Call};
 use crate::error::PersonaError;
 use crate::schema::compile_output;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
+use troupekit_core::ids::RunId;
 use troupekit_providers::model::valid_model_id;
 use troupekit_tools::valid_tool_name;
+use troupekit_trace::{default_trace_path, JsonlOptions, JsonlSink, TraceSpec, Tracer};
 
 /// Model calls a run may make when the persona sets no `max_turns`.
 /// Counts every agent model call, the repair call included;
@@ -74,6 +77,9 @@ struct PersonaFile {
     max_turns: Option<i64>,
     max_tokens: Option<i64>,
     budget: Option<BudgetFile>,
+    trace: Option<toml::Value>,
+    trace_content: Option<bool>,
+    trace_file: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -183,6 +189,8 @@ impl Persona {
                 run_usd_micros: usd_micros(b.run_usd).map_err(|e| err("budget.run_usd", e))?,
             },
         };
+        trace_keys(raw.trace.as_ref(), raw.trace_content, raw.trace_file.as_deref())
+            .map_err(|(field, msg)| err(field, msg))?;
         Ok(Persona {
             name: raw.name,
             display_name: raw.display_name,
@@ -249,6 +257,125 @@ impl Persona {
         }
         parts.join("\n\n")
     }
+}
+
+/// Returns the trace settings of persona TOML `text` read from `file`:
+/// `None` without `trace` or with tracing off. Only the trace keys are
+/// validated here; `Persona::parse` checks the whole file.
+pub fn trace_spec(file: &str, text: &str) -> Result<Option<TraceSpec>, PersonaError> {
+    let raw: PersonaFile = toml::from_str(text).map_err(|e| toml_error(file, text, &e))?;
+    trace_keys(raw.trace.as_ref(), raw.trace_content, raw.trace_file.as_deref())
+        .map_err(|(field, msg)| PersonaError::new(file, field, msg))
+}
+
+/// Validates the `trace`, `trace_content` and `trace_file` keys shared by
+/// persona and workflow files. Input: the raw values. Output: the spec,
+/// `None` when tracing is off, or the bad key and the reason.
+pub fn trace_keys(
+    trace: Option<&toml::Value>,
+    content: Option<bool>,
+    file: Option<&str>,
+) -> Result<Option<TraceSpec>, (&'static str, String)> {
+    let Some(value) = trace else {
+        if content.is_some() {
+            return Err(("trace_content", "needs `trace`".into()));
+        }
+        if file.is_some() {
+            return Err(("trace_file", "needs `trace`".into()));
+        }
+        return Ok(None);
+    };
+    let names: Vec<&str> = match value {
+        toml::Value::Boolean(true) => vec!["all"],
+        toml::Value::Boolean(false) => vec!["none"],
+        toml::Value::String(name) => vec![name.as_str()],
+        toml::Value::Array(list) => list
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .ok_or(("trace", "list items must be category names".to_string()))
+            })
+            .collect::<Result<_, _>>()?,
+        _ => {
+            return Err((
+                "trace",
+                "must be true, false, a category name or a list of names".into(),
+            ))
+        }
+    };
+    let mut spec = TraceSpec::parse_value(names).map_err(|e| ("trace", e.to_string()))?;
+    if let Some(path) = file {
+        if !valid_relative_path(path) {
+            return Err((
+                "trace_file",
+                format!("`{path}` must be a relative path of [A-Za-z0-9_./-] without `..`"),
+            ));
+        }
+        spec = spec.with_file(path);
+    }
+    spec = spec.with_content(content.unwrap_or(false));
+    assert_eq!(spec.file(), file);
+    assert_eq!(spec.content(), content.unwrap_or(false));
+    Ok((!spec.categories().is_empty()).then_some(spec))
+}
+
+/// A `TraceSpec` as plain data, kept in a run's checkpoint so a resumed
+/// run traces the same way. Input: `from_spec`. Output: `spec`, which
+/// fails on a category name this build does not know.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedTrace {
+    categories: Vec<String>,
+    content: bool,
+    file: Option<String>,
+}
+
+impl SavedTrace {
+    /// Captures `spec` as data. Input: the spec. Output: the saved form.
+    pub fn from_spec(spec: &TraceSpec) -> SavedTrace {
+        let categories: Vec<String> = spec
+            .categories()
+            .iter()
+            .map(|t| t.as_str().to_owned())
+            .collect();
+        assert!(categories.len() <= troupekit_trace::Trace::ALL.len());
+        SavedTrace {
+            categories,
+            content: spec.content(),
+            file: spec.file().map(str::to_owned),
+        }
+    }
+
+    /// Rebuilds the spec. The file path is kept as set: a path from TOML
+    /// was checked by `trace_keys`, one set in code may be absolute.
+    /// Input: none. Output: the spec, or the unknown category name.
+    pub fn spec(&self) -> Result<TraceSpec, String> {
+        let mut spec = TraceSpec::parse_value(&self.categories).map_err(|e| e.to_string())?;
+        if let Some(path) = &self.file {
+            spec = spec.with_file(path.as_str());
+        }
+        Ok(spec.with_content(self.content))
+    }
+}
+
+/// Opens a tracer for a run that steps outside any trace scope: a JSONL
+/// file at the spec's `trace_file`, else `default_trace_path` named after
+/// `name` and `run_id`, appended to on every step. Output: the tracer or
+/// the I/O reason; callers step untraced on an error.
+pub fn open_trace(spec: &TraceSpec, name: &str, run_id: RunId) -> Result<Tracer, String> {
+    let path = spec.file().map_or_else(
+        || default_trace_path(name, run_id.0.as_u128() as u64),
+        std::path::PathBuf::from,
+    );
+    let options = JsonlOptions::default().with_append(true);
+    let sink = JsonlSink::with_options(&path, options).map_err(|e| e.to_string())?;
+    Tracer::builder()
+        .categories(spec.categories())
+        .content(spec.content())
+        .name(name)
+        .sink(Arc::new(sink))
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 /// Reports whether `name` is a safe persona name: 1 to 64 of
@@ -538,4 +665,51 @@ actions = "list<{name, minutes: int}>"
             "Plan it."
         );
     }
+
+    fn traced(keys: &str) -> String {
+        format!("name = 'coach'\ndisplay_name = 'C'\nrole = 'r'\ngoal = 'g'\ninstructions = 'i'\nmodel = 'fast'\n{keys}")
+    }
+
+    #[test]
+    fn persona_trace_keys_parse_and_validate() {
+        use troupekit_trace::{Trace, TraceSet};
+        assert_eq!(trace_spec("p.toml", &traced("")).unwrap(), None);
+        assert_eq!(trace_spec("p.toml", &traced("trace = false\n")).unwrap(), None);
+        let all = trace_spec("p.toml", &traced("trace = true\n")).unwrap().unwrap();
+        assert_eq!((all.categories(), all.content(), all.file()), (TraceSet::all(), false, None));
+        let some = trace_spec(
+            "p.toml",
+            &traced("trace = ['tools', 'laws']\ntrace_content = true\ntrace_file = 'traces/coach.jsonl'\n"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(some.categories(), TraceSet::none().with(Trace::Tools).with(Trace::Laws));
+        assert!(some.content());
+        assert_eq!(some.file(), Some("traces/coach.jsonl"));
+        let one = trace_spec("p.toml", &traced("trace = 'models'\n")).unwrap().unwrap();
+        assert_eq!(one.categories(), TraceSet::none().with(Trace::Models));
+        for (keys, field) in [
+            ("trace = ['nope']\n", "trace"),
+            ("trace = 3\n", "trace"),
+            ("trace = [1]\n", "trace"),
+            ("trace_content = true\n", "trace_content"),
+            ("trace_file = 'a.jsonl'\n", "trace_file"),
+        ] {
+            let err = Persona::parse("p.toml", &traced(keys)).unwrap_err();
+            assert_eq!(err.field, field, "{keys}");
+            assert_eq!(trace_spec("p.toml", &traced(keys)).unwrap_err().field, field);
+        }
+        let plain = Persona::parse("p.toml", &traced("")).unwrap();
+        assert_eq!(Persona::parse("p.toml", &traced("trace = true\n")).unwrap(), plain);
+    }
+
+    #[test]
+    fn trace_file_with_dotdot_is_refused() {
+        for path in ["../x.jsonl", "traces/../../x.jsonl", "/tmp/x.jsonl", "a b.jsonl", ""] {
+            let keys = format!("trace = true\ntrace_file = '{path}'\n");
+            let err = trace_spec("p.toml", &traced(&keys)).unwrap_err();
+            assert_eq!(err.field, "trace_file", "{path}");
+        }
+    }
+
 }

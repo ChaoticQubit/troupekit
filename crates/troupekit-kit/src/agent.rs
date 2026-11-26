@@ -67,6 +67,8 @@ pub struct Agent {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    pub(crate) trace: crate::trace::TraceConfig,
+    pub(crate) route: crate::route::RouteConfig,
 }
 
 impl Agent {
@@ -104,6 +106,8 @@ impl Agent {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            trace: crate::trace::TraceConfig::default(),
+            route: crate::route::RouteConfig::default(),
         }
     }
 
@@ -353,6 +357,26 @@ impl Agent {
     /// Fails with the first problem: settings, tools, persona, laws,
     /// evals, model, key or storage. Makes no model call.
     pub async fn build(self) -> Result<BuiltAgent, KitError> {
+        let secrets: Vec<Secret> = self.trace_secret().into_iter().collect();
+        let traced = self.trace.open(&self.name, &self.name, &secrets)?;
+        match traced {
+            Some(t) => {
+                let tracer = t.tracer.clone();
+                tracer.in_scope(self.build_in(Some(t))).await
+            }
+            None => self.build_in(None).await,
+        }
+    }
+
+    pub(crate) fn trace_secret(&self) -> Option<Secret> {
+        crate::model::trace_secret(
+            self.model.as_deref().unwrap_or_default(),
+            self.api_key.clone(),
+            self.api_key_env.as_deref(),
+        )
+    }
+
+    async fn build_in(self, traced: Option<crate::trace::Traced>) -> Result<BuiltAgent, KitError> {
         if self.retries > MAX_RETRIES {
             return Err(KitError::config(
                 &self.name,
@@ -391,7 +415,8 @@ impl Agent {
             store,
             this.retries,
             prepared.laws,
-        );
+        )
+        .with_trace(traced);
         #[cfg(feature = "knowledge")]
         let built = built.with_preamble(preamble);
         Ok(built)
@@ -404,11 +429,30 @@ impl Agent {
             Some("laws; set them on the graph")
         } else if self.ledger.is_some() {
             Some("ledger; set it on the graph")
+        } else if self.trace.is_on() {
+            Some("tracing; set it on the graph")
         } else if self.has_context() {
             Some("memory or knowledge; graphs do not take them in 0.2")
         } else {
             None
         }
+    }
+
+    #[cfg(feature = "knowledge")]
+    fn check_private_knowledge(&self) -> Result<(), KitError> {
+        match &self.knowledge {
+            Some(k) if self.route.private && !k.on_device => Err(KitError::config(
+                &self.name,
+                "a private agent cannot send documents to a cloud embedder: \
+                 use Knowledge::dir(..).on_device_embedder(..)",
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    #[cfg(not(feature = "knowledge"))]
+    fn check_private_knowledge(&self) -> Result<(), KitError> {
+        Ok(())
     }
 
     #[cfg(feature = "knowledge")]
@@ -436,6 +480,7 @@ impl Agent {
             && self.api_key == other.api_key
             && self.api_key_env == other.api_key_env
             && self.catalog == other.catalog
+            && self.route.same(&other.route)
     }
 
     #[cfg(feature = "knowledge")]
@@ -472,6 +517,7 @@ impl Agent {
                 "needs a model: call .model(\"vendor/model\")",
             ));
         };
+        self.check_private_knowledge()?;
         let mut registry = ToolRegistry::new();
         for tool in &self.tools {
             registry.register(tool.clone())?;
@@ -479,6 +525,7 @@ impl Agent {
         let tool_names: Vec<String> = registry.specs().into_iter().map(|s| s.name).collect();
         let (persona, persona_text) =
             self.persona(instructions, model_key.unwrap_or(selector), &tool_names)?;
+        self.route.check_judges(name, &persona)?;
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
         let handle = resolve(ModelChoice {
@@ -491,6 +538,7 @@ impl Agent {
             api_key_env: self.api_key_env.as_deref(),
             transport: self.transport.clone(),
         })?;
+        let handle = self.route.handle(name, handle)?;
         Ok(Prepared {
             persona,
             persona_text,
@@ -569,6 +617,9 @@ impl fmt::Debug for Agent {
             .field("api_key_env", &self.api_key_env)
             .field("model_client", &self.model_client.is_some())
             .field("retries", &self.retries)
+            .field("private", &self.route.private)
+            .field("tier", &self.route.tier)
+            .field("route", &self.route.has_route())
             .finish_non_exhaustive()
     }
 }

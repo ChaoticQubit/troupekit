@@ -1,0 +1,2 @@
+agent_trace_bad.rs:5:
+error: trace = takes all or a list like [Tools, Laws]

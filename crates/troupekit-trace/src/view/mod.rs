@@ -2,10 +2,12 @@
 //! `read_jsonl` builds a `SpanTree` from a possibly truncated, hostile or
 //! huge JSON lines file; `render_terminal` and `render_html` show it.
 
+mod html;
 mod parse;
 mod terminal;
 mod tree;
 
+pub use html::render_html;
 pub use terminal::{render_terminal, TermOptions};
 pub use tree::{FieldValue, Node, NodeKind, SpanTree};
 
@@ -98,7 +100,7 @@ pub fn read_jsonl<R: BufRead>(mut reader: R, limits: ViewLimits) -> Result<SpanT
     let mut records = 0u64;
     loop {
         line.clear();
-        let cap = limits.line_bytes_max as u64 + 1;
+        let cap = (limits.line_bytes_max as u64).saturating_add(1);
         if (&mut reader).take(cap).read_until(b'\n', &mut line)? == 0 {
             break;
         }

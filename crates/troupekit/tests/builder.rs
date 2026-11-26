@@ -211,3 +211,12 @@ async fn clock_setting_drives_the_sqlite_queue() {
         .unwrap();
     clock_drives_queue(troupe, clock).await;
 }
+
+#[test]
+fn trace_is_reexported() {
+    let all: troupekit::trace::TraceSet = troupekit::trace::Trace::ALL.into_iter().collect();
+    assert_eq!(all, troupekit::trace::TraceSet::all());
+    assert_eq!(troupekit::trace::Trace::Routing.as_str(), "routing");
+    let sink = troupekit::trace::MemorySink::default();
+    assert!(sink.lines().is_empty());
+}

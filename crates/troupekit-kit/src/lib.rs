@@ -9,8 +9,10 @@ mod laws;
 mod memory;
 mod model;
 mod output;
+mod route;
 mod storage;
 mod tool;
+mod trace;
 
 #[doc(hidden)]
 pub mod __private;
@@ -40,4 +42,8 @@ pub mod prelude {
     };
     #[cfg(feature = "knowledge")]
     pub use crate::{AgentMemory, Knowledge};
+    pub use troupekit_trace::Trace;
 }
+
+#[cfg(feature = "local")]
+use troupekit_local as _;

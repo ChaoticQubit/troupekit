@@ -1,5 +1,6 @@
 use crate::error::KitError;
 use std::path::{Component, PathBuf};
+use troupekit_trace::{trace, Trace};
 
 const MAX_LAW_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_INLINE_LAW_BYTES: usize = 64 * 1024;
@@ -67,6 +68,27 @@ impl Laws {
             }
         }
         assert_eq!(resolved.len(), paths.len());
+        for path in &resolved {
+            let shown = path.display().to_string();
+            trace!(
+                Trace::Laws,
+                "law.load",
+                owner = owner,
+                source = "file",
+                path = shown,
+                auto = auto,
+            );
+        }
+        for law in inline {
+            trace!(
+                Trace::Laws,
+                "law.load",
+                owner = owner,
+                source = "inline",
+                bytes = law.len(),
+                auto = auto,
+            );
+        }
         Ok(Laws {
             paths: resolved,
             inline: inline.to_vec(),

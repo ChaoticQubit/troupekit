@@ -116,6 +116,17 @@ pub(crate) fn default_embedder(
     Ok(Arc::new(embedder))
 }
 
+pub(crate) fn trace_secret(
+    selector: &str,
+    key: Option<Secret>,
+    env: Option<&str>,
+) -> Option<Secret> {
+    match selector.split_once('/') {
+        Some((vendor, _)) => key_for(vendor, key, env).ok(),
+        None => key,
+    }
+}
+
 fn key_for(vendor: &str, key: Option<Secret>, env: Option<&str>) -> Result<Secret, KitError> {
     if let Some(key) = key {
         return Ok(key);

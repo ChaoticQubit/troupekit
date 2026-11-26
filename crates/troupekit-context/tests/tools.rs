@@ -285,3 +285,31 @@ async fn defaults_are_the_safe_values() {
     assert!(matches!(w.builder("u1", "s1").embedder(Arc::new(HashingEmbedder::new(8))).build(), Err(ContextError::Invalid(_))));
     assert!(matches!(w.builder("u1", "s1").result_budget_tokens(10).build(), Err(ContextError::Invalid(_))));
 }
+
+#[tokio::test]
+async fn remember_emits_memory_span_without_fact_text() {
+    let w = world().await;
+    let r = registry(&w.kit("subject_zz", "session_qq", "a"));
+    for keep in [false, true] {
+        let sink = Arc::new(troupekit_trace::MemorySink::default());
+        let tracer = troupekit_trace::Tracer::builder().content(keep).sink(sink.clone()).build().unwrap();
+        tracer
+            .in_scope(async {
+                call(&r, REMEMBER_FACT, json!({ "key": "diet", "value": "vegan_xyzzy" })).await.unwrap();
+                call(&r, RECALL_FACTS, json!({})).await.unwrap();
+            })
+            .await;
+        drop(tracer);
+        let records: Vec<Value> = sink.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let names: Vec<&str> = records.iter().filter(|r| r["t"] == "start" && r["cat"] == "memory").map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["memory.remember", "memory.recall"]);
+        let remember = records.iter().find(|r| r["t"] == "start" && r["name"] == "memory.remember").unwrap();
+        let end = records.iter().find(|r| r["t"] == "end" && r["span"] == remember["span"]).unwrap();
+        assert_eq!(end["ok"], true);
+        assert_eq!(end["fields"]["fact_bytes"], 15);
+        for needle in ["vegan_xyzzy", "subject_zz", "session_qq"] {
+            let leaked = sink.lines().iter().any(|l| l.contains(needle));
+            assert_eq!(leaked, keep, "{needle} with content {keep}");
+        }
+    }
+}

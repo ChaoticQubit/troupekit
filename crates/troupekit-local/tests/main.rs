@@ -7,6 +7,7 @@ mod catalog;
 mod chat;
 #[cfg(feature = "embed")]
 mod embed;
+mod gbnf;
 #[cfg(feature = "llama")]
 mod llama;
 mod model;

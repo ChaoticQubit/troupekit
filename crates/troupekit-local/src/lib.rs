@@ -8,6 +8,7 @@ mod chat;
 #[cfg(feature = "embed")]
 mod embed;
 mod error;
+mod gbnf;
 mod model;
 mod reply;
 pub mod sha256;
@@ -22,6 +23,7 @@ pub use chat::{LocalChat, LocalChatSettings};
 #[cfg(feature = "embed")]
 pub use embed::LocalEmbedder;
 pub use error::LocalError;
+pub use gbnf::schema_to_gbnf;
 pub use model::{
     ChatMessage, ChatRole, Flow, GenParams, GenStop, Generation, Grammar, LocalInfo, LocalMetrics,
     LocalModel,

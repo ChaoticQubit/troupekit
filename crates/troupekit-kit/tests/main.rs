@@ -13,7 +13,9 @@ mod macros_agent;
 mod macros_tool;
 mod model;
 mod output;
+mod route;
 mod storage;
 #[path = "fixtures/tools_mod.rs"]
 mod tools_mod;
+mod trace;
 mod ui;
