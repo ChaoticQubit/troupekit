@@ -20,11 +20,13 @@ use troupekit_store_sqlite::SqliteVectors;
 const SCOPE_DEFAULT: &str = "docs";
 const CHUNK_MAX_TOKENS_DEFAULT: usize = 200;
 const CHUNK_OVERLAP_TOKENS_DEFAULT: usize = 20;
+const MAX_REMOVE_SHARE_DEFAULT: u8 = 50;
 
 /// Settings for `ingest_dir`. Defaults: scope `docs`, chunks of 200
 /// tokens with 20 of overlap, the safe folder walk of `LoadSettings` and
 /// `Origin::External`, so folder text is fenced as untrusted in prompts.
-/// A changed origin or chunk config re-ingests every file on the next run.
+/// A run never removes more than half the scope, or all of it from an
+/// empty folder, unless allowed. Changed origin or chunk config re-ingests.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestSettings {
@@ -32,6 +34,8 @@ pub struct IngestSettings {
     chunk: ChunkConfig,
     load: LoadSettings,
     origin: Origin,
+    allow_remove_all: bool,
+    max_remove_share: u8,
 }
 
 impl Default for IngestSettings {
@@ -44,6 +48,8 @@ impl Default for IngestSettings {
             },
             load: LoadSettings::default(),
             origin: Origin::External,
+            allow_remove_all: false,
+            max_remove_share: MAX_REMOVE_SHARE_DEFAULT,
         }
     }
 }
@@ -79,6 +85,36 @@ impl IngestSettings {
     pub fn with_origin(mut self, origin: Origin) -> Self {
         self.origin = origin;
         self
+    }
+
+    /// Allows a run to remove any number of sources, all of them included,
+    /// for a folder that was emptied on purpose. Off, a walk that finds no
+    /// supported file while the scope has sources is refused. Default off.
+    pub fn with_allow_remove_all(mut self, allow: bool) -> Self {
+        self.allow_remove_all = allow;
+        self
+    }
+
+    /// Sets the largest share of the scope's sources, in percent 0 to 100,
+    /// one run may remove; a run above it is refused with the planned
+    /// count before any write. Ignored with `allow_remove_all`. Default 50.
+    pub fn with_max_remove_share(mut self, percent: u8) -> Self {
+        self.max_remove_share = percent;
+        self
+    }
+
+    /// Returns whether a run may remove every source of the scope.
+    /// Guards against an unmounted or mistyped folder.
+    /// Default false.
+    pub fn allow_remove_all(&self) -> bool {
+        self.allow_remove_all
+    }
+
+    /// Returns the largest share of sources, in percent, one run removes.
+    /// Above it the run is refused before any write.
+    /// Default 50.
+    pub fn max_remove_share(&self) -> u8 {
+        self.max_remove_share
     }
 
     /// Returns the scope every chunk is stored under.
@@ -141,7 +177,21 @@ pub async fn ingest_dir(
     if settings.scope.trim().is_empty() {
         return Err(ContextError::Invalid("scope must not be empty".into()));
     }
+    if settings.max_remove_share > 100 {
+        return Err(ContextError::Invalid(format!(
+            "max_remove_share is {}%, above 100%",
+            settings.max_remove_share
+        )));
+    }
     let walked = walk(dir, &settings.load)?;
+    let present: HashSet<String> = walked.files.iter().map(|f| f.source.clone()).collect();
+    let stored = vectors.sources(&settings.scope).await?;
+    let gone: Vec<String> = stored
+        .iter()
+        .filter(|s| !present.contains(*s))
+        .cloned()
+        .collect();
+    check_removals(gone.len(), stored.len(), present.is_empty(), settings)?;
     let mut report = IngestReport {
         added: 0,
         replaced: 0,
@@ -153,7 +203,6 @@ pub async fn ingest_dir(
         chunks: 0,
     };
     let at_ms = SystemClock.now_ms();
-    let present: HashSet<String> = walked.files.iter().map(|f| f.source.clone()).collect();
     for file in walked.files {
         let ingest_hash = ingest_hash(&file.content_hash, settings);
         let previous = vectors.source_hash(&settings.scope, &file.source).await?;
@@ -194,11 +243,9 @@ pub async fn ingest_dir(
             }
         }
     }
-    for source in vectors.sources(&settings.scope).await? {
-        if !present.contains(&source) {
-            vectors.remove_source(&settings.scope, &source).await?;
-            report.removed += 1;
-        }
+    for source in &gone {
+        vectors.remove_source(&settings.scope, source).await?;
+        report.removed += 1;
     }
     let handled = report.added + report.replaced + report.skipped + report.failed.len();
     assert!(
@@ -221,6 +268,40 @@ fn ingest_hash(content_hash: &str, settings: &IngestSettings) -> String {
     );
     assert_eq!(hash.len(), 16, "ingest hash is 16 hex chars");
     hash
+}
+
+/// Refuses a run that would wipe the scope from an empty folder, or
+/// remove more than `max_remove_share` percent of its sources, unless
+/// `allow_remove_all`. Input: planned and stored counts, whether the walk
+/// found no file, and settings. Output: `Ok`, or `Invalid` with the count.
+fn check_removals(
+    planned: usize,
+    stored: usize,
+    no_files: bool,
+    settings: &IngestSettings,
+) -> Result<(), ContextError> {
+    assert!(
+        planned <= stored,
+        "more removals planned than sources stored"
+    );
+    if settings.allow_remove_all || planned == 0 {
+        return Ok(());
+    }
+    let scope = &settings.scope;
+    if no_files {
+        return Err(ContextError::Invalid(format!(
+            "walk found no supported files but scope {scope} has {stored} sources; refusing to remove them all \
+             (check the folder, or set with_allow_remove_all(true))"
+        )));
+    }
+    let share = usize::from(settings.max_remove_share);
+    if planned * 100 > stored * share {
+        return Err(ContextError::Invalid(format!(
+            "refusing to remove {planned} of {stored} sources of scope {scope}, above max_remove_share {share}% \
+             (check the folder, or raise with_max_remove_share or set with_allow_remove_all(true))"
+        )));
+    }
+    Ok(())
 }
 
 /// A folder an agent can search: `Knowledge::dir("docs")` plus settings.
