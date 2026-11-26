@@ -982,7 +982,10 @@ async fn call_tool(
             span.record("output", content(out.content.as_str()));
         }
         Ok(_) => {}
-        Err(e) => span.fail(e.to_string()),
+        Err(e) => {
+            span.fail("tool call failed");
+            span.record("error", content(e.to_string()));
+        }
     }
     drop(span);
     em.emit(EventBody::ToolCallFinished {

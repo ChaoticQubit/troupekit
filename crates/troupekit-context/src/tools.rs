@@ -544,7 +544,10 @@ impl Tool for KitTool {
         .await;
         match &output {
             Ok(text) => span.record("output_bytes", text.len()),
-            Err(e) => span.fail(e.to_string()),
+            Err(e) => {
+                span.fail("memory tool failed");
+                span.record("error", content(e.to_string()));
+            }
         }
         drop(span);
         let output = output?;

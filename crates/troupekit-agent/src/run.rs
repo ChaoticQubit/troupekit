@@ -308,7 +308,8 @@ impl AgentRun {
             })
             .await;
         if let StepOutcome::Failed(error) = &outcome {
-            span.fail(error.as_str());
+            span.fail("step failed");
+            span.record("error", content(error.as_str()));
         }
         self.emit(
             io,
@@ -507,7 +508,9 @@ impl AgentRun {
             span.record("ttft_us", at.saturating_duration_since(started).as_micros() as u64);
         }
         if let Err(e) = &result {
-            span.fail(e.to_string());
+            span.fail("model call failed");
+            span.record("retryable", e.is_retryable());
+            span.record("error", content(e.to_string()));
         }
         let mut reply = match result {
             Ok(r) => r,

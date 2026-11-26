@@ -1214,3 +1214,31 @@ async fn eval_emits_span() {
     assert_eq!(eval["fields"]["name"], "min_items");
     assert_eq!(end_of(&records, eval)["fields"]["passed"], true);
 }
+
+#[tokio::test]
+async fn failed_step_error_is_content() {
+    let s = setup(
+        vec![
+            text("{\"n\": \"x\", \"items\": []}"),
+            text("{\"n\": 1, \"items\": [\"a\"]}"),
+        ],
+        PRICE,
+    );
+    let (tracer, sink) = traced(false);
+    let p = persona(&format!("evals = ['min_items(items, 2)']\n{TYPED}"));
+    let mut run = AgentRun::new(&p, ask(), Limits::default(), &s.io)
+        .await
+        .unwrap();
+    let out = tracer.in_scope(run_to_end(&mut run, &s.io)).await;
+    drop(tracer);
+    assert!(matches!(out, StepOutcome::Failed(_)), "{out:?}");
+    let records = trace_records(&sink);
+    let failed: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["t"] == "end" && r["ok"] == false)
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["err"], "step failed");
+    assert!(failed[0]["fields"]["error"]["bytes"].as_u64().unwrap() > 0);
+    assert!(sink.lines().iter().all(|l| !l.contains("has 1 items")));
+}
