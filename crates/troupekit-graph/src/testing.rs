@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 use troupekit_core::error::ProviderError;
 use troupekit_core::event::Usage;
 use troupekit_core::message::{Message, Role};
@@ -70,6 +72,121 @@ impl Tool for FnTool {
     }
 }
 
+#[derive(Default)]
+struct Gates {
+    open: BTreeSet<String>,
+    waiting: Vec<(String, Waker)>,
+    in_flight: BTreeMap<String, usize>,
+    total: usize,
+    peak: usize,
+    finished: Vec<String>,
+}
+
+/// Gates for test tools, so a test fixes which parallel branch finishes
+/// first: each tool made by `tool` waits until its name is `open`ed.
+/// Counts calls in flight per name and the peak across names, and keeps
+/// the finish order. Clones share the same gates.
+#[derive(Clone, Default)]
+pub struct GatedTool {
+    gates: Arc<Mutex<Gates>>,
+}
+
+impl GatedTool {
+    /// Builds a set of gates with every gate closed.
+    /// Tools made from it wait until their gate opens.
+    /// Returns the set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builds tool `name` that waits for gate `name`, then answers with
+    /// `reply(args)`. Returns it ready for `ToolRegistry::register`.
+    /// Panics on an invalid tool name, as tests pass literals.
+    pub fn tool(
+        &self,
+        name: &str,
+        reply: impl Fn(Value) -> ToolOutput + Send + Sync + 'static,
+    ) -> Arc<dyn Tool> {
+        let (gates, reply, gate) = (self.clone(), Arc::new(reply), name.to_string());
+        FnTool::new(name, move |args, _| {
+            let (gates, reply, gate) = (gates.clone(), reply.clone(), gate.clone());
+            async move {
+                gates.enter(&gate);
+                gates.wait(&gate).await;
+                gates.leave(&gate);
+                Ok(reply(args))
+            }
+        })
+    }
+
+    /// Opens gate `name`: every waiting and later call of that tool goes on.
+    /// Opening an open gate changes nothing.
+    /// Wakes the waiting calls.
+    pub fn open(&self, name: &str) {
+        let wakers: Vec<Waker> = {
+            let mut g = self.gates.lock().expect("gates lock");
+            g.open.insert(name.to_string());
+            let (wake, keep) = std::mem::take(&mut g.waiting)
+                .into_iter()
+                .partition(|(n, _)| n == name);
+            g.waiting = keep;
+            wake.into_iter().map(|(_, w)| w).collect()
+        };
+        wakers.into_iter().for_each(Waker::wake);
+    }
+
+    /// Returns how many calls of tool `name` are in flight now.
+    /// A call is in flight from its start until it answers.
+    /// Zero for a tool never called.
+    pub fn in_flight(&self, name: &str) -> usize {
+        let g = self.gates.lock().expect("gates lock");
+        g.in_flight.get(name).copied().unwrap_or(0)
+    }
+
+    /// Returns the most calls of all gated tools that were in flight at
+    /// once since the set was built. A concurrency cap holds when this
+    /// never exceeds it.
+    pub fn max_in_flight(&self) -> usize {
+        self.gates.lock().expect("gates lock").peak
+    }
+
+    /// Returns the names of finished calls in finish order.
+    /// A name appears once per finished call.
+    /// Empty before any call finishes.
+    pub fn finished(&self) -> Vec<String> {
+        self.gates.lock().expect("gates lock").finished.clone()
+    }
+
+    fn enter(&self, name: &str) {
+        let mut g = self.gates.lock().expect("gates lock");
+        *g.in_flight.entry(name.to_string()).or_default() += 1;
+        g.total += 1;
+        g.peak = g.peak.max(g.total);
+    }
+
+    fn leave(&self, name: &str) {
+        let mut g = self.gates.lock().expect("gates lock");
+        let count = g.in_flight.get_mut(name).expect("a leaving call entered");
+        assert!(*count > 0, "in-flight count never goes below zero");
+        *count -= 1;
+        assert!(g.total > 0, "total in flight never goes below zero");
+        g.total -= 1;
+        g.finished.push(name.to_string());
+    }
+
+    async fn wait(&self, name: &str) {
+        std::future::poll_fn(|cx| {
+            let mut g = self.gates.lock().expect("gates lock");
+            if g.open.contains(name) {
+                return Poll::Ready(());
+            }
+            g.waiting.push((name.to_string(), cx.waker().clone()));
+            Poll::Pending
+        })
+        .await
+    }
+}
+
 type ReplyFn =
     dyn Fn(&CompletionRequest) -> Result<CompletionResponse, ProviderError> + Send + Sync;
 
@@ -130,5 +247,34 @@ impl Model for FnModel {
             on_delta(&Delta::TextDelta { text });
         }
         Ok(reply)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn gated_tools_finish_in_the_order_their_gates_open() {
+        let gates = GatedTool::new();
+        let a = gates.tool("a", |_| ToolOutput::text("A"));
+        let b = gates.tool("b", |_| ToolOutput::text("B"));
+        let ctx = ToolContext::default();
+        let opener = async {
+            while gates.in_flight("a") + gates.in_flight("b") < 2 {
+                tokio::task::yield_now().await;
+            }
+            gates.open("b");
+            while gates.finished().is_empty() {
+                tokio::task::yield_now().await;
+            }
+            gates.open("a");
+        };
+        let (ra, rb, ()) = tokio::join!(a.call(json!({}), &ctx), b.call(json!({}), &ctx), opener);
+        assert_eq!(ra.unwrap().content, "A");
+        assert_eq!(rb.unwrap().content, "B");
+        assert_eq!(gates.finished(), vec!["b".to_string(), "a".to_string()]);
+        assert_eq!(gates.max_in_flight(), 2);
+        assert_eq!(gates.in_flight("a"), 0);
     }
 }

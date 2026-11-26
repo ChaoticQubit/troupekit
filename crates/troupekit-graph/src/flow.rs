@@ -2,6 +2,7 @@ use crate::error::WorkflowError;
 use crate::flow_check::{self, FlowFile};
 use crate::workflow::{Ask, NodeKind, Workflow};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use troupekit_agent::dsl::Call;
 use troupekit_agent::persona::toml_error;
@@ -37,6 +38,132 @@ pub enum Reducer {
     Min,
     Max,
     Last,
+}
+
+impl Reducer {
+    /// Combines the writes of one step to one key with its `current` value
+    /// (`None` or `null` when unset). `writes` holds `(branch index, value)`
+    /// in ascending branch index; the caller checks the result's type.
+    /// Returns the new value, or why a write does not fit.
+    pub fn reduce(
+        self,
+        current: Option<&Value>,
+        writes: &[(usize, Value)],
+    ) -> Result<Value, String> {
+        assert!(
+            writes.windows(2).all(|w| w[0].0 < w[1].0),
+            "writes are applied in ascending branch index"
+        );
+        let current = current.filter(|v| !v.is_null()).cloned();
+        let Some((_, last)) = writes.last() else {
+            return Ok(current.unwrap_or(Value::Null));
+        };
+        match self {
+            Reducer::Last => Ok(last.clone()),
+            Reducer::Append => {
+                let mut list = list_of(current)?;
+                list.extend(writes.iter().map(|(_, v)| v.clone()));
+                Ok(Value::Array(list))
+            }
+            Reducer::Extend => {
+                let mut list = list_of(current)?;
+                for (b, v) in writes {
+                    let Value::Array(items) = v else {
+                        return Err(format!("`extend` takes a list; branch {b} wrote {v}"));
+                    };
+                    list.extend(items.iter().cloned());
+                }
+                Ok(Value::Array(list))
+            }
+            Reducer::Merge => {
+                let mut out = match current {
+                    None => Map::new(),
+                    Some(Value::Object(m)) => m,
+                    Some(v) => return Err(format!("`merge` needs an object; the key holds {v}")),
+                };
+                let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+                for (b, v) in writes {
+                    let Value::Object(m) = v else {
+                        return Err(format!("`merge` takes an object; branch {b} wrote {v}"));
+                    };
+                    for (k, item) in m {
+                        if let Some(other) = seen.insert(k, *b) {
+                            return Err(format!(
+                                "`merge`: branches {other} and {b} both write `{k}` in one step; use `last` to keep the higher branch"
+                            ));
+                        }
+                        out.insert(k.clone(), item.clone());
+                    }
+                }
+                Ok(Value::Object(out))
+            }
+            Reducer::Sum | Reducer::Min | Reducer::Max => {
+                let mut values: Vec<(Option<usize>, &Value)> =
+                    current.iter().map(|v| (None, v)).collect();
+                values.extend(writes.iter().map(|(b, v)| (Some(*b), v)));
+                for (b, v) in &values {
+                    if !v.is_number() {
+                        let who =
+                            b.map_or("the key holds".to_string(), |b| format!("branch {b} wrote"));
+                        return Err(format!("`{}` takes a number; {who} {v}", self.name()));
+                    }
+                }
+                match self {
+                    Reducer::Sum => sum(values.iter().map(|(_, v)| *v)),
+                    _ => {
+                        let better =
+                            |a: f64, b: f64| if self == Reducer::Min { b < a } else { b > a };
+                        let mut best = values[0].1;
+                        for (_, v) in &values[1..] {
+                            if better(num(best), num(v)) {
+                                best = v;
+                            }
+                        }
+                        Ok(best.clone())
+                    }
+                }
+            }
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Reducer::Append => "append",
+            Reducer::Extend => "extend",
+            Reducer::Merge => "merge",
+            Reducer::Sum => "sum",
+            Reducer::Min => "min",
+            Reducer::Max => "max",
+            Reducer::Last => "last",
+        }
+    }
+}
+
+fn list_of(current: Option<Value>) -> Result<Vec<Value>, String> {
+    match current {
+        None => Ok(Vec::new()),
+        Some(Value::Array(items)) => Ok(items),
+        Some(v) => Err(format!("the key holds {v}, not a list")),
+    }
+}
+
+fn num(v: &Value) -> f64 {
+    v.as_f64()
+        .expect("reducer values are checked to be numbers")
+}
+
+fn sum<'v>(values: impl Iterator<Item = &'v Value> + Clone) -> Result<Value, String> {
+    if values.clone().all(|v| v.as_i64().is_some()) {
+        let total = values
+            .map(|v| v.as_i64().expect("checked integer"))
+            .try_fold(0i64, i64::checked_add)
+            .ok_or("`sum` overflows a 64-bit integer")?;
+        return Ok(Value::from(total));
+    }
+    let total: f64 = values.map(num).sum();
+    serde_json::Number::from_f64(total)
+        .map(Value::Number)
+        .ok_or_else(|| "`sum` is not a finite number".to_string())
 }
 
 /// How concurrent agent branches share the remaining run budget: `Even`
@@ -339,6 +466,105 @@ kind = "end"
 from = "plan"
 to = "done"
 "#;
+
+    fn writes(list: &[(usize, Value)]) -> Vec<(usize, Value)> {
+        list.to_vec()
+    }
+
+    #[test]
+    fn append_keeps_branch_index_order() {
+        use serde_json::json;
+        let w = writes(&[(0, json!("a")), (1, json!("b")), (3, json!("d"))]);
+        assert_eq!(
+            Reducer::Append.reduce(None, &w).unwrap(),
+            json!(["a", "b", "d"])
+        );
+        assert_eq!(
+            Reducer::Append.reduce(Some(&json!(["x"])), &w).unwrap(),
+            json!(["x", "a", "b", "d"])
+        );
+        assert_eq!(
+            Reducer::Append.reduce(Some(&Value::Null), &w[..1]).unwrap(),
+            json!(["a"])
+        );
+        let lists = writes(&[(0, json!([1, 2])), (2, json!([3]))]);
+        assert_eq!(
+            Reducer::Extend.reduce(None, &lists).unwrap(),
+            json!([1, 2, 3])
+        );
+        assert!(Reducer::Extend
+            .reduce(None, &w)
+            .unwrap_err()
+            .contains("branch 0"));
+        assert!(Reducer::Append.reduce(Some(&json!("s")), &w).is_err());
+        assert_eq!(
+            Reducer::Append.reduce(Some(&json!(["x"])), &[]).unwrap(),
+            json!(["x"])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ascending branch index")]
+    fn reduce_refuses_writes_out_of_branch_order() {
+        let w = writes(&[(1, Value::from(1)), (0, Value::from(2))]);
+        let _ = Reducer::Sum.reduce(None, &w);
+    }
+
+    #[test]
+    fn merge_conflict_takes_the_higher_branch_index_only_with_last() {
+        use serde_json::json;
+        let clash = writes(&[(0, json!({"a": 1, "b": 2})), (2, json!({"a": 3}))]);
+        let e = Reducer::Merge.reduce(None, &clash).unwrap_err();
+        assert!(e.contains("branches 0 and 2 both write `a`"), "{e}");
+        assert_eq!(Reducer::Last.reduce(None, &clash).unwrap(), json!({"a": 3}));
+        assert_eq!(
+            Reducer::Last
+                .reduce(Some(&json!({"z": 0})), &clash)
+                .unwrap(),
+            json!({"a": 3})
+        );
+        let apart = writes(&[(0, json!({"a": 1})), (1, json!({"b": 2}))]);
+        assert_eq!(
+            Reducer::Merge
+                .reduce(Some(&json!({"a": 0, "c": 9})), &apart)
+                .unwrap(),
+            json!({"a": 1, "b": 2, "c": 9})
+        );
+        assert!(Reducer::Merge
+            .reduce(None, &writes(&[(0, json!(1))]))
+            .is_err());
+    }
+
+    #[test]
+    fn number_reducers_fold_in_branch_order() {
+        use serde_json::json;
+        let w = writes(&[(0, json!(3)), (1, json!(-2)), (2, json!(5))]);
+        assert_eq!(
+            Reducer::Sum.reduce(Some(&json!(10)), &w).unwrap(),
+            json!(16)
+        );
+        assert_eq!(Reducer::Min.reduce(None, &w).unwrap(), json!(-2));
+        assert_eq!(Reducer::Max.reduce(Some(&json!(4)), &w).unwrap(), json!(5));
+        assert_eq!(
+            Reducer::Sum
+                .reduce(None, &writes(&[(0, json!(1.5)), (1, json!(1))]))
+                .unwrap(),
+            json!(2.5)
+        );
+        assert!(Reducer::Sum
+            .reduce(None, &writes(&[(0, json!(i64::MAX)), (1, json!(1))]))
+            .is_err());
+        assert!(Reducer::Max
+            .reduce(None, &writes(&[(0, json!("x"))]))
+            .unwrap_err()
+            .contains("branch 0"));
+        assert_eq!(
+            Reducer::Max
+                .reduce(None, &writes(&[(0, json!(2)), (1, json!(2.0))]))
+                .unwrap(),
+            json!(2)
+        );
+    }
 
     #[test]
     fn flow_from_workflow_keeps_the_workflow() {
