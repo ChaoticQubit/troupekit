@@ -202,3 +202,29 @@ fn llama_defaults_are_the_safe_values() {
     assert!(!s.embeddings());
     assert!((1..=8).contains(&s.threads()));
 }
+
+#[test]
+fn generate_emits_a_model_local_span() {
+    use troupekit_trace::{MemorySink, Trace, TraceSet, Tracer};
+    let model = load();
+    let p = prompt(&model, "Hi.");
+    let sink = std::sync::Arc::new(MemorySink::new(1_000));
+    let tracer = Tracer::builder()
+        .categories(TraceSet::none().with(Trace::Models))
+        .sink(sink.clone())
+        .name("local")
+        .build()
+        .expect("tracer");
+    tracer.enter(|| {
+        model
+            .generate(&p, &greedy(2), &mut |_| Flow::Continue)
+            .expect("generates")
+    });
+    drop(tracer);
+    let lines = sink.lines();
+    assert!(
+        lines.iter().any(|l| l.contains("\"model.local\"")),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|l| l.contains("decode_tps")), "{lines:?}");
+}

@@ -10,6 +10,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
+use troupekit_trace::Trace;
 
 const CONTEXT_DEFAULT: usize = 4_096;
 const THREADS_MAX: usize = 8;
@@ -530,6 +531,85 @@ impl LocalModel for LlamaModel {
         params: &GenParams,
         on_token: &mut dyn FnMut(&str) -> Flow,
     ) -> Result<Generation, LocalError> {
+        let mut span = troupekit_trace::trace_span!(
+            Trace::Models,
+            "model.local",
+            op = "generate",
+            prompt_tokens = prompt.len() as u64,
+            max_tokens = params.max_tokens() as u64
+        );
+        let result = self.generate_inner(prompt, params, on_token);
+        match &result {
+            Ok(g) => {
+                let m = g.metrics();
+                span.record("tokens", g.tokens() as u64);
+                span.record("stop", format!("{:?}", g.stop()));
+                span.record("prefill_tps", m.prefill_tokens_per_second());
+                span.record("decode_tps", m.decode_tokens_per_second());
+                span.record("ttft_ms", m.time_to_first_token_ms());
+                span.record("reused_tokens", m.reused_prefix_tokens() as u64);
+                if let Some(b) = m.peak_ram_bytes() {
+                    span.record("peak_ram_bytes", b);
+                }
+            }
+            Err(e) => span.fail(e.to_string()),
+        }
+        result
+    }
+
+    fn score(&self, tokens: &[u32]) -> Result<f64, LocalError> {
+        let mut span = troupekit_trace::trace_span!(
+            Trace::Models,
+            "model.local",
+            op = "score",
+            tokens = tokens.len() as u64
+        );
+        let result = self.score_inner(tokens);
+        match &result {
+            Ok(sum) => span.record("logprob_sum", *sum),
+            Err(e) => span.fail(e.to_string()),
+        }
+        result
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LocalError> {
+        if !self.embeddings {
+            return Err(LocalError::Unsupported("embeddings"));
+        }
+        let token_lists = texts
+            .iter()
+            .map(|t| self.tokenize(t, false))
+            .collect::<Result<Vec<_>, _>>()?;
+        let dims = unsafe { ffi::tk_model_n_embd_out(self.model.as_ptr()) } as usize;
+        let mut state = self.lock();
+        let ctx = state.ctx;
+        unsafe { ffi::tk_set_embeddings(ctx.as_ptr(), 1) };
+        let result = token_lists
+            .iter()
+            .map(|tokens| self.embed_one(&mut state, tokens, dims))
+            .collect();
+        unsafe {
+            ffi::tk_set_embeddings(ctx.as_ptr(), 0);
+            ffi::tk_kv_clear(ctx.as_ptr());
+        }
+        state.cached.clear();
+        result
+    }
+
+    fn reset(&self) {
+        let mut state = self.lock();
+        unsafe { ffi::tk_kv_clear(state.ctx.as_ptr()) };
+        state.cached.clear();
+    }
+}
+
+impl LlamaModel {
+    fn generate_inner(
+        &self,
+        prompt: &[u32],
+        params: &GenParams,
+        on_token: &mut dyn FnMut(&str) -> Flow,
+    ) -> Result<Generation, LocalError> {
         let started = Instant::now();
         let prompt = self.check_tokens(prompt)?;
         if prompt.is_empty() {
@@ -616,7 +696,7 @@ impl LocalModel for LlamaModel {
         ))
     }
 
-    fn score(&self, tokens: &[u32]) -> Result<f64, LocalError> {
+    fn score_inner(&self, tokens: &[u32]) -> Result<f64, LocalError> {
         let ids = self.check_tokens(tokens)?;
         if ids.len() < 2 {
             return Ok(0.0);
@@ -653,38 +733,6 @@ impl LocalModel for LlamaModel {
         Ok(sum.min(0.0))
     }
 
-    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LocalError> {
-        if !self.embeddings {
-            return Err(LocalError::Unsupported("embeddings"));
-        }
-        let token_lists = texts
-            .iter()
-            .map(|t| self.tokenize(t, false))
-            .collect::<Result<Vec<_>, _>>()?;
-        let dims = unsafe { ffi::tk_model_n_embd_out(self.model.as_ptr()) } as usize;
-        let mut state = self.lock();
-        let ctx = state.ctx;
-        unsafe { ffi::tk_set_embeddings(ctx.as_ptr(), 1) };
-        let result = token_lists
-            .iter()
-            .map(|tokens| self.embed_one(&mut state, tokens, dims))
-            .collect();
-        unsafe {
-            ffi::tk_set_embeddings(ctx.as_ptr(), 0);
-            ffi::tk_kv_clear(ctx.as_ptr());
-        }
-        state.cached.clear();
-        result
-    }
-
-    fn reset(&self) {
-        let mut state = self.lock();
-        unsafe { ffi::tk_kv_clear(state.ctx.as_ptr()) };
-        state.cached.clear();
-    }
-}
-
-impl LlamaModel {
     fn embed_one(
         &self,
         state: &mut State,
