@@ -120,13 +120,13 @@ fn version_matches_core() {
 async fn unbuilt_parts_return_unsupported() {
     let err = AgentBuilder::new("helper".into())
         .instructions("Echo.".into())
-        .host_model(Arc::new(Fixed))
+        .host_transport(Arc::new(Offline))
         .build()
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Unsupported);
     assert_eq!(err.code as u32, 17);
-    assert!(err.message.contains("AgentBuilder::host_model"), "{err}");
+    assert!(err.message.contains("AgentBuilder::host_transport"), "{err}");
     let err = GraphBuilder::new("chain".into()).build().await.unwrap_err();
     assert_eq!(err.code, ErrorCode::Unsupported);
     assert!(err.run_id.is_none());

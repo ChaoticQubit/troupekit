@@ -193,14 +193,16 @@ pub struct HostRequest {
 }
 
 /// A host model's reply: the whole `text` (also when it was streamed
-/// through `TokenSink`) and the token counts the model reported.
-/// Start from `HostReply::default()` and set the fields.
+/// through `TokenSink`), the token counts the model reported, and for a
+/// model with native tools its calls as a JSON list of `{id, name,
+/// arguments}`. Start from `HostReply::default()` and set the fields.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostReply {
     pub text: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub tool_calls_json: Option<String>,
 }
 
 const SECRET_HEADERS: [&str; 4] = [

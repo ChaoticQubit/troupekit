@@ -2,6 +2,9 @@ mod agent;
 mod error;
 mod graph;
 mod host;
+mod host_model;
+#[cfg(test)]
+mod host_model_tests;
 #[cfg(test)]
 mod host_tests;
 mod records;

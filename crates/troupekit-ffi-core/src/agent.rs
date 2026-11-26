@@ -13,6 +13,7 @@ use troupekit_core::ids::RunId;
 use troupekit_core::secret::Secret;
 use troupekit_kit::{Agent, BuiltAgent, StreamSettings};
 use troupekit_providers::Catalog;
+use troupekit_providers::Price;
 
 /// Builds an agent in steps from the host language. Every setter
 /// returns the same builder, so calls chain; nothing is checked until
@@ -233,8 +234,8 @@ impl AgentBuilder {
     /// Runs the agent on a model the host provides, such as the phone's
     /// built-in model. Free unless priced with `host_model_priced`.
     /// Output: the same builder, for chaining.
-    pub fn host_model(self: &Arc<Self>, _model: Arc<dyn HostModel>) -> Arc<Self> {
-        self.update(|_| Err(FfiError::unsupported("AgentBuilder::host_model")))
+    pub fn host_model(self: &Arc<Self>, model: Arc<dyn HostModel>) -> Arc<Self> {
+        self.with_host_model(model, Price::FREE)
     }
 
     /// Runs the agent on a host model with a price per million tokens,
@@ -242,11 +243,24 @@ impl AgentBuilder {
     /// Output: the same builder, for chaining.
     pub fn host_model_priced(
         self: &Arc<Self>,
-        _model: Arc<dyn HostModel>,
-        _input_micros_per_mtok: u64,
-        _output_micros_per_mtok: u64,
+        model: Arc<dyn HostModel>,
+        input_micros_per_mtok: u64,
+        output_micros_per_mtok: u64,
     ) -> Arc<Self> {
-        self.update(|_| Err(FfiError::unsupported("AgentBuilder::host_model_priced")))
+        let price = Price {
+            input_usd_micros_per_mtok: input_micros_per_mtok,
+            output_usd_micros_per_mtok: output_micros_per_mtok,
+            ..Price::FREE
+        };
+        self.with_host_model(model, price)
+    }
+
+    fn with_host_model(self: &Arc<Self>, model: Arc<dyn HostModel>, price: Price) -> Arc<Self> {
+        let wrapped = crate::host::guarded("model", || crate::host_model::wrap_model(model));
+        self.update(|agent| {
+            let (client, id) = wrapped?;
+            Ok(agent.model(id).model_client(client).price(price))
+        })
     }
 
     /// Sends model and embedding HTTP calls through the host's client.

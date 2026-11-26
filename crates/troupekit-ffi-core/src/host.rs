@@ -5,7 +5,7 @@ use crate::records::{
 use async_trait::async_trait;
 use serde_json::Value;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use troupekit_core::tool::ToolSpec;
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput};
 
@@ -100,14 +100,40 @@ pub trait HostTransport: Send + Sync {
 /// Built by troupekit for each `HostModel::generate` call.
 #[derive(Debug)]
 pub struct TokenSink {
-    _private: (),
+    deltas: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    bytes: Mutex<usize>,
+    cap: usize,
 }
 
 impl TokenSink {
-    /// Pushes one text delta of the reply in progress.
+    /// Pushes one text delta of the reply in progress. Never blocks.
     /// Input: the new text only, not the text so far.
     /// Output: none; deltas past the reply cap are dropped.
-    pub fn delta(&self, _text: String) {}
+    pub fn delta(&self, text: String) {
+        let Some(deltas) = &self.deltas else {
+            return;
+        };
+        let mut used = self.bytes.lock().unwrap_or_else(PoisonError::into_inner);
+        let total = used.saturating_add(text.len());
+        if total <= self.cap {
+            *used = total;
+            assert!(*used <= self.cap);
+            let _ = deltas.send(text);
+        }
+    }
+
+    pub(crate) fn channel(
+        forward: bool,
+        cap: usize,
+    ) -> (Arc<TokenSink>, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let sink = TokenSink {
+            deltas: forward.then_some(sender),
+            bytes: Mutex::new(0),
+            cap,
+        };
+        (Arc::new(sink), receiver)
+    }
 }
 
 /// Where a host transport reports an HTTP response: `head` once with
