@@ -4,6 +4,7 @@
 
 mod cache;
 mod catalog;
+mod chat;
 #[cfg(feature = "embed")]
 mod embed;
 mod error;
@@ -17,6 +18,7 @@ pub mod llama;
 
 pub use cache::ModelCache;
 pub use catalog::{DeviceClass, LocalCatalog, LocalSpec};
+pub use chat::{LocalChat, LocalChatSettings};
 #[cfg(feature = "embed")]
 pub use embed::LocalEmbedder;
 pub use error::LocalError;
@@ -26,6 +28,3 @@ pub use model::{
 };
 pub use reply::{parse_reply, REPLY_MAX_BYTES};
 pub use tools::{tool_prompt, ToolMode};
-
-use troupekit_providers as _;
-use troupekit_trace as _;

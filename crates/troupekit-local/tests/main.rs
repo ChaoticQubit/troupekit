@@ -4,6 +4,7 @@ mod build_plan_src;
 mod build_plan;
 mod cache;
 mod catalog;
+mod chat;
 #[cfg(feature = "embed")]
 mod embed;
 #[cfg(feature = "llama")]
