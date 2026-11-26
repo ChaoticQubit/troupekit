@@ -10,7 +10,9 @@ use troupekit_agent::{AgentRun, Budget, Limits, RunState, StepOutcome};
 use troupekit_core::event::{EventBody, PauseReason, Usage};
 use troupekit_core::ids::RunId;
 use troupekit_core::message::{Message, Role};
-use troupekit_core::store::Checkpoint;
+use std::collections::BTreeMap;
+use troupekit_core::error::CoreError;
+use troupekit_core::store::{BranchWrite, Checkpoint, CheckpointStore};
 use troupekit_tools::{fence_untrusted, ToolContext, ToolError};
 
 /// Version of the serialized graph run of a 0.1 workflow.
@@ -175,6 +177,61 @@ enum Work {
     Tool(Result<Value, ToolFailure>),
 }
 
+/// The durable result of one finished branch unit, kept as a branch write:
+/// a tool's output, or an agent's stepped run and its outcome. Only
+/// successes are kept; a failed or retried unit runs again, as in 0.1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Finished {
+    Tool {
+        output: Value,
+    },
+    Agent {
+        run: Box<AgentRun>,
+        outcome: AgentDone,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum AgentDone {
+    Continue,
+    Paused { reason: PauseReason },
+    Done { output: Value },
+}
+
+impl AgentDone {
+    fn of(outcome: &StepOutcome) -> Option<AgentDone> {
+        match outcome {
+            StepOutcome::Continue => Some(AgentDone::Continue),
+            StepOutcome::Paused(reason) => Some(AgentDone::Paused {
+                reason: reason.clone(),
+            }),
+            StepOutcome::Done(output) => Some(AgentDone::Done {
+                output: output.clone(),
+            }),
+            StepOutcome::Retry { .. } | StepOutcome::Failed(_) => None,
+        }
+    }
+
+    fn outcome(self) -> StepOutcome {
+        match self {
+            AgentDone::Continue => StepOutcome::Continue,
+            AgentDone::Paused { reason } => StepOutcome::Paused(reason),
+            AgentDone::Done { output } => StepOutcome::Done(output),
+        }
+    }
+}
+
+/// Branch writes loaded by `GraphRun::restore`: the step they belong to
+/// and, per branch index, the node and the finished unit. Applied only by
+/// the `step_durable` call that runs that same step.
+#[derive(Debug, Clone, PartialEq)]
+struct Marks {
+    step: u64,
+    done: BTreeMap<usize, (String, Finished)>,
+}
+
 /// One graph run as plain serializable data: the workflow snapshot, the
 /// limits, the typed state, the active branches, status, usage, retry
 /// count, event `seq` and step number. The host calls `step` and saves
@@ -203,6 +260,8 @@ pub struct GraphRun {
     failure: Option<Failure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flow: Option<Box<Flow>>,
+    #[serde(skip)]
+    marks: Option<Marks>,
 }
 
 struct Reduced {
@@ -281,6 +340,7 @@ impl GraphRun {
             stopped: None,
             failure: None,
             flow: None,
+            marks: None,
         })
     }
 
@@ -600,11 +660,66 @@ impl GraphRun {
     /// for every branch that can work, concurrently, with control nodes
     /// resolved before and after. Waiting and final runs change nothing.
     pub async fn step(&mut self, io: &dyn GraphIo) -> GraphOutcome {
+        self.marks = None;
+        self.step_with(io, None)
+            .await
+            .expect("a step without a store or branch writes never errors")
+    }
+
+    /// Runs one step as `step` does, and keeps each finished branch's
+    /// result in `store` as soon as that branch finishes, before its
+    /// siblings do. On a run from `restore`, branches with a kept result
+    /// are applied instead of run again, so they keep their single call.
+    /// With a store that keeps whole steps only it behaves exactly as `step`.
+    /// On `Err` (a store error or a branch write that does not match the
+    /// run) the caller must not checkpoint this run object: it reloads
+    /// with `restore`, never `from_checkpoint`, which would re-run finished
+    /// branches and conflict with their kept writes.
+    pub async fn step_durable(
+        &mut self,
+        io: &dyn GraphIo,
+        store: &dyn CheckpointStore,
+    ) -> Result<GraphOutcome, GraphError> {
+        self.step_with(io, Some(store)).await
+    }
+
+    /// Restores run `run_id` from the latest checkpoint in `store` with
+    /// the branch writes kept for the step after it, which the next
+    /// `step_durable` applies. Returns `Resume` when the run has no
+    /// checkpoint and `Checkpoint` for a write that does not parse.
+    pub async fn restore(store: &dyn CheckpointStore, run_id: RunId) -> Result<GraphRun, GraphError> {
+        let cp = store
+            .latest(run_id)
+            .await?
+            .ok_or_else(|| GraphError::Resume(format!("run {run_id} has no checkpoint")))?;
+        let mut run = GraphRun::from_checkpoint(&cp)?;
+        let step = cp.step + 1;
+        let mut done = BTreeMap::new();
+        for w in store.branch_writes(run_id, step).await? {
+            let bad = |m: String| GraphError::Checkpoint(format!("branch write {} of step {step}: {m}", w.branch()));
+            let index = usize::try_from(w.branch()).map_err(|e| bad(e.to_string()))?;
+            let finished: Finished = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
+            if done.insert(index, (w.node().to_string(), finished)).is_some() {
+                return Err(bad("the branch has two writes".into()));
+            }
+        }
+        if !done.is_empty() {
+            run.marks = Some(Marks { step, done });
+        }
+        Ok(run)
+    }
+
+    async fn step_with(
+        &mut self,
+        io: &dyn GraphIo,
+        store: Option<&dyn CheckpointStore>,
+    ) -> Result<GraphOutcome, GraphError> {
+        let marks = self.marks.take();
         match &self.status {
-            GraphStatus::Done => return GraphOutcome::Done(self.state.clone()),
-            GraphStatus::Failed { error } => return GraphOutcome::Failed(error.clone()),
+            GraphStatus::Done => return Ok(GraphOutcome::Done(self.state.clone())),
+            GraphStatus::Failed { error } => return Ok(GraphOutcome::Failed(error.clone())),
             GraphStatus::WaitingHuman { reason } | GraphStatus::WaitingBudget { reason } => {
-                return GraphOutcome::Waiting(reason.clone())
+                return Ok(GraphOutcome::Waiting(reason.clone()))
             }
             GraphStatus::Running => unreachable!("a step never starts inside another"),
             GraphStatus::Queued | GraphStatus::Checkpointed => {}
@@ -623,7 +738,8 @@ impl GraphRun {
             });
         }
         self.failure = None;
-        let outcome = self.work(io, &em).await;
+        let marks = marks.filter(|m| m.step == self.steps);
+        let outcome = self.work(io, &em, store, marks).await?;
         match &outcome {
             GraphOutcome::Continue | GraphOutcome::RetryAt { .. } => {
                 self.status = GraphStatus::Checkpointed
@@ -658,7 +774,7 @@ impl GraphRun {
             }
         }
         self.seq = seq.load(Ordering::SeqCst);
-        outcome
+        Ok(outcome)
     }
 
     fn queue(&mut self) {
@@ -672,16 +788,61 @@ impl GraphRun {
             .expect("branches sit at workflow nodes")
     }
 
-    async fn work(&mut self, io: &dyn GraphIo, em: &Emitter<'_>) -> GraphOutcome {
+    async fn work(
+        &mut self,
+        io: &dyn GraphIo,
+        em: &Emitter<'_>,
+        store: Option<&dyn CheckpointStore>,
+        marks: Option<Marks>,
+    ) -> Result<GraphOutcome, GraphError> {
         if self.steps > u64::from(self.workflow.max_steps) {
-            return GraphOutcome::Failed(format!("max_steps {} reached", self.workflow.max_steps));
+            return Ok(GraphOutcome::Failed(format!("max_steps {} reached", self.workflow.max_steps)));
         }
         match self.settle(io).await {
-            Err(e) => return GraphOutcome::Failed(e),
-            Ok(true) => return GraphOutcome::Done(self.state.clone()),
+            Err(e) => return Ok(GraphOutcome::Failed(e)),
+            Ok(true) => return Ok(GraphOutcome::Done(self.state.clone())),
             Ok(false) => {}
         }
-        let results = self.run_branches(io, em).await;
+        let done = match marks {
+            Some(m) => self.check_marks(m.done)?,
+            None => BTreeMap::new(),
+        };
+        let (results, failed_save) = self.run_branches(io, em, store, done).await;
+        if let Some(e) = failed_save {
+            return Err(GraphError::Store(e));
+        }
+        Ok(self.apply(io, results).await)
+    }
+
+    fn check_marks(
+        &self,
+        done: BTreeMap<usize, (String, Finished)>,
+    ) -> Result<BTreeMap<usize, Finished>, GraphError> {
+        let mut out = BTreeMap::new();
+        for (i, (node, finished)) in done {
+            let bad = |m: String| GraphError::Checkpoint(format!("branch write {i} of step {}: {m}", self.steps));
+            let Some(b) = self.branches.get(i) else {
+                return Err(bad(format!("the step has {} branches", self.branches.len())));
+            };
+            if b.node != node {
+                return Err(bad(format!("it is for node `{node}`, but the branch is at `{}`", b.node)));
+            }
+            if !self.can_work(b) {
+                return Err(bad(format!("the branch at `{node}` has no work this step")));
+            }
+            match (&finished, &b.at) {
+                (Finished::Tool { .. }, At::Enter) => {}
+                (Finished::Agent { run, .. }, At::Agent { .. }) => {
+                    AgentRun::from_checkpoint(&run.checkpoint()).map_err(|e| bad(e.to_string()))?;
+                }
+                _ => return Err(bad(format!("its kind does not fit the work at `{node}`"))),
+            }
+            out.insert(i, finished);
+        }
+        Ok(out)
+    }
+
+    async fn apply(&mut self, io: &dyn GraphIo, results: Vec<Work>) -> GraphOutcome {
         let mut retry: Option<(String, Option<u64>)> = None;
         let mut reduced: Vec<Reduced> = Vec::new();
         for (i, w) in results.into_iter().enumerate() {
@@ -781,33 +942,69 @@ impl GraphRun {
         }
     }
 
-    async fn run_branches(&mut self, io: &dyn GraphIo, em: &Emitter<'_>) -> Vec<Work> {
+    async fn run_branches(
+        &mut self,
+        io: &dyn GraphIo,
+        em: &Emitter<'_>,
+        store: Option<&dyn CheckpointStore>,
+        mut done: BTreeMap<usize, Finished>,
+    ) -> (Vec<Work>, Option<CoreError>) {
         let workers: Vec<bool> = self.branches.iter().map(|b| self.can_work(b)).collect();
         let (wf, state, run_id, step) = (&self.workflow, &self.state, self.run_id, self.steps);
-        let futures =
-            self.branches
-                .iter_mut()
-                .zip(workers)
-                .enumerate()
-                .map(|(i, (b, works))| async move {
+        let futures = self
+            .branches
+            .iter_mut()
+            .zip(workers)
+            .enumerate()
+            .map(|(i, (b, works))| {
+                let kept = done.remove(&i);
+                async move {
+                    if let Some(finished) = kept {
+                        return (apply_finished(b, finished), None);
+                    }
                     if !works {
-                        return Work::Idle;
+                        return (Work::Idle, None);
                     }
                     let node = wf.node(&b.node).expect("branches sit at workflow nodes");
-                    match (&mut b.at, &node.kind) {
+                    let (work, finished) = match (&mut b.at, &node.kind) {
                         (At::Agent { run, .. }, NodeKind::Agent { persona, .. }) => {
                             let nio = NodeIo::new(em, &node.id, persona);
-                            Work::Agent(run.step(&nio).await)
+                            let outcome = run.step(&nio).await;
+                            let finished = AgentDone::of(&outcome).map(|outcome| Finished::Agent {
+                                run: run.clone(),
+                                outcome,
+                            });
+                            (Work::Agent(outcome), finished)
                         }
                         (At::Enter, NodeKind::Tool { tool }) => {
                             let key = b.call.unwrap_or(CallKey { step, index: i });
                             let ctx = ToolContext::for_call(run_id, key.step, key.index);
-                            Work::Tool(call_tool(io, em, wf, node, tool, state, ctx).await)
+                            let result = call_tool(io, em, wf, node, tool, state, ctx).await;
+                            let finished = result.as_ref().ok().map(|output| Finished::Tool {
+                                output: output.clone(),
+                            });
+                            (Work::Tool(result), finished)
                         }
                         _ => unreachable!("only agent and tool branches work"),
-                    }
-                });
-        join_all(futures).await
+                    };
+                    let (Some(store), Some(finished)) = (store, finished) else {
+                        return (work, None);
+                    };
+                    let branch = u32::try_from(i).expect("a step has far fewer than 2^32 branches");
+                    let value = serde_json::to_value(&finished).expect("a finished unit serializes");
+                    let saved = store.save_branch(run_id, step, BranchWrite::new(branch, &node.id, value)).await;
+                    (work, saved.err())
+                }
+            });
+        let results = join_all(futures).await;
+        let mut works = Vec::with_capacity(results.len());
+        let mut failed = None;
+        for (work, error) in results {
+            works.push(work);
+            failed = failed.or(error);
+        }
+        assert!(done.is_empty(), "every kept write belongs to a branch of the step");
+        (works, failed)
     }
 
     fn write(
@@ -980,6 +1177,22 @@ impl GraphRun {
             },
         );
         true
+    }
+}
+
+fn apply_finished(b: &mut Branch, finished: Finished) -> Work {
+    match finished {
+        Finished::Tool { output } => {
+            assert_eq!(b.at, At::Enter, "kept tool results apply to branches at their tool");
+            Work::Tool(Ok(output))
+        }
+        Finished::Agent { run: kept, outcome } => {
+            let At::Agent { run, .. } = &mut b.at else {
+                unreachable!("kept agent results apply to agent branches, checked before");
+            };
+            *run = kept;
+            Work::Agent(outcome.outcome())
+        }
     }
 }
 
