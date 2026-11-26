@@ -5,3 +5,4 @@ mod scope;
 mod sink;
 mod support;
 mod switch;
+mod view;

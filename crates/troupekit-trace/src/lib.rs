@@ -15,6 +15,7 @@ mod spec;
 mod switch;
 mod tracer;
 mod value;
+pub mod view;
 
 pub use category::{Trace, TraceSet};
 pub use error::TraceError;
