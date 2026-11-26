@@ -306,7 +306,7 @@ jobs:
           if [ -x e2e-venv/bin/python ]; then py="$PWD/e2e-venv/bin/python"; else py="$PWD/e2e-venv/Scripts/python.exe"; fi
           "$py" -m pip install --quiet dist/troupekit-*-abi3-*.whl "pytest==9.2.0"
           cd "$RUNNER_TEMP"
-          "$py" -m pytest "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_smoke.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_e2e_toml.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_host_tool.py"
+          "$py" -m pytest "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_smoke.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_e2e_toml.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_host_tool.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_freeze.py"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: wheel-${{ matrix.name }}
