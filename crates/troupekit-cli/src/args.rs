@@ -226,6 +226,17 @@ mod tests {
     }
 
     #[test]
+    fn defaults_are_the_safe_values() {
+        let a = parse(&args(&["ingest", "d", "--embedder", "hashing:8"])).unwrap();
+        assert_eq!((a.kind, a.quant), (Kind::Brute, Quant::F32));
+        assert_eq!(a.catalog, None);
+        assert_eq!(a.key_env, "TROUPEKIT_EMBED_KEY");
+        assert_eq!((a.chunk_tokens, a.overlap_tokens), (None, None));
+        assert_eq!(a.db, PathBuf::from("./troupekit.db"));
+        assert!(parse(&args(&["ingest", "d"])).is_err(), "no default embedder: a run must name one");
+    }
+
+    #[test]
     fn key_flag_does_not_exist() {
         for flag in ["--key", "--api-key", "--token"] {
             let r = parse(&args(&["ingest", "d", "--embedder", "hashing:8", flag, "sk-abc"]));

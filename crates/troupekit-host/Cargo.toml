@@ -13,8 +13,8 @@ autotests = false
 
 [dependencies]
 troupekit-core.workspace = true
-troupekit-agent = { path = "../troupekit-agent", version = "0.1.0", default-features = false }
-troupekit-graph = { path = "../troupekit-graph", version = "0.1.0", default-features = false }
+troupekit-agent = { path = "../troupekit-agent", version = "0.2.0", default-features = false }
+troupekit-graph = { path = "../troupekit-graph", version = "0.2.0", default-features = false }
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
@@ -27,8 +27,8 @@ reqwest = ["troupekit-agent/reqwest", "troupekit-graph/reqwest"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
-troupekit-tools = { path = "../troupekit-tools", version = "0.1.0" }
-troupekit-providers = { path = "../troupekit-providers", version = "0.1.0", default-features = false }
+troupekit-tools = { path = "../troupekit-tools", version = "0.2.0" }
+troupekit-providers = { path = "../troupekit-providers", version = "0.2.0", default-features = false }
 
 [[test]]
 name = "main"

@@ -399,7 +399,8 @@ async fn embedded_agents_take_graph_retries_and_share_one_eval_callback() {
         .await;
     assert!(built.is_ok());
     let check: troupekit_agent::EvalFn = Arc::new(|_, _| Ok(()));
-    let checked = drafter().eval("always_ok()").eval_fn("always_ok", check);
+    let base = drafter().eval("always_ok()");
+    let checked = base.clone().eval_fn("always_ok", check);
     let built = Graph::new("g")
         .agent("draft", checked.clone())
         .agent("again", checked.clone())
@@ -407,10 +408,11 @@ async fn embedded_agents_take_graph_retries_and_share_one_eval_callback() {
         .await;
     assert!(built.is_ok());
     let other: troupekit_agent::EvalFn = Arc::new(|_, _| Ok(()));
-    let text = config_error(Graph::new("g").agent("draft", checked).agent(
-        "again",
-        drafter().eval("always_ok()").eval_fn("always_ok", other),
-    ))
+    let text = config_error(
+        Graph::new("g")
+            .agent("draft", checked)
+            .agent("again", base.eval_fn("always_ok", other)),
+    )
     .await;
     assert_eq!(
         text,

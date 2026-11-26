@@ -192,7 +192,7 @@ jobs:
         run: cargo build --workspace --locked
       - name: build workspace for ios
         if: ${{ !cancelled() }}
-        run: cargo build --workspace --exclude troupekit-py --locked --target aarch64-apple-ios
+        run: cargo build --workspace --exclude troupekit-py --exclude troupekit-cli --locked --target aarch64-apple-ios
       - name: build ios without the TLS stack
         if: ${{ !cancelled() }}
         run: cargo build -p troupekit --no-default-features --features sqlite --locked --target aarch64-apple-ios
