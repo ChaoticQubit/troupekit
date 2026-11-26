@@ -59,3 +59,37 @@ impl FfiError {
         FfiError::new(ErrorCode::Unsupported, format!("{what} is not built yet"))
     }
 }
+
+impl From<troupekit_kit::KitError> for FfiError {
+    /// Maps every kit error to its stable code, with the kit's message
+    /// (which never holds a key) and the run id for run outcomes. A kit
+    /// variant added later maps to `Internal` until it gets its own code.
+    fn from(err: troupekit_kit::KitError) -> FfiError {
+        use troupekit_kit::KitError as K;
+        let message = err.to_string();
+        let (code, run_id) = match &err {
+            K::Config { .. } => (ErrorCode::Config, None),
+            K::MissingKey { .. } => (ErrorCode::MissingKey, None),
+            K::Catalog { .. } => (ErrorCode::Catalog, None),
+            K::Persona(_) => (ErrorCode::Persona, None),
+            K::Agent(_) => (ErrorCode::Agent, None),
+            K::Tool(_) => (ErrorCode::Tool, None),
+            K::Workflow(_) => (ErrorCode::Workflow, None),
+            K::Graph(_) => (ErrorCode::Graph, None),
+            K::Store(_) => (ErrorCode::Store, None),
+            #[cfg(feature = "knowledge")]
+            K::Context(_) => (ErrorCode::Context, None),
+            K::Failed { run_id, .. } => (ErrorCode::Failed, Some(run_id.to_string())),
+            K::Paused { run_id, .. } => (ErrorCode::Paused, Some(run_id.to_string())),
+            K::Retries { run_id, .. } => (ErrorCode::Retries, Some(run_id.to_string())),
+            #[allow(unreachable_patterns)]
+            _ => (ErrorCode::Internal, None),
+        };
+        assert!(!message.is_empty());
+        FfiError {
+            code,
+            message,
+            run_id,
+        }
+    }
+}

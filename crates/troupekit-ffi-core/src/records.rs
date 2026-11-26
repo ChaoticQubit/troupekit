@@ -22,6 +22,26 @@ pub struct RunResult {
     pub run_id: String,
 }
 
+impl RunResult {
+    /// Copies a kit run outcome into a plain record: the typed output
+    /// becomes JSON text and the run id its text form.
+    /// Output: the record.
+    pub(crate) fn from_outcome(outcome: &troupekit_kit::RunOutcome) -> RunResult {
+        let usage = outcome.usage();
+        RunResult {
+            text: outcome.text().to_string(),
+            output_json: outcome.output().to_string(),
+            usage: FfiUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cost_usd_micros: usage.cost_usd_micros,
+            },
+            model_calls: outcome.model_calls(),
+            run_id: outcome.run_id().to_string(),
+        }
+    }
+}
+
 /// Result of one finished graph run: the last node's output and the
 /// whole state as JSON text, `usage`, the steps taken and the run id
 /// text.
@@ -43,6 +63,25 @@ pub struct GraphResult {
 pub enum Progress {
     Done { text: String },
     Pending { run_id: String },
+}
+
+impl Progress {
+    /// Copies a kit `Progress` into the neutral one.
+    /// Output: `Done` or `Pending`, or `Internal` for a kit state added
+    /// later that has no neutral form yet.
+    pub(crate) fn from_kit(progress: troupekit_kit::Progress) -> Result<Progress, crate::FfiError> {
+        match progress {
+            troupekit_kit::Progress::Done(text) => Ok(Progress::Done { text }),
+            troupekit_kit::Progress::Pending { run_id } => Ok(Progress::Pending {
+                run_id: run_id.to_string(),
+            }),
+            #[allow(unreachable_patterns)]
+            _ => Err(crate::FfiError::new(
+                crate::ErrorCode::Internal,
+                "resume_for returned a progress state this version does not know",
+            )),
+        }
+    }
 }
 
 /// Why a run paused: a graph node waits for an approval or an answer,

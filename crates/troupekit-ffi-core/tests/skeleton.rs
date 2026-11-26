@@ -117,20 +117,23 @@ fn version_matches_core() {
 }
 
 #[tokio::test]
-async fn skeleton_calls_return_unsupported() {
+async fn unbuilt_parts_return_unsupported() {
     let err = AgentBuilder::new("helper".into())
+        .instructions("Echo.".into())
+        .tool(Arc::new(Echo))
         .build()
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Unsupported);
     assert_eq!(err.code as u32, 17);
+    assert!(err.message.contains("AgentBuilder::tool"), "{err}");
     let err = GraphBuilder::new("chain".into()).build().await.unwrap_err();
     assert_eq!(err.code, ErrorCode::Unsupported);
     assert!(err.run_id.is_none());
 }
 
 #[test]
-fn runtime_defaults_are_the_safe_values() {
+fn defaults_are_the_safe_values() {
     let settings = troupekit_ffi_core::RuntimeSettings::default();
     assert_eq!(settings.worker_threads, 2);
     assert_eq!(settings.max_input_bytes, 1024 * 1024);
