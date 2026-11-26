@@ -2,6 +2,7 @@ extern crate troupekit_kit as troupekit;
 
 mod agent;
 mod common;
+mod from_toml;
 mod graph;
 #[cfg(feature = "knowledge")]
 mod knowledge;

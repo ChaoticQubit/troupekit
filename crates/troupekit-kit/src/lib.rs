@@ -15,7 +15,7 @@ mod tool;
 #[doc(hidden)]
 pub mod __private;
 
-pub use agent::Agent;
+pub use agent::{Agent, MAX_PERSONA_BYTES};
 pub use built::{BuiltAgent, Input, RunOutcome};
 pub use error::KitError;
 pub use graph::{BuiltGraph, Graph, GraphReport};

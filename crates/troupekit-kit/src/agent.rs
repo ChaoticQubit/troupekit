@@ -17,6 +17,10 @@ use troupekit_core::secret::Secret;
 use troupekit_providers::{Catalog, Model, Price, Transport};
 use troupekit_tools::{Tool, ToolRegistry, Toolkit};
 
+mod from_toml;
+
+pub use from_toml::MAX_PERSONA_BYTES;
+
 const MAX_RETRIES: u32 = 32;
 
 pub(crate) struct Prepared {
@@ -67,6 +71,7 @@ pub struct Agent {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    persona_source: Option<from_toml::PersonaSource>,
 }
 
 impl Agent {
@@ -104,6 +109,7 @@ impl Agent {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            persona_source: None,
         }
     }
 
@@ -444,7 +450,11 @@ impl Agent {
     ) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
         crate::model::default_embedder(ModelChoice {
             agent: &self.name,
-            selector: self.model.as_deref().unwrap_or_default(),
+            selector: &self
+                .model
+                .clone()
+                .or_else(|| self.toml_selector())
+                .unwrap_or_default(),
             catalog: self.catalog.as_ref().unwrap_or_else(|| builtin_catalog()),
             client: None,
             price: None,
@@ -460,30 +470,39 @@ impl Agent {
 
     pub(crate) fn prepare(&self, model_key: Option<&str>) -> Result<Prepared, KitError> {
         let name = self.name.as_str();
-        let Some(instructions) = self.instructions.as_deref() else {
+        let toml = self.toml_source()?;
+        if toml.is_none() && self.instructions.is_none() {
             return Err(KitError::config(
                 name,
                 "needs instructions: call .instructions(..) or add a /// doc comment",
             ));
-        };
-        let Some(selector) = self.model.as_deref() else {
+        }
+        if toml.is_none() && self.model.is_none() {
             return Err(KitError::config(
                 name,
                 "needs a model: call .model(\"vendor/model\")",
             ));
-        };
+        }
         let mut registry = ToolRegistry::new();
         for tool in &self.tools {
             registry.register(tool.clone())?;
         }
         let tool_names: Vec<String> = registry.specs().into_iter().map(|s| s.name).collect();
-        let (persona, persona_text) =
-            self.persona(instructions, model_key.unwrap_or(selector), &tool_names)?;
+        let (persona, persona_text, selector) = match toml {
+            Some((source, table)) => self.toml_persona(&source, table, model_key, &tool_names)?,
+            None => {
+                let instructions = self.instructions.as_deref().expect("checked above");
+                let selector = self.model.clone().expect("checked above");
+                let (persona, text) =
+                    self.persona(instructions, model_key.unwrap_or(&selector), &tool_names)?;
+                (persona, text, selector)
+            }
+        };
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
         let handle = resolve(ModelChoice {
             agent: name,
-            selector,
+            selector: &selector,
             catalog,
             client: self.model_client.clone(),
             price: self.price,

@@ -1,5 +1,5 @@
 use crate::error::KitError;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const MAX_LAW_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_INLINE_LAW_BYTES: usize = 64 * 1024;
@@ -51,7 +51,9 @@ impl Laws {
         let mut resolved = Vec::with_capacity(paths.len());
         for path in paths {
             resolved.push(
-                check_path(path).map_err(|m| fail(format!("law file `{}` {m}", path.display())))?,
+                read_checked(path, "bend", MAX_LAW_FILE_BYTES)
+                    .map(|(absolute, _)| absolute)
+                    .map_err(|m| fail(format!("law file `{}` {m}", path.display())))?,
             );
         }
         for (i, law) in inline.iter().enumerate() {
@@ -85,18 +87,28 @@ impl Default for Laws {
     }
 }
 
-fn check_path(path: &PathBuf) -> Result<PathBuf, String> {
+/// Checks and reads one user-named file: non-empty path, no `..`, the
+/// given extension, a regular file of at most `max_bytes`, valid UTF-8.
+/// Returns the absolute path and the text, or the reason it was refused.
+/// `max_bytes` must be a whole number of MiB.
+pub(crate) fn read_checked(
+    path: &Path,
+    extension: &str,
+    max_bytes: u64,
+) -> Result<(PathBuf, String), String> {
+    assert!(max_bytes > 0 && max_bytes % (1024 * 1024) == 0);
+    let too_big = || format!("is over {} MiB", max_bytes / (1024 * 1024));
     if path.as_os_str().is_empty() {
         return Err("is empty".into());
     }
     if path.components().any(|c| c == Component::ParentDir) {
         return Err("must not contain `..`".into());
     }
-    if path.extension().is_none_or(|e| e != "bend") {
-        return Err("must be a .bend file".into());
+    if path.extension().is_none_or(|e| e != extension) {
+        return Err(format!("must be a .{extension} file"));
     }
     let absolute = if path.is_absolute() {
-        path.clone()
+        path.to_path_buf()
     } else {
         std::env::current_dir()
             .map_err(|e| format!("cannot be resolved: {e}"))?
@@ -110,15 +122,13 @@ fn check_path(path: &PathBuf) -> Result<PathBuf, String> {
     if !meta.is_file() {
         return Err("is not a regular file".into());
     }
-    if meta.len() > MAX_LAW_FILE_BYTES {
-        return Err("is over 1 MiB".into());
+    if meta.len() > max_bytes {
+        return Err(too_big());
     }
     let bytes = std::fs::read(&absolute).map_err(|e| format!("cannot be read: {e}"))?;
-    if bytes.len() as u64 > MAX_LAW_FILE_BYTES {
-        return Err("is over 1 MiB".into());
+    if bytes.len() as u64 > max_bytes {
+        return Err(too_big());
     }
-    if std::str::from_utf8(&bytes).is_err() {
-        return Err("is not valid UTF-8".into());
-    }
-    Ok(absolute)
+    let text = String::from_utf8(bytes).map_err(|_| "is not valid UTF-8".to_string())?;
+    Ok((absolute, text))
 }
