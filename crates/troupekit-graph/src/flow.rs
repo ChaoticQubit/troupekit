@@ -237,7 +237,7 @@ impl FlowKind {
     /// Converts a 0.1 node kind into its flow kind with every 0.5 option
     /// at its default: no goto, delegates or model override, no deferred
     /// entry, an all-join. Returns the flow kind.
-    fn from_v1(kind: &NodeKind) -> FlowKind {
+    pub(crate) fn from_v1(kind: &NodeKind) -> FlowKind {
         match kind {
             NodeKind::Agent { persona, prompt } => FlowKind::Agent {
                 persona: persona.clone(),

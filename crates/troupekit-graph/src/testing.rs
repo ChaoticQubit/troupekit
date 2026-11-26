@@ -77,6 +77,7 @@ struct Gates {
     open: BTreeSet<String>,
     waiting: Vec<(String, Waker)>,
     in_flight: BTreeMap<String, usize>,
+    calls: BTreeMap<String, Vec<Option<String>>>,
     total: usize,
     peak: usize,
     finished: Vec<String>,
@@ -108,10 +109,41 @@ impl GatedTool {
         reply: impl Fn(Value) -> ToolOutput + Send + Sync + 'static,
     ) -> Arc<dyn Tool> {
         let (gates, reply, gate) = (self.clone(), Arc::new(reply), name.to_string());
-        FnTool::new(name, move |args, _| {
+        FnTool::new(name, move |args, ctx| {
             let (gates, reply, gate) = (gates.clone(), reply.clone(), gate.clone());
             async move {
-                gates.enter(&gate);
+                gates.enter(&gate, ctx.idempotency_key);
+                gates.wait(&gate).await;
+                gates.leave(&gate);
+                Ok(reply(args))
+            }
+        })
+    }
+
+    /// Builds tool `name` whose calls wait on one gate per value of the
+    /// argument `key`, named `"{name}/{value}"` (a string value bare, any
+    /// other as JSON), so a test opens map items one by one. Answers with
+    /// `reply(args)`; calls and finish order are kept under the gate name.
+    pub fn tool_per_item(
+        &self,
+        name: &str,
+        key: &str,
+        reply: impl Fn(Value) -> ToolOutput + Send + Sync + 'static,
+    ) -> Arc<dyn Tool> {
+        let (gates, reply, prefix, key) = (
+            self.clone(),
+            Arc::new(reply),
+            name.to_string(),
+            key.to_string(),
+        );
+        FnTool::new(name, move |args, ctx| {
+            let (gates, reply) = (gates.clone(), reply.clone());
+            let gate = match &args[key.as_str()] {
+                Value::String(v) => format!("{prefix}/{v}"),
+                other => format!("{prefix}/{other}"),
+            };
+            async move {
+                gates.enter(&gate, ctx.idempotency_key);
                 gates.wait(&gate).await;
                 gates.leave(&gate);
                 Ok(reply(args))
@@ -157,8 +189,17 @@ impl GatedTool {
         self.gates.lock().expect("gates lock").finished.clone()
     }
 
-    fn enter(&self, name: &str) {
+    /// Returns the idempotency key of every call of tool `name` in start
+    /// order, finished or not. Its length is how many times the tool was
+    /// called; empty for a tool never called.
+    pub fn calls(&self, name: &str) -> Vec<Option<String>> {
+        let g = self.gates.lock().expect("gates lock");
+        g.calls.get(name).cloned().unwrap_or_default()
+    }
+
+    fn enter(&self, name: &str, key: Option<String>) {
         let mut g = self.gates.lock().expect("gates lock");
+        g.calls.entry(name.to_string()).or_default().push(key);
         *g.in_flight.entry(name.to_string()).or_default() += 1;
         g.total += 1;
         g.peak = g.peak.max(g.total);
@@ -276,5 +317,6 @@ mod tests {
         assert_eq!(gates.finished(), vec!["b".to_string(), "a".to_string()]);
         assert_eq!(gates.max_in_flight(), 2);
         assert_eq!(gates.in_flight("a"), 0);
+        assert_eq!(gates.calls("a"), vec![None]);
     }
 }

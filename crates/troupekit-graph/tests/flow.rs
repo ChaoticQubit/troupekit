@@ -213,6 +213,11 @@ fn map_needs_a_list_key_and_a_body_without_edges() {
         "agent, tool or flow",
     );
     refused(
+        &map_flow(MAP, &BODY.replace("\nwrites = 'y'", ""), ""),
+        "nodes.m.body",
+        "must write one value",
+    );
+    refused(
         &map_flow(&format!("{MAP}\nmax_items = 0"), BODY, ""),
         "nodes.m.max_items",
         "between 1 and 10000",

@@ -325,6 +325,34 @@ async fn bad_output_type_fails_the_run() {
 }
 
 #[tokio::test]
+async fn absent_nullable_read_is_null_for_tools_and_agents() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seen = log.clone();
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(FnTool::new("t", move |args, _| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(args);
+                Ok(ToolOutput::text("done"))
+            }
+        }))
+        .unwrap();
+    let model = FnModel::new("fake/m", |req| text_reply(&last_user(req), 10));
+    let f = fixture(model, tools, Conditions::new());
+    let text = "name = 'w'\nstart = 'a'\n[state]\nmaybe = 'string?'\nnote = 'string'\nreply = 'string'\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 't'\nreads = ['maybe']\nwrites = 'note'\n[[nodes]]\nid = 'w'\nkind = 'agent'\npersona = 'writer'\nreads = ['maybe']\nwrites = 'reply'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'w'\n[[edges]]\nfrom = 'w'\nto = 'e'\n";
+    let mut run = GraphRun::new(wf(text), Map::new(), Limits::default(), &f.io)
+        .await
+        .unwrap();
+    let GraphOutcome::Done(state) = drive(&mut run, &f.io).await else {
+        panic!("an absent nullable read does not fail the run");
+    };
+    assert_eq!(log.lock().unwrap().as_slice(), &[json!({"maybe": null})]);
+    assert!(state["reply"].as_str().unwrap().contains(r#"{"maybe":null}"#), "{state:?}");
+    assert!(!state.contains_key("maybe"));
+}
+
+#[tokio::test]
 async fn unset_read_fails_the_run() {
     let (f, _) = linear();
     let mut run = GraphRun::new(wf(LINEAR), Map::new(), Limits::default(), &f.io)
