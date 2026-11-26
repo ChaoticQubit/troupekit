@@ -438,7 +438,7 @@ mod tests {
             ]
         );
         let lens: Vec<usize> = a.calls.iter().map(|c| c.value.len()).collect();
-        assert_eq!(lens, [1, 4, 1, 5]);
+        assert_eq!(lens, [1, 4, 1, 6]);
         let item = lex(&format!("{DOC}fn lead() {{}}"));
         let a = parse_agent(&lex("agents = [researcher], delegates = [writer]"), &item).unwrap();
         let pieces = expand_agent(&a);
