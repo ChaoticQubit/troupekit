@@ -1,0 +1,37 @@
+[package]
+name = "troupekit-ffi-core"
+description = "Binding-neutral Troupekit API: plain Rust handles, records and host traits that the UniFFI and PyO3 adapters translate."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version = "1.89"
+
+[dependencies]
+troupekit-core.workspace = true
+troupekit-kit = { path = "../troupekit-kit", version = "0.1.0", default-features = false }
+troupekit-agent = { path = "../troupekit-agent", version = "0.1.0", default-features = false }
+troupekit-tools = { path = "../troupekit-tools", version = "0.1.0", default-features = false }
+troupekit-graph = { path = "../troupekit-graph", version = "0.1.0", default-features = false }
+troupekit-providers = { path = "../troupekit-providers", version = "0.1.0", default-features = false }
+troupekit-context = { path = "../troupekit-context", version = "0.1.0", optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync"] }
+async-trait.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["sqlite", "reqwest", "knowledge"]
+sqlite = ["troupekit-kit/sqlite"]
+reqwest = ["troupekit-kit/reqwest"]
+knowledge = ["troupekit-kit/knowledge", "dep:troupekit-context"]
+
+[lints.cargo]
+unused_dependencies = "allow"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tempfile = "3"
