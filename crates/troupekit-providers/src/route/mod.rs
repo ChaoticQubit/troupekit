@@ -2,12 +2,17 @@
 //! and network or device signals, and `RoutedModel`, a `Model` that tries
 //! the planned targets in order. A private request never leaves the device.
 
+mod decide;
 mod policy;
+mod signals;
+
+pub use decide::{decide, BoundTarget, RoutePlan};
 
 pub use policy::{
     BudgetPolicy, DevicePolicy, FallbackPolicy, NetworkMode, NetworkPolicy, RoutePolicy,
     RouteTarget, Thermal,
 };
+pub use signals::{DeviceState, NetworkProbe, NetworkState, PassiveProbe, RouteTags, Signals};
 
 /// Why a route policy could not be loaded or a routed model built.
 /// `Parse` is bad TOML or an unknown key, `Invalid` a value that breaks a

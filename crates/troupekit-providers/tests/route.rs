@@ -184,3 +184,232 @@ fn bounds_are_enforced() {
     .unwrap();
     assert_eq!(ok_zero_budget.budget().cloud_usd_micros_per_day(), Some(0));
 }
+
+use std::sync::Arc;
+use troupekit_core::clock::FixedClock;
+use troupekit_providers::route::{
+    decide, BoundTarget, DeviceState, NetworkProbe, NetworkState, PassiveProbe, RoutePlan,
+    RouteTags, Signals,
+};
+
+const OFFICE: &str = r#"
+name = "office"
+default = "cloud"
+order = ["local", "cloud", "phone"]
+[[target]]
+id = "local"
+tiers = ["small"]
+context_tokens = 4096
+[[target]]
+id = "cloud"
+tiers = ["large"]
+[[target]]
+id = "phone"
+tiers = ["small"]
+context_tokens = 100000
+[budget]
+cloud_usd_per_day = 1.0
+[device]
+min_battery_percent = 20
+max_thermal = "fair"
+"#;
+
+fn office() -> RoutePolicy {
+    RoutePolicy::parse("office.toml", OFFICE).unwrap()
+}
+
+fn bound() -> Vec<BoundTarget> {
+    vec![
+        BoundTarget::on_device("local"),
+        BoundTarget::remote("cloud"),
+        BoundTarget::on_device("phone"),
+    ]
+}
+
+fn ids(plan: &RoutePlan) -> Vec<&str> {
+    plan.targets().iter().map(|t| t.id()).collect()
+}
+
+#[test]
+fn offline_plans_only_local() {
+    let signals = Signals::default().with_online(Some(false));
+    let plan = decide(&office(), &bound(), &RouteTags::default(), &signals);
+    assert_eq!(ids(&plan), ["local", "phone"]);
+    assert!(plan.targets().iter().all(|t| t.is_on_device()));
+    let online = decide(
+        &office(),
+        &bound(),
+        &RouteTags::default(),
+        &Signals::default().with_online(Some(true)),
+    );
+    assert_eq!(ids(&online), ["cloud", "local", "phone"]);
+    let unknown = decide(
+        &office(),
+        &bound(),
+        &RouteTags::default(),
+        &Signals::default(),
+    );
+    assert_eq!(ids(&unknown), ["cloud", "local", "phone"]);
+}
+
+#[test]
+fn private_plans_only_on_device_even_when_online() {
+    let tags = RouteTags::default().with_private(true);
+    let signals = Signals::default().with_online(Some(true));
+    let plan = decide(&office(), &bound(), &tags, &signals);
+    assert_eq!(ids(&plan), ["local", "phone"]);
+    plan.assert_lawful(&tags);
+}
+
+#[test]
+fn tier_selects_listed_targets() {
+    let small = decide(
+        &office(),
+        &bound(),
+        &RouteTags::default().with_tier("small"),
+        &Signals::default(),
+    );
+    assert_eq!(ids(&small), ["local", "phone"]);
+    let large = decide(
+        &office(),
+        &bound(),
+        &RouteTags::default().with_tier("large"),
+        &Signals::default(),
+    );
+    assert_eq!(ids(&large), ["cloud"]);
+    let none = decide(
+        &office(),
+        &bound(),
+        &RouteTags::default().with_tier("huge"),
+        &Signals::default(),
+    );
+    assert!(none.is_empty());
+    assert!(none.reason().contains("tier"));
+}
+
+#[test]
+fn oversized_prompt_skips_local() {
+    let signals = Signals::default()
+        .with_prompt_tokens(4000)
+        .with_max_tokens(200);
+    let plan = decide(&office(), &bound(), &RouteTags::default(), &signals);
+    assert_eq!(ids(&plan), ["cloud", "phone"]);
+    let fits = Signals::default()
+        .with_prompt_tokens(3896)
+        .with_max_tokens(200);
+    let plan = decide(&office(), &bound(), &RouteTags::default(), &fits);
+    assert_eq!(ids(&plan), ["cloud", "local", "phone"]);
+}
+
+#[test]
+fn low_battery_skips_local() {
+    let low = Signals::default().with_battery_percent(Some(19));
+    let plan = decide(&office(), &bound(), &RouteTags::default(), &low);
+    assert_eq!(ids(&plan), ["cloud"]);
+    let ok = Signals::default().with_battery_percent(Some(20));
+    assert_eq!(
+        ids(&decide(&office(), &bound(), &RouteTags::default(), &ok)),
+        ["cloud", "local", "phone"]
+    );
+    let hot = Signals::default().with_thermal(Some(Thermal::Serious));
+    assert_eq!(
+        ids(&decide(&office(), &bound(), &RouteTags::default(), &hot)),
+        ["cloud"]
+    );
+    let fair = Signals::default().with_thermal(Some(Thermal::Fair));
+    assert_eq!(
+        ids(&decide(&office(), &bound(), &RouteTags::default(), &fair)),
+        ["cloud", "local", "phone"]
+    );
+
+    let device = DeviceState::new();
+    assert_eq!(device.battery_percent(), None);
+    assert_eq!(device.thermal(), None);
+    device.set_battery_percent(Some(55));
+    device.set_thermal(Some(Thermal::Critical));
+    let shared = device.clone();
+    assert_eq!(shared.battery_percent(), Some(55));
+    assert_eq!(shared.thermal(), Some(Thermal::Critical));
+    device.set_battery_percent(None);
+    assert_eq!(shared.battery_percent(), None);
+}
+
+#[test]
+fn exhausted_budget_skips_cloud() {
+    let spent = Signals::default().with_cloud_spent_today_usd_micros(1_000_000);
+    let plan = decide(&office(), &bound(), &RouteTags::default(), &spent);
+    assert_eq!(ids(&plan), ["local", "phone"]);
+    let under = Signals::default().with_cloud_spent_today_usd_micros(999_999);
+    assert_eq!(
+        ids(&decide(&office(), &bound(), &RouteTags::default(), &under)),
+        ["cloud", "local", "phone"]
+    );
+}
+
+#[test]
+fn empty_plan_when_private_and_no_local_target() {
+    let remote_only = vec![
+        BoundTarget::remote("local"),
+        BoundTarget::remote("cloud"),
+        BoundTarget::remote("phone"),
+    ];
+    let tags = RouteTags::default().with_private(true);
+    let plan = decide(&office(), &remote_only, &tags, &Signals::default());
+    assert!(plan.is_empty());
+    assert!(plan.reason().contains("private"));
+    plan.assert_lawful(&tags);
+
+    let unbound = decide(
+        &office(),
+        &[BoundTarget::remote("cloud")],
+        &RouteTags::default().with_tier("small"),
+        &Signals::default(),
+    );
+    assert!(unbound.is_empty());
+}
+
+#[test]
+fn passive_probe_marks_offline_then_retries() {
+    let policy = RoutePolicy::parse(
+        "p.toml",
+        "name = \"p\"\n[[target]]\nid = \"a\"\n[network]\noffline_after_failures = 2\nretry_online_after_ms = 1000\n",
+    )
+    .unwrap();
+    let clock = Arc::new(FixedClock::new(5_000));
+    let probe = PassiveProbe::new(policy.network()).with_clock(clock.clone());
+    assert_eq!(probe.online(), None);
+    probe.record_remote(true);
+    assert_eq!(probe.online(), None);
+    probe.record_remote(true);
+    assert_eq!(probe.online(), Some(false));
+    clock.advance(999);
+    assert_eq!(probe.online(), Some(false));
+    clock.advance(1);
+    assert_eq!(probe.online(), None);
+    probe.record_remote(true);
+    assert_eq!(probe.online(), Some(false));
+    clock.advance(1000);
+    assert_eq!(probe.online(), None);
+    probe.record_remote(false);
+    assert_eq!(probe.online(), None);
+    probe.record_remote(true);
+    assert_eq!(probe.online(), None);
+
+    let state = NetworkState::new();
+    assert_eq!(state.online(), None);
+    state.set(Some(false));
+    let shared = state.clone();
+    assert_eq!(shared.online(), Some(false));
+    state.set(Some(true));
+    assert_eq!(shared.online(), Some(true));
+}
+
+#[test]
+#[should_panic(expected = "private plan names a remote target")]
+fn private_assert_fires_on_forged_plan() {
+    let forged = RoutePlan::forged(vec![
+        BoundTarget::on_device("local"),
+        BoundTarget::remote("cloud"),
+    ]);
+    forged.assert_lawful(&RouteTags::default().with_private(true));
+}
