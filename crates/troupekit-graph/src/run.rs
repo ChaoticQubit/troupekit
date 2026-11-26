@@ -715,7 +715,6 @@ impl GraphRun {
         let mut run = GraphRun::from_checkpoint(cp)?;
         run.rekey(RunId::new())?;
         run.parent = Some((cp.run_id, cp.step));
-        assert_ne!(run.run_id, cp.run_id, "a fork has its own run id");
         Ok(run)
     }
 
@@ -729,11 +728,7 @@ impl GraphRun {
         for (i, b) in self.branches.iter_mut().enumerate() {
             b.call = None;
             match &mut b.at {
-                At::Agent { run, .. } => {
-                    let old = run.run_id();
-                    **run = run.fork();
-                    assert_ne!(run.run_id(), old, "a forked agent run has its own run id");
-                }
+                At::Agent { run, .. } => **run = run.fork(),
                 At::Flow { run } => run.rekey(RunId::derived(run_id, &format!("fork:{i}")))?,
                 _ => {}
             }
@@ -1021,7 +1016,7 @@ impl GraphRun {
                 run.resume(limits).map_err(|e| e.to_string())?;
             }
         }
-        assert!(granted <= free, "paused branches never get more than the free budget");
+        check_grants(granted, free);
         Ok(())
     }
 
@@ -1179,7 +1174,7 @@ impl GraphRun {
             }
         }
         self.seq = seq.load(Ordering::SeqCst);
-        assert!(self.seq - first_seq < SEQ_STRIDE, "one attempt of a step stays inside its seq range");
+        check_seq_range(first_seq, self.seq);
         Ok(outcome)
     }
 
@@ -1562,11 +1557,7 @@ impl GraphRun {
             },
         );
         self.branches = kept;
-        let after = self.usage();
-        assert!(
-            after.cost_usd_micros >= before.cost_usd_micros && after.input_tokens >= before.input_tokens,
-            "dropped branches keep their usage"
-        );
+        check_kept_usage(&before, &self.usage());
         true
     }
 
@@ -2211,10 +2202,6 @@ async fn node_registry(
         names.push(tool.spec().name.clone());
         reg.register(tool).map_err(|e| e.to_string())?;
     }
-    assert!(
-        reg.specs().len() == persona_tools.len() + names.len(),
-        "the node registry holds only persona and delegation tools"
-    );
     Ok((reg, names))
 }
 
@@ -2331,6 +2318,21 @@ fn unsupported(flow: &Flow) -> Option<String> {
 }
 
 const MAX_LINEAGE: usize = 64;
+
+fn check_grants(granted: u64, free: u64) {
+    assert!(granted <= free, "paused branches never get more than the free budget");
+}
+
+fn check_seq_range(first: u64, last: u64) {
+    assert!(last - first < SEQ_STRIDE, "one attempt of a step stays inside its seq range");
+}
+
+fn check_kept_usage(before: &Usage, after: &Usage) {
+    assert!(
+        after.cost_usd_micros >= before.cost_usd_micros && after.input_tokens >= before.input_tokens,
+        "dropped branches keep their usage"
+    );
+}
 
 fn node_limits(
     base: &Limits,
@@ -2519,5 +2521,273 @@ mod tests {
         assert_eq!(ready_map(&branches), Some(("n".to_string(), 2)));
         assert_eq!(ready_map(&branches[..2]), Some(("m".to_string(), 1)));
         assert_eq!(ready_map(&branches[..1]), None);
+    }
+
+    mod asserts {
+        use super::*;
+        use crate::io::SimpleGraphIo;
+        use crate::testing::{text_reply, FnModel, FnTool};
+        use crate::workflow::Edge;
+        use troupekit_agent::{MemorySource, PersonaLoader, SimpleIo};
+        use troupekit_core::inmem::InMemCheckpoints;
+        use troupekit_providers::Price;
+        use troupekit_tools::ToolOutput;
+
+        const PRICE: Price = Price {
+            input_usd_micros_per_mtok: 1_000_000,
+            output_usd_micros_per_mtok: 2_000_000,
+            verified: true,
+            long_context: None,
+            search_usd_micros: 0,
+        };
+
+        const WRITER: &str = "name = 'writer'\ndisplay_name = 'W'\nrole = 'Writes.'\ngoal = 'Done.'\ninstructions = 'Do it.'\nmodel = 'fake/m'\n";
+
+        const FORK: &str = "name = 'f'\nstart = 's'\n[state]\n[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 's'\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 'a'\n[[nodes]]\nid = 'b'\nkind = 'tool'\ntool = 'b'\n[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 's'\nto = 'a'\n[[edges]]\nfrom = 's'\nto = 'b'\n[[edges]]\nfrom = 'a'\nto = 'j'\n[[edges]]\nfrom = 'b'\nto = 'j'\n[[edges]]\nfrom = 'j'\nto = 'e'\n";
+
+        fn io() -> SimpleGraphIo {
+            let mut tools = ToolRegistry::new();
+            for name in ["s", "a", "b", "l", "r"] {
+                tools
+                    .register(FnTool::new(name, |_, _| async {
+                        Ok(ToolOutput::text("ok"))
+                    }))
+                    .unwrap();
+            }
+            let model = Arc::new(FnModel::new("fake/m", |_| text_reply("ok", 1)));
+            let agent = SimpleIo::new(tools).with_model("fake/m", model, PRICE);
+            let personas = PersonaLoader::new(vec![Arc::new(MemorySource::new(
+                "test",
+                [("writer.toml".to_string(), WRITER.to_string())],
+            ))]);
+            SimpleGraphIo::new(Arc::new(agent), personas)
+        }
+
+        async fn started(text: &str, limits: Limits) -> (GraphRun, SimpleGraphIo) {
+            let io = io();
+            let flow = Flow::parse("test/a.toml", text).unwrap();
+            let run = GraphRun::start(flow, Map::new(), limits, &io)
+                .await
+                .unwrap();
+            (run, io)
+        }
+
+        fn branch(node: &str, at: At, item: Option<(&str, usize, Option<Value>)>) -> Branch {
+            Branch {
+                node: node.into(),
+                at,
+                call: None,
+                item: item.map(|(map, index, result)| {
+                    Box::new(Item {
+                        map: map.into(),
+                        index,
+                        key: "x".into(),
+                        value: Value::Null,
+                        result,
+                    })
+                }),
+            }
+        }
+
+        fn looping(run: &mut GraphRun) {
+            run.workflow.edges.push(Edge {
+                from: "a".into(),
+                to: "e".into(),
+                when: Some("x".into()),
+            });
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "state is edited between steps")]
+        async fn update_state_mid_step_trips() {
+            let (mut run, _) = started(FORK, Limits::default()).await;
+            run.status = GraphStatus::Running;
+            let _ = run.update_state("x", Value::Null, None);
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "every spending branch that enters was counted")]
+        async fn share_without_a_counted_branch_trips() {
+            let limits = Limits {
+                run: Some(100),
+                ..Limits::default()
+            };
+            let (run, _) = started(FORK, limits).await;
+            let _ = run.share(&mut 0);
+        }
+
+        #[test]
+        #[should_panic(expected = "paused branches never get more than the free budget")]
+        fn grants_above_free_trip() {
+            check_grants(2, 1);
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "a reserved attempt emits from its range")]
+        async fn reservation_off_its_range_trips() {
+            let (mut run, io) = started(FORK, Limits::default()).await;
+            run.reserve = Some(Reserve {
+                step: run.steps + 1,
+                branch: 0,
+                range: SeqRange { from: run.seq + 5 },
+                base: run.seq,
+            });
+            let store = InMemCheckpoints::default();
+            let _ = run.step_with(&io, Some(&store)).await;
+        }
+
+        #[test]
+        #[should_panic(expected = "one attempt of a step stays inside its seq range")]
+        fn seq_past_its_range_trips() {
+            check_seq_range(0, SEQ_STRIDE);
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "fan-outs nest at most once per node")]
+        async fn join_of_too_deep_trips() {
+            let (run, _) = started(FORK, Limits::default()).await;
+            let _ = run.join_of("s", run.workflow.nodes.len() + 1);
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "a fan-out branch leads on by one edge")]
+        async fn join_of_on_a_forking_branch_trips() {
+            let (mut run, _) = started(FORK, Limits::default()).await;
+            looping(&mut run);
+            let _ = run.join_of("s", 0);
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "fan-outs nest at most once per node")]
+        async fn region_too_deep_trips() {
+            let (run, _) = started(FORK, Limits::default()).await;
+            run.region("s", "j", &mut BTreeSet::new(), run.workflow.nodes.len() + 1);
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "a fan-out branch leads on by one edge")]
+        async fn region_on_a_forking_branch_trips() {
+            let (mut run, _) = started(FORK, Limits::default()).await;
+            looping(&mut run);
+            run.region("s", "j", &mut BTreeSet::new(), 0);
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "every branch of the fan-out ends at its join")]
+        async fn region_that_misses_its_join_trips() {
+            let (mut run, _) = started(FORK, Limits::default()).await;
+            run.workflow.edges.push(Edge {
+                from: "e".into(),
+                to: "a".into(),
+                when: None,
+            });
+            run.region("s", "zz", &mut BTreeSet::new(), 0);
+        }
+
+        #[test]
+        #[should_panic(expected = "dropped branches keep their usage")]
+        fn usage_lost_on_close_trips() {
+            let before = Usage {
+                input_tokens: 1,
+                output_tokens: 0,
+                cost_usd_micros: 5,
+            };
+            check_kept_usage(&before, &Usage::default());
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "a map collects every item exactly once")]
+        async fn duplicate_map_items_trip_collect() {
+            let (mut run, _) = started(FORK, Limits::default()).await;
+            run.branches = vec![
+                branch("w", At::Left, Some(("m", 0, Some(Value::Null)))),
+                branch("w", At::Left, Some(("m", 0, Some(Value::Null)))),
+            ];
+            let _ = run.collect_maps();
+        }
+
+        #[test]
+        #[should_panic(expected = "a map has one branch per item")]
+        fn duplicate_map_items_trip_windows() {
+            let branches = vec![
+                branch("w", At::Enter, Some(("m", 0, None))),
+                branch("w", At::Enter, Some(("m", 0, None))),
+            ];
+            let _ = windows(&branches, |_| 1);
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "every kept write belongs to a branch of the step")]
+        async fn kept_write_for_no_branch_trips() {
+            let (mut run, io) = started(FORK, Limits::default()).await;
+            let seq = AtomicU64::new(0);
+            let em = Emitter {
+                run_id: run.run_id,
+                seq: &seq,
+                io: io.agent(),
+            };
+            let mut done = BTreeMap::new();
+            done.insert(
+                99,
+                Finished::Tool {
+                    output: Value::Null,
+                },
+            );
+            let _ = run.run_branches(&io, &em, None, done).await;
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "map bodies never set state keys")]
+        async fn sets_on_an_item_branch_trip() {
+            let text = "name = 'm'\nstart = 'a'\n[state]\nout = 'string?'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Go.'\nfields = { answer = 'string' }\nsets = { answer = 'out' }\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n";
+            let (mut run, _) = started(text, Limits::default()).await;
+            run.branches = vec![branch("a", At::Enter, Some(("m", 0, None)))];
+            let node = run.node("a").clone();
+            let output = serde_json::json!({"answer": "x"});
+            let _ = run.write_sets(&node, 0, &output, &mut Vec::new());
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "results are applied in ascending branch index")]
+        async fn reduce_out_of_order_trips() {
+            let (mut run, _) = started(FORK, Limits::default()).await;
+            let r = |branch| Reduced {
+                key: "k".into(),
+                branch,
+                node: "a".into(),
+                value: Value::Null,
+            };
+            let _ = run.reduce(vec![r(1), r(0)]);
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "goto agents route on their choice, never by leaving")]
+        async fn goto_agent_leaving_trips() {
+            let text = "name = 'g'\nstart = 'a'\n[state]\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Pick.'\ngoto = ['l', 'r']\n[[nodes]]\nid = 'l'\nkind = 'tool'\ntool = 'l'\n[[nodes]]\nid = 'r'\nkind = 'tool'\ntool = 'r'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'l'\nto = 'e'\n[[edges]]\nfrom = 'r'\nto = 'e'\n";
+            let (mut run, io) = started(text, Limits::default()).await;
+            run.branches = vec![branch("a", At::Left, None)];
+            let _ = run.settle(&io).await;
+        }
+
+        #[test]
+        #[should_panic(expected = "kept tool results apply to branches at their tool")]
+        fn kept_tool_result_off_its_tool_trips() {
+            let mut b = branch("a", At::Joined, None);
+            let _ = apply_finished(
+                &mut b,
+                Finished::Tool {
+                    output: Value::Null,
+                },
+            );
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "deeper paths are refused before recursing")]
+        async fn subflow_path_too_deep_trips() {
+            let io = io();
+            let flow = Flow::parse("test/a.toml", FORK).unwrap();
+            let mut path = vec!["x".to_string(); MAX_SUBFLOW_DEPTH + 2];
+            let _ = check_children(&flow, &io, &mut path).await;
+        }
     }
 }

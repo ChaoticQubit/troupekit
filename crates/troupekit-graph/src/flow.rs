@@ -592,4 +592,56 @@ to = "done"
         let back: Flow = serde_json::from_value(serde_json::to_value(&flow).unwrap()).unwrap();
         assert_eq!(back, flow);
     }
+
+    const ONE: &str = "name = 'w'\nstart = 'a'\n[state]\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 't'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n";
+
+    #[test]
+    #[should_panic(expected = "writes are applied in ascending branch index")]
+    fn reduce_out_of_order_trips() {
+        let _ = Reducer::Last.reduce(
+            None,
+            &[(1, serde_json::json!(1)), (0, serde_json::json!(2))],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "one kind per node")]
+    fn from_parts_with_a_missing_kind_trips() {
+        let wf = Workflow::parse("test/w.toml", ONE).unwrap();
+        let _ = Flow::from_parts(
+            wf,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Vec::new(),
+            BudgetSplit::Even,
+            false,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "every node has a kind")]
+    fn from_parts_with_a_stray_kind_trips() {
+        let wf = Workflow::parse("test/w.toml", ONE).unwrap();
+        let kinds = [("a", FlowKind::End), ("zz", FlowKind::End)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let _ = Flow::from_parts(
+            wf,
+            kinds,
+            BTreeMap::new(),
+            Vec::new(),
+            BudgetSplit::Even,
+            false,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "workflow node ids are unique")]
+    fn from_a_workflow_with_duplicate_ids_trips() {
+        let mut wf = Workflow::parse("test/w.toml", ONE).unwrap();
+        let again = wf.nodes[0].clone();
+        wf.nodes.push(again);
+        let _ = Flow::from(wf);
+    }
 }

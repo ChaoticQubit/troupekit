@@ -10,6 +10,18 @@ use troupekit_agent::persona::valid_name;
 use troupekit_tools::valid_tool_name;
 
 const MAX_FAN_OUT_DEPTH: usize = 4;
+
+fn check_header(wf: &Workflow) {
+    assert_eq!(wf.nodes.len(), 1, "the header workflow holds one node");
+}
+
+fn check_walk(walked: usize, limit: usize) {
+    assert!(walked <= limit, "choice-free cycles are rejected, so every walk ends");
+}
+
+fn check_join_inputs(inputs: usize, in_degree: usize) {
+    assert_eq!(inputs, in_degree, "join inputs count every edge, goto edges included");
+}
 const DEFAULT_MAX_ITEMS: u32 = 256;
 const MAX_ITEMS_RANGE: std::ops::RangeInclusive<i64> = 1..=10_000;
 const DEFAULT_CONCURRENCY: u32 = 8;
@@ -205,7 +217,7 @@ fn header(file: &str, raw: &FlowFile) -> Result<Workflow, WorkflowError> {
     table.insert("nodes".into(), toml::Value::Array(vec![end.into()]));
     let text = toml::to_string(&table).expect("a toml table serializes");
     let mut wf = Workflow::parse(file, &text)?;
-    assert_eq!(wf.nodes.len(), 1, "the header workflow holds one node");
+    check_header(&wf);
     wf.start = raw.start.clone();
     Ok(wf)
 }
@@ -1032,10 +1044,7 @@ impl<'a> Graph<'a> {
             let mut walked = 0;
             loop {
                 walked += 1;
-                assert!(
-                    walked <= limit,
-                    "choice-free cycles are rejected, so every walk ends"
-                );
+                check_walk(walked, limit);
                 let s = self.spec(cur).expect("edge ends checked");
                 if matches!(s.kind, FlowKind::Join { .. }) {
                     break;
@@ -1111,11 +1120,7 @@ impl<'a> Graph<'a> {
                     .map(move |_| from)
             })
             .collect();
-        assert_eq!(
-            inputs.len(),
-            self.in_degree(j),
-            "join inputs count every edge, goto edges included"
-        );
+        check_join_inputs(inputs.len(), self.in_degree(j));
         if inputs.len() != tails.len() || inputs.iter().any(|i| !tails.contains(i)) {
             return Err(nf(
                 j,
@@ -1127,5 +1132,46 @@ impl<'a> Graph<'a> {
             writes: owner.into_keys().collect(),
             depth: deepest,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "the header workflow holds one node")]
+    fn header_with_more_nodes_trips() {
+        let wf = Workflow::parse(
+            "test/w.toml",
+            "name = 'w'\nstart = 'a'\n[state]\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 't'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n",
+        )
+        .unwrap();
+        check_header(&wf);
+    }
+
+    #[test]
+    #[should_panic(expected = "choice-free cycles are rejected, so every walk ends")]
+    fn walk_past_its_bound_trips() {
+        check_walk(3, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "join inputs count every edge, goto edges included")]
+    fn join_inputs_off_in_degree_trip() {
+        check_join_inputs(1, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "deeper fan-outs are refused before recursing")]
+    fn fan_out_too_deep_trips() {
+        let specs = vec![Spec {
+            id: "a".into(),
+            kind: FlowKind::End,
+            reads: Vec::new(),
+            writes: None,
+        }];
+        let graph = Graph::new(&specs, &[], "a");
+        let _ = graph.fan_out("a", MAX_FAN_OUT_DEPTH + 1, &BTreeMap::new());
     }
 }

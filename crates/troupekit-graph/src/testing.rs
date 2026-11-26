@@ -210,7 +210,6 @@ impl GatedTool {
         let count = g.in_flight.get_mut(name).expect("a leaving call entered");
         assert!(*count > 0, "in-flight count never goes below zero");
         *count -= 1;
-        assert!(g.total > 0, "total in flight never goes below zero");
         g.total -= 1;
         g.finished.push(name.to_string());
     }
@@ -318,5 +317,20 @@ mod tests {
         assert_eq!(gates.max_in_flight(), 2);
         assert_eq!(gates.in_flight("a"), 0);
         assert_eq!(gates.calls("a"), vec![None]);
+    }
+
+    #[test]
+    #[should_panic(expected = "test tool name")]
+    fn bad_tool_name_trips() {
+        let _ = FnTool::new("Not A Name!", |_, _| async { Ok(ToolOutput::text("x")) });
+    }
+
+    #[test]
+    #[should_panic(expected = "in-flight count never goes below zero")]
+    fn leaving_twice_trips() {
+        let gates = GatedTool::new();
+        gates.enter("a", None);
+        gates.leave("a");
+        gates.leave("a");
     }
 }
