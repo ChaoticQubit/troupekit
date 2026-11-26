@@ -11,7 +11,7 @@ mod sampler;
 pub use model::{LlamaModel, LlamaSettings};
 
 use std::ffi::CStr;
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 
 static BACKEND: Once = Once::new();
 
@@ -23,10 +23,15 @@ pub(crate) fn init_backend() {
 }
 
 /// Returns llama.cpp's backend and CPU feature summary, initializing the
-/// backends first. Input: none.
+/// backends first. Calls are serialized: llama.cpp rewrites one static
+/// buffer per call. Input: none.
 /// Output: the summary text, empty if llama.cpp returns none.
 pub fn system_info() -> String {
+    static NATIVE: Mutex<()> = Mutex::new(());
     init_backend();
+    let _held = NATIVE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let ptr = unsafe { ffi::tk_system_info() };
     if ptr.is_null() {
         return String::new();

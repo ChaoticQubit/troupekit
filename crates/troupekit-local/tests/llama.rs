@@ -44,6 +44,25 @@ fn llama_backend_initializes() {
 }
 
 #[test]
+fn system_info_is_stable_across_threads() {
+    let first = troupekit_local::llama::system_info();
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(|| {
+                (0..200)
+                    .map(|_| troupekit_local::llama::system_info())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    for t in threads {
+        for info in t.join().expect("thread") {
+            assert_eq!(info, first);
+        }
+    }
+}
+
+#[test]
 fn tokenize_round_trips_ascii() {
     let model = load();
     let text = "The quick brown fox jumps over the lazy dog.";
@@ -227,4 +246,28 @@ fn generate_emits_a_model_local_span() {
         "{lines:?}"
     );
     assert!(lines.iter().any(|l| l.contains("decode_tps")), "{lines:?}");
+}
+
+#[test]
+fn reset_from_the_token_callback_does_not_deadlock() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let model = load();
+        let p = prompt(&model, "Count to ten.");
+        model
+            .generate(&p, &greedy(8), &mut |_| {
+                model.reset();
+                Flow::Stop
+            })
+            .expect("generates");
+        let again = model
+            .generate(&p, &greedy(1), &mut |_| Flow::Continue)
+            .expect("generates again");
+        tx.send(again.metrics().reused_prefix_tokens())
+            .expect("send");
+    });
+    let reused = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("generation finished; reset in the callback must not deadlock");
+    assert_eq!(reused, 0, "the reset took effect before the next call");
 }

@@ -56,7 +56,8 @@ pub trait LocalModel: Send + Sync {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LocalError>;
 
     /// Drops any cached prompt state, so the next call reuses no prefix.
-    /// Input: none. Output: none.
+    /// Never blocks: called while a call runs (also from its `on_token`
+    /// callback), it takes effect before the next call. Input: none.
     fn reset(&self);
 
     /// Counts the tokens of `text` with `tokenize`, control tokens not

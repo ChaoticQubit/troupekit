@@ -7,7 +7,7 @@ use std::ffi::{c_char, CString};
 use std::io::Read;
 use std::path::Path;
 use std::ptr::NonNull;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 use troupekit_trace::Trace;
@@ -142,6 +142,7 @@ struct State {
 pub struct LlamaModel {
     model: NonNull<ffi::TkModel>,
     state: Mutex<State>,
+    reset_pending: AtomicBool,
     info: LocalInfo,
     n_ctx: usize,
     n_batch: usize,
@@ -248,6 +249,7 @@ impl LlamaModel {
                 ctx,
                 cached: Vec::new(),
             }),
+            reset_pending: AtomicBool::new(false),
             info: LocalInfo::new(n_ctx, vocab as usize, dims, template == 1),
             n_ctx,
             n_batch,
@@ -256,15 +258,18 @@ impl LlamaModel {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        match self.state.lock() {
+        let mut guard = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 let mut guard = poisoned.into_inner();
-                unsafe { ffi::tk_kv_clear(guard.ctx.as_ptr()) };
-                guard.cached.clear();
+                clear(&mut guard);
                 guard
             }
+        };
+        if self.reset_pending.swap(false, Ordering::SeqCst) {
+            clear(&mut guard);
         }
+        guard
     }
 
     fn check_tokens(&self, tokens: &[u32]) -> Result<Vec<i32>, LocalError> {
@@ -597,9 +602,12 @@ impl LocalModel for LlamaModel {
     }
 
     fn reset(&self) {
-        let mut state = self.lock();
-        unsafe { ffi::tk_kv_clear(state.ctx.as_ptr()) };
-        state.cached.clear();
+        self.reset_pending.store(true, Ordering::SeqCst);
+        if let Ok(mut state) = self.state.try_lock() {
+            if self.reset_pending.swap(false, Ordering::SeqCst) {
+                clear(&mut state);
+            }
+        }
     }
 }
 
@@ -912,4 +920,9 @@ fn check_gguf_file(path: &Path) -> Result<(), LocalError> {
         )));
     }
     Ok(())
+}
+
+fn clear(state: &mut State) {
+    unsafe { ffi::tk_kv_clear(state.ctx.as_ptr()) };
+    state.cached.clear();
 }

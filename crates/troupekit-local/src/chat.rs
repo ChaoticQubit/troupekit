@@ -252,7 +252,8 @@ impl LocalChat {
             .with_confidence(self.settings.min_confidence.is_some())
             .with_cancel(Some(cancel));
         let prompt_tokens = prompt.len();
-        let mut gate = TextGate::new(!req.tools.is_empty());
+        let require_call = self.settings.tool_mode == ToolMode::Required && !req.tools.is_empty();
+        let mut gate = TextGate::new(!req.tools.is_empty(), require_call);
         let generation = self.generate(prompt, params, &mut gate, on_delta).await?;
         self.check_confidence(&generation)?;
         let earlier_calls = req
@@ -283,6 +284,12 @@ impl LocalChat {
             } => Some((id.clone(), name.clone(), arguments.to_string())),
             _ => None,
         });
+        if require_call && call.is_none() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Server,
+                "local model answered in text, but tool_mode Required needs a tool call",
+            ));
+        }
         match &call {
             Some((id, name, json)) => {
                 on_delta(&Delta::ToolCallStarted {
@@ -413,13 +420,13 @@ enum GateState {
 }
 
 impl TextGate {
-    fn new(tools: bool) -> Self {
+    fn new(tools: bool, hold_all: bool) -> Self {
         Self {
             buffer: String::new(),
-            state: if tools {
-                GateState::Deciding
-            } else {
-                GateState::Text
+            state: match (tools, hold_all) {
+                (_, true) => GateState::Held,
+                (true, false) => GateState::Deciding,
+                (false, false) => GateState::Text,
             },
         }
     }

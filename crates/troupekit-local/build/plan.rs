@@ -23,6 +23,10 @@ pub struct Probe {
     pub host_is_target: bool,
     pub metal_env: Option<String>,
     pub android_ndk: Option<PathBuf>,
+    pub cmake_generator: Option<String>,
+    pub toolchain_file: Option<PathBuf>,
+    pub target_cc: Option<String>,
+    pub target_cxx: Option<String>,
 }
 
 /// Libraries the final binary links: static archives in link order,
@@ -129,16 +133,19 @@ pub fn decide(p: &Probe) -> Result<Plan, String> {
             args.push("-DANDROID_STL=c++_static".to_string());
         }
         "windows" if p.target_env == "msvc" => {
-            args.push("-A".to_string());
-            args.push(
-                if p.target_arch == "aarch64" {
-                    "ARM64"
-                } else {
-                    "x64"
-                }
-                .to_string(),
-            );
+            let platform = msvc_platform(&p.target_arch)?;
+            let visual_studio = p
+                .cmake_generator
+                .as_deref()
+                .map_or(true, |g| g.starts_with("Visual Studio"));
+            if visual_studio {
+                args.push("-A".to_string());
+                args.push(platform.to_string());
+            } else if !p.host_is_target {
+                cross_toolchain(p, &mut args)?;
+            }
         }
+        _ if !p.host_is_target => cross_toolchain(p, &mut args)?,
         _ => {}
     }
     Ok(Plan::Build {
@@ -146,6 +153,51 @@ pub fn decide(p: &Probe) -> Result<Plan, String> {
         cmake_args: args,
         link,
     })
+}
+
+fn msvc_platform(arch: &str) -> Result<&'static str, String> {
+    match arch {
+        "x86_64" => Ok("x64"),
+        "aarch64" => Ok("ARM64"),
+        "x86" => Ok("Win32"),
+        other => Err(format!(
+            "Windows target arch {other} has no Visual Studio platform; build for x86_64, aarch64 or x86"
+        )),
+    }
+}
+
+fn cross_toolchain(p: &Probe, args: &mut Vec<String>) -> Result<(), String> {
+    if let Some(file) = &p.toolchain_file {
+        args.push(format!("-DCMAKE_TOOLCHAIN_FILE={}", file.display()));
+        return Ok(());
+    }
+    let system = match p.target_os.as_str() {
+        "linux" => "Linux",
+        "windows" => "Windows",
+        "freebsd" => "FreeBSD",
+        "netbsd" => "NetBSD",
+        "openbsd" => "OpenBSD",
+        other => {
+            return Err(format!(
+                "cross-building llama.cpp for {other} needs CMAKE_TOOLCHAIN_FILE"
+            ))
+        }
+    };
+    let (Some(cc), Some(cxx)) = (&p.target_cc, &p.target_cxx) else {
+        return Err(format!(
+            "cross-building llama.cpp for {} {} needs the target compilers: set CC_{arch}_unknown_{os}_{env} and CXX_..., or TARGET_CC and TARGET_CXX, or CMAKE_TOOLCHAIN_FILE (it also sets the sysroot), or TROUPEKIT_LLAMA_LIB_DIR to a folder with a prebuilt libllama and tk_llama",
+            p.target_os,
+            p.target_arch,
+            arch = p.target_arch,
+            os = p.target_os,
+            env = p.target_env,
+        ));
+    };
+    args.push(format!("-DCMAKE_SYSTEM_NAME={system}"));
+    args.push(format!("-DCMAKE_SYSTEM_PROCESSOR={}", p.target_arch));
+    args.push(format!("-DCMAKE_C_COMPILER={cc}"));
+    args.push(format!("-DCMAKE_CXX_COMPILER={cxx}"));
+    Ok(())
 }
 
 fn link_for(p: &Probe, metal: bool) -> Link {

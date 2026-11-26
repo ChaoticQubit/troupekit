@@ -6,12 +6,16 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const ENVS: [&str; 5] = [
+const ENVS: [&str; 9] = [
     "TROUPEKIT_LLAMA_SRC",
     "TROUPEKIT_LLAMA_LIB_DIR",
     "TROUPEKIT_LLAMA_METAL",
     "ANDROID_NDK_HOME",
     "CMAKE",
+    "CMAKE_GENERATOR",
+    "CMAKE_TOOLCHAIN_FILE",
+    "TARGET_CC",
+    "TARGET_CXX",
 ];
 
 /// Builds or links llama.cpp and the `tk_llama` shim when the `llama`
@@ -23,6 +27,9 @@ fn main() {
     println!("cargo:rerun-if-changed=shim");
     for name in ENVS {
         println!("cargo:rerun-if-env-changed={name}");
+    }
+    for tool in ["CC", "CXX"] {
+        println!("cargo:rerun-if-env-changed={}", target_var(tool));
     }
     let probe = probe();
     match decide(&probe) {
@@ -69,7 +76,27 @@ fn probe() -> Probe {
         host_is_target: var("HOST") == var("TARGET"),
         metal_env: env::var("TROUPEKIT_LLAMA_METAL").ok(),
         android_ndk: env::var_os("ANDROID_NDK_HOME").map(PathBuf::from),
+        cmake_generator: env::var("CMAKE_GENERATOR").ok().filter(|g| !g.is_empty()),
+        toolchain_file: env::var_os("CMAKE_TOOLCHAIN_FILE")
+            .filter(|f| !f.is_empty())
+            .map(PathBuf::from),
+        target_cc: target_tool("CC"),
+        target_cxx: target_tool("CXX"),
     }
+}
+
+fn target_var(tool: &str) -> String {
+    format!(
+        "{tool}_{}",
+        env::var("TARGET").unwrap_or_default().replace('-', "_")
+    )
+}
+
+fn target_tool(tool: &str) -> Option<String> {
+    env::var(target_var(tool))
+        .or_else(|_| env::var(format!("TARGET_{tool}")))
+        .ok()
+        .filter(|v| !v.is_empty())
 }
 
 fn cmake_program() -> String {

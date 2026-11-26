@@ -441,3 +441,48 @@ async fn tool_call_ids_are_unique_across_turns() {
         .iter()
         .any(|d| matches!(d, Delta::ToolCallStarted { id, .. } if id == "local-2")));
 }
+
+#[tokio::test]
+async fn required_tool_mode_refuses_a_text_reply() {
+    let required = LocalChatSettings::default().with_tool_mode(ToolMode::Required);
+    let mut req = CompletionRequest::user("weather?", 64);
+    req.tools = vec![weather()];
+    let text = LocalChat::new(Arc::new(Scripted::new("It is sunny.")), "local/test")
+        .with_settings(required.clone());
+    let err = text
+        .complete(&req)
+        .await
+        .expect_err("text in required mode");
+    assert_eq!(err.kind, ProviderErrorKind::Server);
+    assert!(err.message.contains("tool call"), "{}", err.message);
+    let mut deltas = Vec::new();
+    let err = text
+        .stream(&req, &mut |d| deltas.push(d.clone()))
+        .await
+        .expect_err("stream too");
+    assert_eq!(err.kind, ProviderErrorKind::Server);
+    assert!(deltas.is_empty(), "no delta before the refusal: {deltas:?}");
+
+    let truncated = LocalChat::new(
+        Arc::new(Scripted::new(r#"{"tool":"get_weather","arguments":{"#)),
+        "local/test",
+    )
+    .with_settings(required.clone());
+    assert!(truncated.complete(&req).await.is_err());
+
+    let call = LocalChat::new(
+        Arc::new(Scripted::new(r#"{"tool":"get_weather","arguments":{}}"#)),
+        "local/test",
+    )
+    .with_settings(required);
+    assert_eq!(
+        call.complete(&req).await.expect("call").stop,
+        StopReason::ToolUse
+    );
+
+    let auto = LocalChat::new(Arc::new(Scripted::new("It is sunny.")), "local/test");
+    assert_eq!(
+        auto.complete(&req).await.expect("text").stop,
+        StopReason::EndTurn
+    );
+}

@@ -16,6 +16,10 @@ fn probe() -> Probe {
         host_is_target: true,
         metal_env: None,
         android_ndk: None,
+        cmake_generator: None,
+        toolchain_file: None,
+        target_cc: None,
+        target_cxx: None,
     }
 }
 
@@ -156,4 +160,80 @@ fn vulkan_feature_turns_vulkan_on() {
         }
         other => panic!("expected a build, got {other:?}"),
     }
+}
+
+fn msvc(arch: &str) -> Probe {
+    let mut p = probe();
+    p.target_os = "windows".into();
+    p.target_env = "msvc".into();
+    p.target_arch = arch.into();
+    p
+}
+
+#[test]
+fn msvc_platform_matches_the_target_arch() {
+    let platform = |arch: &str| {
+        let args = build_args(&msvc(arch));
+        let at = args.iter().position(|a| a == "-A").expect("-A");
+        args[at + 1].clone()
+    };
+    assert_eq!(platform("x86_64"), "x64");
+    assert_eq!(platform("aarch64"), "ARM64");
+    assert_eq!(platform("x86"), "Win32");
+    assert!(decide(&msvc("riscv64")).is_err());
+}
+
+#[test]
+fn ninja_generator_gets_no_platform_argument() {
+    let mut p = msvc("x86_64");
+    p.cmake_generator = Some("Ninja".into());
+    let args = build_args(&p);
+    assert!(!args.iter().any(|a| a == "-A"), "{args:?}");
+    p.cmake_generator = Some("Visual Studio 17 2022".into());
+    assert!(build_args(&p).iter().any(|a| a == "-A"));
+    let mut cross = msvc("aarch64");
+    cross.host_is_target = false;
+    cross.cmake_generator = Some("Ninja".into());
+    let err = decide(&cross).expect_err("ninja cannot pick the arch");
+    assert!(err.contains("CMAKE_TOOLCHAIN_FILE"), "{err}");
+}
+
+#[test]
+fn linux_cross_build_uses_the_target_toolchain() {
+    let mut p = probe();
+    p.target_os = "linux".into();
+    p.target_arch = "aarch64".into();
+    p.target_env = "gnu".into();
+    p.host_is_target = false;
+    let err = decide(&p).expect_err("no target compiler");
+    assert!(
+        err.contains("CC_aarch64") || err.contains("TARGET_CC"),
+        "{err}"
+    );
+    assert!(err.contains("CMAKE_TOOLCHAIN_FILE"), "{err}");
+    p.target_cc = Some("aarch64-linux-gnu-gcc".into());
+    p.target_cxx = Some("aarch64-linux-gnu-g++".into());
+    let args = build_args(&p);
+    for want in [
+        "-DCMAKE_SYSTEM_NAME=Linux",
+        "-DCMAKE_SYSTEM_PROCESSOR=aarch64",
+        "-DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc",
+        "-DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++",
+        "-DGGML_NATIVE=OFF",
+    ] {
+        assert!(args.contains(&want.to_string()), "{want} missing: {args:?}");
+    }
+    p.toolchain_file = Some(PathBuf::from("/tc/aarch64.cmake"));
+    let args = build_args(&p);
+    assert!(args.contains(&"-DCMAKE_TOOLCHAIN_FILE=/tc/aarch64.cmake".to_string()));
+    assert!(
+        !args.iter().any(|a| a.starts_with("-DCMAKE_C_COMPILER")),
+        "{args:?}"
+    );
+    let mut native = probe();
+    native.target_os = "linux".into();
+    native.target_arch = "x86_64".into();
+    assert!(!build_args(&native)
+        .iter()
+        .any(|a| a.starts_with("-DCMAKE_SYSTEM_NAME")));
 }

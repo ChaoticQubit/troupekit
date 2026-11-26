@@ -120,3 +120,43 @@ async fn fetched_file_is_private_to_the_user() {
         & 0o777;
     assert_eq!(dir_mode, 0o700);
 }
+
+#[tokio::test]
+async fn fetch_leaves_another_fetchs_part_file_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = ModelCache::new(dir.path());
+    let spec = spec_for(BODY);
+    let other = dir.path().join("tiny.gguf.part");
+    std::fs::write(&other, b"another fetch in progress").expect("write");
+    let transport = ScriptedTransport::new(vec![Scripted::chunked(
+        std::str::from_utf8(BODY).expect("ascii"),
+        7,
+    )]);
+    let path = cache.fetch(&spec, &transport).await.expect("fetches");
+    assert_eq!(std::fs::read(&path).expect("read"), BODY);
+    assert_eq!(
+        std::fs::read(&other).expect("other part kept"),
+        b"another fetch in progress"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("list")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "tiny.gguf" && n != "tiny.gguf.part")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[tokio::test]
+async fn concurrent_fetches_of_one_row_both_publish_a_checked_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = ModelCache::new(dir.path());
+    let spec = spec_for(BODY);
+    let text = std::str::from_utf8(BODY).expect("ascii");
+    let a = ScriptedTransport::new(vec![Scripted::chunked(text, 3)]);
+    let b = ScriptedTransport::new(vec![Scripted::chunked(text, 5)]);
+    let (ra, rb) = tokio::join!(cache.fetch(&spec, &a), cache.fetch(&spec, &b));
+    let (pa, pb) = (ra.expect("first"), rb.expect("second"));
+    assert_eq!(pa, pb);
+    assert_eq!(std::fs::read(&pa).expect("read"), BODY);
+}

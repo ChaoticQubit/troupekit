@@ -4,6 +4,9 @@ use crate::sha256::{to_hex, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const PART_TRIES: usize = 64;
 use troupekit_core::http::{HttpRequest, Transport};
 
 /// A folder of downloaded model files, one `<id>.gguf` per catalog row.
@@ -65,8 +68,8 @@ impl ModelCache {
     }
 
     /// Downloads a row through `transport` unless `path` already finds
-    /// it: into `<id>.gguf.part` (0600), refused past the declared size or
-    /// on a hash mismatch (part deleted), then renamed. Output: the path.
+    /// it: into a part file of its own (created exclusively, 0600), refused
+    /// past the declared size or on a hash mismatch, then renamed. Output: the path.
     pub async fn fetch(
         &self,
         spec: &LocalSpec,
@@ -82,9 +85,8 @@ impl ModelCache {
             )));
         }
         create_private_dir(&self.dir)?;
-        let part = self.dir.join(format!("{}.gguf.part", spec.id()));
-        let _ = std::fs::remove_file(&part);
-        if let Err(e) = self.download(spec, transport, &part).await {
+        let (part, file) = create_part_file(&self.dir, spec.id())?;
+        if let Err(e) = self.download(spec, transport, file).await {
             let _ = std::fs::remove_file(&part);
             return Err(e);
         }
@@ -93,10 +95,12 @@ impl ModelCache {
             let _ = std::fs::remove_file(&part);
             LocalError::Cache(format!("model {}: rename failed: {e}", spec.id()))
         })?;
-        assert!(
-            self.path(spec).is_some(),
-            "a fetched file has the declared size"
-        );
+        if self.path(spec).is_none() {
+            return Err(LocalError::Cache(format!(
+                "model {}: file changed after it was published",
+                spec.id()
+            )));
+        }
         Ok(path)
     }
 
@@ -104,7 +108,7 @@ impl ModelCache {
         &self,
         spec: &LocalSpec,
         transport: &dyn Transport,
-        part: &Path,
+        mut file: File,
     ) -> Result<(), LocalError> {
         let id = spec.id();
         let mut response = transport
@@ -117,7 +121,6 @@ impl ModelCache {
                 response.status
             )));
         }
-        let mut file = open_private_file(part)?;
         let mut hasher = Sha256::new();
         let mut total: u64 = 0;
         while let Some(chunk) = response
@@ -173,15 +176,30 @@ fn create_private_dir(dir: &Path) -> Result<(), LocalError> {
         .map_err(|e| LocalError::Cache(format!("cannot create {}: {e}", dir.display())))
 }
 
-fn open_private_file(path: &Path) -> Result<File, LocalError> {
+fn create_part_file(dir: &Path, id: &str) -> Result<(PathBuf, File), LocalError> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options
-        .open(path)
-        .map_err(|e| LocalError::Cache(format!("cannot open {}: {e}", path.display())))
+    for _ in 0..PART_TRIES {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let part = dir.join(format!("{id}.gguf.{}-{n}.part", std::process::id()));
+        match options.open(&part) {
+            Ok(file) => return Ok((part, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(LocalError::Cache(format!(
+                    "cannot create {}: {e}",
+                    part.display()
+                )))
+            }
+        }
+    }
+    Err(LocalError::Cache(format!(
+        "model {id}: no free part file name after {PART_TRIES} tries"
+    )))
 }
