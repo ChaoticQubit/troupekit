@@ -18,7 +18,7 @@ pub struct InMemCheckpoints {
 
 /// Everything one `InMemCheckpoints` holds, behind one lock so a save and
 /// the branch writes it drops change together. Branch writes are keyed by
-/// step then branch index; fork links stay in the order they were made.
+/// step then branch index; `forks` lists links by child id, as SQLite does.
 #[derive(Default)]
 struct CheckpointMaps {
     runs: HashMap<RunId, Vec<Checkpoint>>,
@@ -137,7 +137,9 @@ impl CheckpointStore for InMemCheckpoints {
 
     async fn forks(&self, parent: RunId) -> Result<Vec<ForkLink>, CoreError> {
         let maps = self.inner.lock().await;
-        Ok(maps.links.iter().filter(|link| link.parent() == parent).cloned().collect())
+        let mut out: Vec<ForkLink> = maps.links.iter().filter(|link| link.parent() == parent).cloned().collect();
+        out.sort_by_key(|link| link.child());
+        Ok(out)
     }
 }
 

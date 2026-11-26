@@ -51,12 +51,22 @@ pub(crate) struct Limits {
     pub(crate) state_bytes_max: u64,
     pub(crate) blob_bytes_max: u64,
     pub(crate) history_steps_max: u64,
+    pub(crate) branch_write_bytes_max: Option<u64>,
+}
+
+impl Limits {
+    /// Returns the largest branch write `save_branch` accepts, in bytes:
+    /// the explicit setting, else `state_bytes_max`, so a branch write is
+    /// never allowed to be larger than the checkpoint it becomes part of.
+    pub(crate) fn branch_write_bytes(&self) -> u64 {
+        self.branch_write_bytes_max.unwrap_or(self.state_bytes_max)
+    }
 }
 
 /// Settings for `SqliteStore`, each with a safe default: full durability,
-/// the system clock, 64 MiB caps on one state and one blob, 100 000 history
-/// steps, a 5 000 ms busy timeout and secure delete on. `open` validates
-/// them and opens the file.
+/// the system clock, 64 MiB caps on one state and one blob, a branch write
+/// cap equal to the state cap, 100 000 history steps, a 5 000 ms busy
+/// timeout and secure delete on. `open` validates them and opens the file.
 #[derive(Clone)]
 pub struct SqliteStoreBuilder {
     path: PathBuf,
@@ -111,10 +121,19 @@ impl SqliteStoreBuilder {
         self
     }
 
-    /// Sets the most kept steps `history` returns before it errors.
-    /// Input: at least 1. Output: the builder. Default 100 000.
+    /// Sets the most rows `history`, `branch_writes` and `forks` return
+    /// before they error. Input: at least 1. Output: the builder.
+    /// Default 100 000.
     pub fn max_history_steps(mut self, steps: u64) -> Self {
         self.limits.history_steps_max = steps;
+        self
+    }
+
+    /// Sets the largest serialized branch write `save_branch` accepts, in
+    /// bytes, counting its node id and its JSON. Input: 1 to 1 000 000 000.
+    /// Output: the builder. Default: the `max_state_bytes` value.
+    pub fn max_branch_write_bytes(mut self, bytes: u64) -> Self {
+        self.limits.branch_write_bytes_max = Some(bytes);
         self
     }
 
@@ -170,6 +189,7 @@ fn validate(limits: &Limits) -> Result<(), CoreError> {
     for (name, value) in [
         ("max_state_bytes", limits.state_bytes_max),
         ("max_blob_bytes", limits.blob_bytes_max),
+        ("max_branch_write_bytes", limits.branch_write_bytes()),
     ] {
         if value == 0 || value > BYTES_LIMIT_SQLITE {
             return Err(CoreError::Store(format!(
@@ -312,6 +332,7 @@ impl SqliteStore {
                 state_bytes_max: STATE_BYTES_MAX_DEFAULT,
                 blob_bytes_max: BLOB_BYTES_MAX_DEFAULT,
                 history_steps_max: HISTORY_STEPS_MAX_DEFAULT,
+                branch_write_bytes_max: None,
             },
             busy_timeout_ms: BUSY_TIMEOUT_MS_DEFAULT,
             secure_delete: true,
@@ -399,6 +420,9 @@ mod tests {
         assert_eq!(builder.limits.state_bytes_max, 64 * 1024 * 1024);
         assert_eq!(builder.limits.blob_bytes_max, 64 * 1024 * 1024);
         assert_eq!(builder.limits.history_steps_max, 100_000);
+        assert_eq!(builder.limits.branch_write_bytes_max, None);
+        assert_eq!(builder.limits.branch_write_bytes(), 64 * 1024 * 1024);
+        assert_eq!(builder.clone().max_state_bytes(100).limits.branch_write_bytes(), 100);
         assert_eq!(builder.busy_timeout_ms, 5_000);
         assert!(builder.secure_delete);
         let before = SystemClock.now_ms();

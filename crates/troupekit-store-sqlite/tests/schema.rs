@@ -1,6 +1,9 @@
 use rusqlite::Connection;
+use serde_json::json;
 use std::path::Path;
 use troupekit_core::error::CoreError;
+use troupekit_core::ids::RunId;
+use troupekit_core::store::{Checkpoint, CheckpointStore};
 use troupekit_store_sqlite::{SqliteStore, SCHEMA_VERSION};
 
 fn pragma_i64(path: &Path, name: &str) -> i64 {
@@ -138,12 +141,126 @@ async fn v1_file_migrates_to_v2_and_keeps_rows() {
     let before = v1_rows(&path);
     assert_eq!(before.len(), 6);
     drop(SqliteStore::open(&path).await.unwrap());
-    assert_eq!(pragma_i64(&path, "user_version"), 2);
+    assert_eq!(pragma_i64(&path, "user_version"), i64::from(SCHEMA_VERSION));
     assert_eq!(v1_rows(&path), before);
     let tables = table_names(&path);
     for table in ["vector_index", "chunk", "chunk_meta", "chunk_fts", "index_page", "ingest_source"] {
         assert!(tables.iter().any(|t| t == table), "{table} missing: {tables:?}");
     }
+}
+
+/// The DDL of migration step 2 as it shipped in 0.2, frozen.
+/// Applied after `V1_DDL` it builds a version 2 file without the current
+/// migration list, so the step 2 to 3 upgrade is tested on real 0.2 bytes.
+/// Never edited: a 0.2 file on disk never changes either.
+const V2_DDL: &str = "
+CREATE TABLE vector_index (
+  name TEXT NOT NULL PRIMARY KEY CHECK (length(name) BETWEEN 1 AND 64),
+  dims INTEGER NOT NULL CHECK (dims BETWEEN 1 AND 65536),
+  kind TEXT NOT NULL CHECK (kind IN ('brute_force', 'hnsw')),
+  params_json TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+  created_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE chunk (
+  key INTEGER PRIMARY KEY AUTOINCREMENT,
+  index_name TEXT NOT NULL,
+  id TEXT NOT NULL CHECK (length(id) BETWEEN 1 AND 256),
+  text TEXT NOT NULL,
+  meta_json TEXT NOT NULL,
+  vector BLOB NOT NULL,
+  UNIQUE (index_name, id)
+) STRICT;
+
+CREATE TABLE chunk_meta (
+  chunk_key INTEGER NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (chunk_key, key)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX chunk_meta_lookup ON chunk_meta (key, value, chunk_key);
+
+CREATE VIRTUAL TABLE chunk_fts USING fts5(
+  text,
+  content = 'chunk',
+  content_rowid = 'key',
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TABLE index_page (
+  index_name TEXT NOT NULL,
+  page INTEGER NOT NULL CHECK (page >= 0),
+  bytes BLOB NOT NULL,
+  PRIMARY KEY (index_name, page)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE ingest_source (
+  index_name TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  source TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  chunks INTEGER NOT NULL CHECK (chunks >= 0),
+  status TEXT NOT NULL CHECK (status IN ('done', 'failed')),
+  error TEXT,
+  at_ms INTEGER NOT NULL,
+  CHECK ((status = 'failed') = (error IS NOT NULL)),
+  PRIMARY KEY (index_name, scope, source)
+) STRICT, WITHOUT ROWID;
+";
+
+/// Writes a version 2 store at `path`: the 0.1 rows of `write_v1_file`,
+/// three checkpoints of run `run` and one chunk row. Input: a path that
+/// does not exist yet and the run id. Output: none; `user_version` is 2.
+fn write_v2_file(path: &Path, run: RunId) {
+    write_v1_file(path);
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(V2_DDL).unwrap();
+    for step in 0..3i64 {
+        let state = serde_json::to_vec(&json!({"step": step, "note": "kept"})).unwrap();
+        conn.execute(
+            "INSERT INTO checkpoint (run_id, step, state_json) VALUES (?1, ?2, ?3)",
+            rusqlite::params![run.to_string(), step, state],
+        )
+        .unwrap();
+    }
+    conn.execute_batch(
+        "INSERT INTO chunk (index_name, id, text, meta_json, vector)
+           VALUES ('docs', 'a', 'kept text', '{}', X'0000803F');",
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", 2).unwrap();
+}
+
+#[tokio::test]
+async fn v2_store_file_migrates_and_keeps_checkpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.db");
+    let run = RunId::new();
+    write_v2_file(&path, run);
+    let before = v1_rows(&path);
+    let store = SqliteStore::open(&path).await.unwrap();
+    assert_eq!(pragma_i64(&path, "user_version"), i64::from(SCHEMA_VERSION));
+    let history = store.history(run).await.unwrap();
+    let expected: Vec<Checkpoint> = (0..3u64)
+        .map(|step| Checkpoint { run_id: run, step, state: json!({"step": step, "note": "kept"}) })
+        .collect();
+    assert_eq!(history, expected);
+    assert_eq!(store.latest(RunId::new()).await.unwrap(), None);
+    assert!(store.branch_writes(run, 3).await.unwrap().is_empty());
+    assert!(store.forks(run).await.unwrap().is_empty());
+    drop(store);
+    assert_eq!(v1_rows(&path), before);
+    let tables = table_names(&path);
+    for table in ["branch_write", "run_fork", "chunk", "vector_index"] {
+        assert!(tables.iter().any(|t| t == table), "{table} missing: {tables:?}");
+    }
+    let chunks: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM chunk", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(chunks, 1);
 }
 
 #[tokio::test]
@@ -200,12 +317,13 @@ async fn file_reopens_at_the_same_version() {
     let tables = table_names(&path);
     drop(SqliteStore::open(&path).await.unwrap());
     assert_eq!(pragma_i64(&path, "user_version"), i64::from(SCHEMA_VERSION));
-    assert_eq!(SCHEMA_VERSION, 2);
+    assert_eq!(SCHEMA_VERSION, 3);
     assert_eq!(table_names(&path), tables);
     assert_eq!(
         tables,
         [
             "blob_entry",
+            "branch_write",
             "checkpoint",
             "chunk",
             "chunk_fts",
@@ -219,6 +337,7 @@ async fn file_reopens_at_the_same_version() {
             "job",
             "lease_token",
             "memory_entry",
+            "run_fork",
             "sqlite_sequence",
             "usage_total",
             "vector_index"
