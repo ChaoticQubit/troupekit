@@ -626,3 +626,97 @@ async fn kept_agent_run_of_another_run_is_refused() {
         "{err}"
     );
 }
+
+struct WithFlows {
+    inner: SimpleGraphIo,
+    kid: &'static str,
+}
+
+#[async_trait]
+impl troupekit_graph::GraphIo for WithFlows {
+    fn agent(&self) -> &dyn troupekit_agent::AgentIo {
+        self.inner.agent()
+    }
+
+    async fn persona(
+        &self,
+        name: &str,
+    ) -> Result<troupekit_agent::Persona, troupekit_agent::AgentError> {
+        self.inner.persona(name).await
+    }
+
+    fn conditions(&self) -> &troupekit_graph::Conditions {
+        self.inner.conditions()
+    }
+
+    async fn flow(&self, name: &str) -> Result<troupekit_graph::Flow, GraphError> {
+        assert_eq!(name, "kid");
+        troupekit_graph::Flow::parse("test/kid.toml", self.kid)
+            .map_err(|e| GraphError::Setup(e.to_string()))
+    }
+}
+
+const SUB_FAN: &str = "name = 'fan'\nstart = 's'\n[state]\nseed = 'string'\nx = 'string'\ny = 'string'\n[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 's'\nwrites = 'seed'\n[[nodes]]\nid = 'a'\nkind = 'flow'\nflow = 'kid'\nreturns = 'out'\nwrites = 'x'\n[[nodes]]\nid = 'b'\nkind = 'tool'\ntool = 'b'\nwrites = 'y'\n[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 's'\nto = 'a'\n[[edges]]\nfrom = 's'\nto = 'b'\n[[edges]]\nfrom = 'a'\nto = 'j'\n[[edges]]\nfrom = 'b'\nto = 'j'\n[[edges]]\nfrom = 'j'\nto = 'e'\n";
+
+const KID: &str = "name = 'kid'\nstart = 'k'\n[state]\nout = 'string?'\n[[nodes]]\nid = 'k'\nkind = 'tool'\ntool = 'a'\nwrites = 'out'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'k'\nto = 'e'\n";
+
+#[tokio::test]
+async fn child_progress_in_a_durable_step_is_kept_across_a_crash() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let io = WithFlows {
+        inner: io(&gates, model()),
+        kid: KID,
+    };
+    let flow = troupekit_graph::Flow::parse("test/fan.toml", SUB_FAN).unwrap();
+    let mut run = GraphRun::start(flow, Map::new(), Limits::default(), &io)
+        .await
+        .unwrap();
+    let id = run.run_id();
+    store.save(run.checkpoint()).await.unwrap();
+    gates.open("s");
+    assert_eq!(
+        run.step_durable(&io, &store).await.unwrap(),
+        GraphOutcome::Continue
+    );
+    store.save(run.checkpoint()).await.unwrap();
+    gates.open("a");
+    let kept = async {
+        while !store.has(id, 2, 0) {
+            tokio::task::yield_now().await;
+        }
+    };
+    let report = || format!("a finished: {:?}", gates.finished());
+    bounded("the child's durable mark", report, async {
+        tokio::select! {
+            biased;
+            out = run.step_durable(&io, &store) => panic!("the step must not finish while b waits: {out:?}"),
+            () = kept => {}
+        }
+    })
+    .await;
+    drop(run);
+    assert_eq!(
+        gates.calls("a").len(),
+        1,
+        "the child's tool ran before the crash"
+    );
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    gates.open("b");
+    let mut out = GraphOutcome::Continue;
+    for _ in 0..30 {
+        out = run.step_durable(&io, &store).await.unwrap();
+        store.save(run.checkpoint()).await.unwrap();
+        if out != GraphOutcome::Continue {
+            break;
+        }
+    }
+    let GraphOutcome::Done(state) = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(
+        gates.calls("a").len(),
+        1,
+        "the child's tool does not re-run"
+    );
+    assert_eq!(state["x"], json!("a1"));
+}

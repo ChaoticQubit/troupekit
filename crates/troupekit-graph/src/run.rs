@@ -227,6 +227,10 @@ enum Finished {
         run: Box<AgentRun>,
         outcome: AgentDone,
     },
+    Flow {
+        run: Box<GraphRun>,
+        outcome: FlowDone,
+    },
 }
 
 /// The event `seq` range one restored attempt of a step emits from, kept
@@ -281,6 +285,40 @@ impl AgentDone {
             AgentDone::Continue => StepOutcome::Continue,
             AgentDone::Paused { reason } => StepOutcome::Paused(reason),
             AgentDone::Done { output } => StepOutcome::Done(output),
+        }
+    }
+}
+
+/// What a child flow's step ended in, kept with the child run in a branch
+/// write: the outcomes a restore can apply again. A failed or retried
+/// child step is not kept; it runs again, as an agent's does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum FlowDone {
+    Continue,
+    Waiting { reason: PauseReason },
+    Done { state: Map<String, Value> },
+}
+
+impl FlowDone {
+    fn of(outcome: &GraphOutcome) -> Option<FlowDone> {
+        match outcome {
+            GraphOutcome::Continue => Some(FlowDone::Continue),
+            GraphOutcome::Waiting(reason) => Some(FlowDone::Waiting {
+                reason: reason.clone(),
+            }),
+            GraphOutcome::Done(state) => Some(FlowDone::Done {
+                state: state.clone(),
+            }),
+            GraphOutcome::RetryAt { .. } | GraphOutcome::Failed(_) => None,
+        }
+    }
+
+    fn outcome(self) -> GraphOutcome {
+        match self {
+            FlowDone::Continue => GraphOutcome::Continue,
+            FlowDone::Waiting { reason } => GraphOutcome::Waiting(reason),
+            FlowDone::Done { state } => GraphOutcome::Done(state),
         }
     }
 }
@@ -1304,6 +1342,17 @@ impl GraphRun {
                         return Err(bad("it is not this branch's agent run (run id, step or persona differ, or its limits exceed the branch's)".into()));
                     }
                 }
+                (Finished::Flow { run: kept, .. }, At::Flow { run: current }) => {
+                    let same = kept.status != GraphStatus::Running
+                        && kept.run_id == current.run_id
+                        && kept.steps >= current.steps
+                        && kept.workflow == current.workflow
+                        && kept.flow == current.flow
+                        && limits_within(&kept.limits, &current.limits);
+                    if !same {
+                        return Err(bad("it is not this branch's child run (run id, step or flow differ, or its limits exceed the branch's)".into()));
+                    }
+                }
                 _ => return Err(bad(format!("its kind does not fit the work at `{node}`"))),
             }
             out.insert(i, finished);
@@ -1824,11 +1873,15 @@ impl GraphRun {
                         return (Work::Idle, None);
                     }
                     let node = wf.node(&b.node).expect("branches sit at workflow nodes");
-                    if let At::Flow { run } = &mut b.at {
-                        let out = Box::pin(run.step(io)).await;
-                        return (Work::Flow(out), None);
-                    }
                     let (work, finished) = match (&mut b.at, &node.kind) {
+                        (At::Flow { run }, _) => {
+                            let out = Box::pin(run.step(io)).await;
+                            let finished = FlowDone::of(&out).map(|outcome| Finished::Flow {
+                                run: run.clone(),
+                                outcome,
+                            });
+                            (Work::Flow(out), finished)
+                        }
                         (At::Agent { run, .. }, NodeKind::Agent { persona, .. }) => {
                             let nio = NodeIo::new(em, &node.id, persona).with_tools(regs.get(&node.id).map(|r| r.as_ref()));
                             let outcome = run.step(&nio).await;
@@ -2217,6 +2270,13 @@ fn apply_finished(b: &mut Branch, finished: Finished) -> Work {
             };
             *run = kept;
             Work::Agent(outcome.outcome())
+        }
+        Finished::Flow { run: kept, outcome } => {
+            let At::Flow { run } = &mut b.at else {
+                unreachable!("kept child results apply to flow branches, checked before");
+            };
+            *run = kept;
+            Work::Flow(outcome.outcome())
         }
     }
 }
