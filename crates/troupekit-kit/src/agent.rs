@@ -443,6 +443,7 @@ impl Agent {
             && self.api_key == other.api_key
             && self.api_key_env == other.api_key_env
             && self.catalog == other.catalog
+            && self.persona_source == other.persona_source
     }
 
     #[cfg(feature = "knowledge")]

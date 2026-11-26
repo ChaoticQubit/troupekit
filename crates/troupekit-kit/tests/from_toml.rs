@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use troupekit::{tool, Agent, KitError};
+use troupekit::{tool, Agent, Graph, KitError};
 use troupekit_core::event::Usage;
 use troupekit_core::message::{ContentPart, Message, Role};
 use troupekit_graph::testing::{text_reply, FnModel};
@@ -178,4 +178,46 @@ async fn bad_toml_reports_source_name() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("broken.toml"), "{err}");
+}
+
+#[tokio::test]
+async fn toml_instructions_file_is_refused() {
+    let text = fixture_text().replace(
+        "instructions = \"\"\"",
+        "instructions_file = \"support.md\"\ncontext = \"\"\"",
+    );
+    let err = Agent::from_toml(text)
+        .model_client(support_model())
+        .tool(lookup_order())
+        .build()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KitError::Config { .. }), "{err:?}");
+    assert!(err.to_string().contains("instructions_file"), "{err}");
+}
+
+#[tokio::test]
+async fn two_toml_agents_in_one_graph_are_told_apart() {
+    let model = support_model();
+    let order: Arc<dyn Tool> = Arc::new(lookup_order());
+    let other = fixture_text().replace("anthropic/claude-haiku-5-5", "anthropic/claude-opus-5-5");
+    let err = Graph::new("pair")
+        .agent(
+            "first",
+            Agent::from_toml(fixture_text())
+                .model_client(model.clone())
+                .tool_arc(order.clone()),
+        )
+        .agent(
+            "second",
+            Agent::from_toml(other).model_client(model).tool_arc(order),
+        )
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("two different agents are named `toml`"),
+        "{err}"
+    );
 }

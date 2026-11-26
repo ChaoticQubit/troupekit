@@ -13,7 +13,7 @@ pub const MAX_PERSONA_BYTES: usize = 1024 * 1024;
 const TOML_NAME: &str = "toml";
 const TEXT_SOURCE: &str = "agent:toml";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PersonaSource {
     Text(String),
     File(PathBuf),
@@ -113,6 +113,12 @@ impl Agent {
         } else if !table.contains_key("tools") && !tools.is_empty() {
             let named = tools.iter().map(|t| text(t)).collect();
             table.insert("tools".into(), Toml::Array(named));
+        }
+        if table.contains_key("instructions_file") {
+            return Err(KitError::config(
+                source,
+                "instructions_file is not read by from_toml: inline instructions in the TOML or call .instructions(..)",
+            ));
         }
         let selector = table
             .get("model")
