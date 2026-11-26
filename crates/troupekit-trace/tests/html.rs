@@ -99,3 +99,11 @@ fn html_uses_text_content_only() {
     assert!(page.contains("textContent"));
     assert!(!page.contains("<!--"));
 }
+
+#[test]
+fn html_lays_out_events_as_points() {
+    let page = render_html(&tree_with_hostile());
+    assert!(page.contains("function endOf(node) {"), "one interval rule for bars and rows");
+    assert!(page.contains("if (node.k === \"e\") { return node.s + 1; }"), "events end at their start");
+    assert_eq!(page.matches("node.e === null ? last").count(), 0, "no layout path extends events to the trace end");
+}

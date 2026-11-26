@@ -33,15 +33,40 @@ pub(crate) struct Policy<'a> {
 }
 
 /// Replaces every occurrence of every secret in `text` with `[redacted]`.
+/// Matches are found in the original text and their union is replaced,
+/// so overlapping secrets and the marker itself never leave a fragment.
 /// Input: the text and non-empty secrets. Output: the scrubbed text.
 pub(crate) fn scrub(text: &str, secrets: &[String]) -> String {
-    let mut out = text.to_owned();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
     for secret in secrets {
         assert!(!secret.is_empty(), "an empty secret would match everywhere");
-        if out.contains(secret.as_str()) {
-            out = out.replace(secret.as_str(), REDACTED);
+        let mut from = 0;
+        while let Some(at) = text[from..].find(secret.as_str()) {
+            let start = from + at;
+            ranges.push((start, start + secret.len()));
+            from = start + text[start..].chars().next().map_or(1, char::len_utf8);
         }
     }
+    if ranges.is_empty() {
+        return text.to_owned();
+    }
+    ranges.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i < ranges.len() {
+        let (start, mut end) = ranges[i];
+        i += 1;
+        while i < ranges.len() && ranges[i].0 <= end {
+            end = end.max(ranges[i].1);
+            i += 1;
+        }
+        assert!(copied <= start && end <= text.len());
+        out.push_str(&text[copied..start]);
+        out.push_str(REDACTED);
+        copied = end;
+    }
+    out.push_str(&text[copied..]);
     out
 }
 
@@ -128,6 +153,17 @@ pub fn url_for_trace(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_secrets_are_redacted_against_the_original_text() {
+        let secrets = ["abc".to_owned(), "abc-private".to_owned(), "c-pri".to_owned()];
+        assert_eq!(scrub("x abc-private y", &secrets), "x [redacted] y");
+        let shifted = ["bcd".to_owned(), "abc".to_owned()];
+        assert_eq!(scrub("abcde", &shifted), "[redacted]e");
+        let marker = ["key1".to_owned(), "dact".to_owned()];
+        assert_eq!(scrub("key1 key1", &marker), "[redacted] [redacted]");
+        assert_eq!(scrub("no match", &secrets), "no match");
+    }
 
     #[test]
     #[should_panic(expected = "empty secret")]

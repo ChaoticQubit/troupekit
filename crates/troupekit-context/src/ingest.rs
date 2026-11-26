@@ -82,7 +82,10 @@ pub async fn ingest(vectors: &dyn VectorStore, embedder: &dyn Embedder, doc: &Do
     let result = span.instrument(ingest_records(vectors, embedder, doc, cfg)).await;
     match &result {
         Ok(chunks) => span.record("chunks", *chunks),
-        Err(e) => span.fail(e.to_string()),
+        Err(e) => {
+            span.fail("knowledge ingest failed");
+            span.record("error", content(e.to_string()));
+        }
     }
     result
 }

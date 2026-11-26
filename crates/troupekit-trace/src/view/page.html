@@ -123,12 +123,18 @@ td:first-child { color: var(--muted); width: 35%; }
     });
   }
 
+  function endOf(node) {
+    if (node.k === "e") { return node.s + 1; }
+    if (node.e === null) { return last; }
+    return Math.max(node.e, node.s + 1);
+  }
+
   function packRows(indexes) {
     var ends = [];
     var rows = {};
     indexes.forEach(function (index) {
       var node = nodes[index];
-      var end = node.e === null ? last : Math.max(node.e, node.s + 1);
+      var end = endOf(node);
       var row = 0;
       while (row < ends.length && ends[row] > node.s) { row += 1; }
       ends[row] = end;
@@ -140,7 +146,7 @@ td:first-child { color: var(--muted); width: 35%; }
   function bar(index, row) {
     var node = nodes[index];
     var width = view.to - view.from;
-    var end = node.e === null ? last : node.e;
+    var end = endOf(node);
     var b = el("div", "bar", node.n);
     if (node.k === "e") { b.classList.add("event"); }
     else if (node.e === null) { b.classList.add("open"); }

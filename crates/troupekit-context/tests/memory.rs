@@ -57,3 +57,36 @@ async fn memory_scopes_end_to_end() {
 fn mismatched_dims_are_rejected() {
     assert!(matches!(memory(32), Err(ContextError::Invalid(_))));
 }
+
+struct LeakyEmbedder;
+
+#[async_trait::async_trait]
+impl troupekit_context::embed::Embedder for LeakyEmbedder {
+    fn dims(&self) -> usize {
+        64
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, ContextError> {
+        Err(ContextError::Embed(format!("model refused: {}", texts.join(" "))))
+    }
+}
+
+#[tokio::test]
+async fn failed_ingest_keeps_error_text_out_of_the_trace() {
+    use troupekit_context::ingest::ingest;
+    let vectors = InMemVectors::new(64);
+    let d = doc("s", "notes.md", "patient zebra_record_77 history", Origin::Internal);
+    for keep in [false, true] {
+        let sink = Arc::new(troupekit_trace::MemorySink::default());
+        let tracer = troupekit_trace::Tracer::builder().content(keep).sink(sink.clone()).build().unwrap();
+        let result = tracer.in_scope(ingest(&vectors, &LeakyEmbedder, &d, &ChunkConfig { max_tokens: 64, overlap_tokens: 8 })).await;
+        drop(tracer);
+        assert!(matches!(result, Err(ContextError::Embed(_))), "{result:?}");
+        let records: Vec<serde_json::Value> = sink.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let end = records.iter().find(|r| r["t"] == "end").unwrap();
+        assert_eq!(end["ok"], false);
+        assert_eq!(end["err"], "knowledge ingest failed");
+        let leaked = sink.lines().iter().any(|l| l.contains("zebra_record_77"));
+        assert_eq!(leaked, keep, "error text appears only with content on");
+    }
+}
