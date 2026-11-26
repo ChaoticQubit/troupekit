@@ -257,6 +257,51 @@ jobs:
             fi
           done
 
+  bindings-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: build the host library
+        run: cargo build -p troupekit-ffi --release --locked
+      - name: generate Swift and Kotlin
+        shell: bash
+        run: |
+          set -euo pipefail
+          lib=target/release/libtroupekit_ffi.so
+          test -f "$lib"
+          for language in swift kotlin; do
+            cargo run -p troupekit-ffi --features bindgen --release --locked --bin uniffi-bindgen -- \
+              generate --library "$lib" --language "$language" --out-dir "target/drift/$language"
+          done
+          test -f target/drift/swift/Troupekit.swift
+          test -f target/drift/kotlin/dev/troupekit/troupekit_ffi.kt
+      - name: checked-in bindings match the Rust code
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          while read -r generated checked; do
+            if [ ! -f "$checked" ]; then
+              echo "::warning file=$checked::not checked in yet; take it from the bindings-generated artifact"
+              continue
+            fi
+            if ! cmp -s "$generated" "$checked"; then
+              echo "::error file=$checked::stale: regenerate with scripts/build-xcframework.sh or scripts/build-aar.sh"
+              diff -u "$checked" "$generated" | head -n 200 || true
+              status=1
+            fi
+          done <<'PAIRS'
+          target/drift/swift/Troupekit.swift bindings/swift/Sources/Troupekit/Troupekit.swift
+          target/drift/kotlin/dev/troupekit/troupekit_ffi.kt bindings/kotlin/troupekit/src/main/kotlin/dev/troupekit/troupekit_ffi.kt
+          PAIRS
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: bindings-generated
+          path: target/drift
+          if-no-files-found: error
+
   wheels:
     name: wheel ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
