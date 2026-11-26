@@ -12,7 +12,7 @@ rust-version = "1.89"
 autotests = false
 
 [dependencies]
-troupekit-trace = { path = "../troupekit-trace", version = "0.1.0" }
+troupekit-trace = { path = "../troupekit-trace", version = "0.2.0" }
 troupekit-core.workspace = true
 troupekit-index.workspace = true
 rusqlite = { version = "0.43", features = ["bundled"] }
