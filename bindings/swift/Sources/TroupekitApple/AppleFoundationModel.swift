@@ -8,7 +8,7 @@ import FoundationModels
 /// Tools are emulated by the Rust side through `schema_json` (guided generation), so the
 /// tool loop and every checkpoint stay in troupekit. Safe to create on any OS; it reports unavailable.
 public final class AppleFoundationModel: HostModel, @unchecked Sendable {
-    static let fallbackContextTokens = 4096
+    static let contextTokens = 4096
 
     /// Creates the adapter over `SystemLanguageModel.default`.
     /// Input: none. Output: the adapter; availability is checked on every call.
@@ -19,7 +19,7 @@ public final class AppleFoundationModel: HostModel, @unchecked Sendable {
     }
 
     public func capabilities() -> HostModelCaps {
-        HostModelCaps(tools: false, jsonSchema: true, streaming: true, contextTokens: UInt32(Self.contextTokens()))
+        HostModelCaps(tools: false, jsonSchema: true, streaming: true, contextTokens: UInt32(Self.contextTokens))
     }
 
     public func generate(request: HostRequest, sink: TokenSink) throws -> HostReply {
@@ -114,15 +114,6 @@ public final class AppleFoundationModel: HostModel, @unchecked Sendable {
         }
         lines.append("assistant:")
         return (request.system ?? "", lines.joined(separator: "\n"))
-    }
-
-    private static func contextTokens() -> Int {
-        #if canImport(FoundationModels)
-        if #available(iOS 26, macOS 26, *) {
-            return SystemLanguageModel.default.contextSize
-        }
-        #endif
-        return fallbackContextTokens
     }
 
     #if canImport(FoundationModels)

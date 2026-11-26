@@ -29,7 +29,7 @@ enum AppleSchema {
     }
 
     private static let known: Set<String> = [
-        "type", "properties", "required", "items", "enum", "anyOf", "oneOf",
+        "type", "properties", "required", "items", "enum", "const", "anyOf", "oneOf",
         "description", "title", "minItems", "maxItems", "additionalProperties", "$schema",
     ]
 
@@ -82,8 +82,10 @@ enum AppleSchema {
             guard let properties = node["properties"] as? [String: Any], !properties.isEmpty else {
                 throw AppleAdapterError("apple model: schema \(name) is a free-form object")
             }
-            let required = Set(node["required"] as? [String] ?? [])
-            let parsed = try properties.keys.sorted().map { key in
+            let requiredOrder = (node["required"] as? [String] ?? []).filter { properties[$0] != nil }
+            let required = Set(requiredOrder)
+            let order = requiredOrder + properties.keys.filter { !required.contains($0) }.sorted()
+            let parsed = try order.map { key in
                 Property(
                     name: key,
                     description: (properties[key] as? [String: Any])?["description"] as? String,
@@ -93,6 +95,12 @@ enum AppleSchema {
             }
             return .object(name: name, description: description, properties: parsed)
         case "string":
+            if let value = node["const"] {
+                guard let string = value as? String else {
+                    throw AppleAdapterError("apple model: schema \(name) const must be a string")
+                }
+                return .string(values: [string])
+            }
             if let values = node["enum"] {
                 guard let strings = values as? [String], !strings.isEmpty else {
                     throw AppleAdapterError("apple model: schema \(name) enum must list strings")

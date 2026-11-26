@@ -147,6 +147,15 @@ final class AppleAdapterTests: XCTestCase {
         XCTAssertNoThrow(try AppleSchema.check(schema))
     }
 
+    func testSchemaConstIsOneValueEnumAndRequiredOrderIsKept() throws {
+        let schema = "{\"type\":\"object\",\"properties\":{\"arguments\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}}},\"tool\":{\"type\":\"string\",\"const\":\"lookup\"}},\"required\":[\"tool\",\"arguments\"]}"
+        guard case let .object(_, _, properties) = try AppleSchema.check(schema) else {
+            return XCTFail("root is not an object")
+        }
+        XCTAssertEqual(properties.map(\.name), ["tool", "arguments"])
+        XCTAssertEqual(properties.first?.node, .string(values: ["lookup"]))
+    }
+
     func testTransportReportsFinalURL() async throws {
         let url = "https://api.example.test/v1/chat"
         StubProtocol.set(url, .init(status: 200, headers: ["content-type": "text/event-stream"], body: Data("data: hi\n\n".utf8), redirect: nil))

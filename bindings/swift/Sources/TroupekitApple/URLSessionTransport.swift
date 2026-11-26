@@ -8,6 +8,7 @@ public final class URLSessionTransport: HostTransport, @unchecked Sendable {
     static let chunkBytes = 16 * 1024
 
     private let session: URLSession
+    private let router: TransportRouter
 
     /// Creates the transport over a fresh ephemeral session.
     /// Input: none. Output: the transport.
@@ -20,7 +21,9 @@ public final class URLSessionTransport: HostTransport, @unchecked Sendable {
         configuration.httpShouldSetCookies = false
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        session = URLSession(configuration: configuration)
+        let router = TransportRouter()
+        self.router = router
+        session = URLSession(configuration: configuration, delegate: router, delegateQueue: nil)
     }
 
     deinit {
@@ -60,33 +63,31 @@ public final class URLSessionTransport: HostTransport, @unchecked Sendable {
             urlRequest.httpBody = request.body
         }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let delegate = TransportTask(requestURL: request.url, head: head, chunk: chunk, continuation: continuation)
             let task = session.dataTask(with: urlRequest)
-            task.delegate = delegate
+            router.register(TransportTask(requestURL: request.url, head: head, chunk: chunk, continuation: continuation), for: task.taskIdentifier)
             task.resume()
         }
     }
 }
 
-/// Per-request delegate: refuses redirects, reports the head, splits the body, ends the wait.
-/// Input: the callbacks and the continuation to resume. Output: callbacks in arrival order.
-final class TransportTask: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let requestURL: String
-    private let head: (Int, String, [HostHeader]) -> Void
-    private let chunk: (Data) -> Void
+/// Session delegate that routes each task's events to its `TransportTask` by task id.
+/// Redirects are refused for every task. An entry is removed when its task completes.
+/// Input: URLSession delegate calls. Output: calls on the registered task, or none.
+final class TransportRouter: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Error>?
+    private var tasks: [Int: TransportTask] = [:]
 
-    init(
-        requestURL: String,
-        head: @escaping (Int, String, [HostHeader]) -> Void,
-        chunk: @escaping (Data) -> Void,
-        continuation: CheckedContinuation<Void, Error>
-    ) {
-        self.requestURL = requestURL
-        self.head = head
-        self.chunk = chunk
-        self.continuation = continuation
+    func register(_ task: TransportTask, for id: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        precondition(tasks[id] == nil, "task id registered twice")
+        tasks[id] = task
+    }
+
+    private func task(_ id: Int, remove: Bool = false) -> TransportTask? {
+        lock.lock()
+        defer { lock.unlock() }
+        return remove ? tasks.removeValue(forKey: id) : tasks[id]
     }
 
     func urlSession(
@@ -105,19 +106,52 @@ final class TransportTask: NSObject, URLSessionDataDelegate, @unchecked Sendable
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
-        guard let http = response as? HTTPURLResponse else {
+        guard let entry = task(dataTask.taskIdentifier), let http = response as? HTTPURLResponse else {
             completionHandler(.cancel)
             return
         }
-        let headers = http.allHeaderFields.compactMap { key, value -> HostHeader? in
-            guard let name = key as? String else { return nil }
-            return HostHeader(name: name, value: "\(value)")
-        }
-        head(http.statusCode, http.url?.absoluteString ?? requestURL, headers)
+        entry.receive(http)
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        task(dataTask.taskIdentifier)?.receive(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        self.task(task.taskIdentifier, remove: true)?.complete(error)
+    }
+}
+
+/// One request in flight: reports the head, splits the body, ends the caller's wait once.
+/// Input: the callbacks and the continuation to resume. Output: callbacks in arrival order.
+final class TransportTask: @unchecked Sendable {
+    private let requestURL: String
+    private let head: (Int, String, [HostHeader]) -> Void
+    private let chunk: (Data) -> Void
+    private let continuation: CheckedContinuation<Void, Error>
+
+    init(
+        requestURL: String,
+        head: @escaping (Int, String, [HostHeader]) -> Void,
+        chunk: @escaping (Data) -> Void,
+        continuation: CheckedContinuation<Void, Error>
+    ) {
+        self.requestURL = requestURL
+        self.head = head
+        self.chunk = chunk
+        self.continuation = continuation
+    }
+
+    func receive(_ response: HTTPURLResponse) {
+        let headers = response.allHeaderFields.compactMap { key, value -> HostHeader? in
+            guard let name = key as? String else { return nil }
+            return HostHeader(name: name, value: "\(value)")
+        }
+        head(response.statusCode, response.url?.absoluteString ?? requestURL, headers)
+    }
+
+    func receive(_ data: Data) {
         var start = data.startIndex
         while start < data.endIndex {
             let end = data.index(start, offsetBy: URLSessionTransport.chunkBytes, limitedBy: data.endIndex) ?? data.endIndex
@@ -126,16 +160,11 @@ final class TransportTask: NSObject, URLSessionDataDelegate, @unchecked Sendable
         }
     }
 
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        lock.lock()
-        let waiting = continuation
-        continuation = nil
-        lock.unlock()
-        guard let waiting else { return }
+    func complete(_ error: Error?) {
         if let error {
-            waiting.resume(throwing: AppleAdapterError("transport error: \(error.localizedDescription)"))
+            continuation.resume(throwing: AppleAdapterError("transport error: \(error.localizedDescription)"))
         } else {
-            waiting.resume()
+            continuation.resume()
         }
     }
 }
