@@ -227,6 +227,9 @@ impl LocalChat {
         req.validate()?;
         let req = req.sendable(false)?;
         let messages = self.render(&req)?;
+        for message in &messages {
+            self.refuse_control_tokens(message.content())?;
+        }
         let rendered = self.model.render_chat(&messages, true).map_err(server)?;
         let prompt = self.model.tokenize(&rendered, true).map_err(server)?;
         let limit = self.model.info().context_length();
@@ -252,7 +255,26 @@ impl LocalChat {
         let mut gate = TextGate::new(!req.tools.is_empty());
         let generation = self.generate(prompt, params, &mut gate, on_delta).await?;
         self.check_confidence(&generation)?;
-        let parts = parse_reply(generation.text(), &req.tools).map_err(server)?;
+        let earlier_calls = req
+            .messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .filter(|p| matches!(p, ContentPart::ToolCall { .. }))
+            .count();
+        let parts: Vec<ContentPart> = parse_reply(generation.text(), &req.tools)
+            .map_err(server)?
+            .into_iter()
+            .map(|p| match p {
+                ContentPart::ToolCall {
+                    name, arguments, ..
+                } => ContentPart::ToolCall {
+                    id: format!("local-{}", earlier_calls + 1),
+                    name,
+                    arguments,
+                },
+                other => other,
+            })
+            .collect();
         let call = parts.iter().find_map(|p| match p {
             ContentPart::ToolCall {
                 id,
@@ -304,6 +326,18 @@ impl LocalChat {
             usage,
             stop,
         })
+    }
+
+    fn refuse_control_tokens(&self, content: &str) -> Result<(), ProviderError> {
+        let plain = self.model.tokenize(content, false).map_err(server)?;
+        let special = self.model.tokenize(content, true).map_err(server)?;
+        if plain != special {
+            return Err(ProviderError::new(
+                ProviderErrorKind::BadRequest,
+                "message text holds chat template control tokens",
+            ));
+        }
+        Ok(())
     }
 
     fn check_confidence(&self, generation: &Generation) -> Result<(), ProviderError> {
