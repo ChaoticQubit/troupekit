@@ -286,7 +286,8 @@ jobs:
           status=0
           while read -r generated checked; do
             if [ ! -f "$checked" ]; then
-              echo "::warning file=$checked::not checked in yet; take it from the bindings-generated artifact"
+              echo "::error file=$checked::missing: take it from the bindings-generated artifact"
+              status=1
               continue
             fi
             if ! cmp -s "$generated" "$checked"; then
@@ -332,12 +333,7 @@ jobs:
           done
           test -n "$lib"
           kotlin=bindings/kotlin/troupekit/src/main/kotlin/dev/troupekit/troupekit_ffi.kt
-          if [ ! -f "$kotlin" ]; then
-            cargo run -p troupekit-ffi --features bindgen --release --locked --bin uniffi-bindgen -- \
-              generate --library "$lib" --language kotlin --out-dir target/kotlin-bindings
-            mkdir -p "$(dirname "$kotlin")"
-            cp target/kotlin-bindings/dev/troupekit/troupekit_ffi.kt "$kotlin"
-          fi
+          test -f "$kotlin"
       - name: JVM contract runner
         shell: bash
         working-directory: bindings/kotlin
@@ -425,12 +421,7 @@ jobs:
           sh scripts/build-xcframework.sh
           cargo build -p troupekit-ffi --release --locked
           kotlin=bindings/kotlin/troupekit/src/main/kotlin/dev/troupekit/troupekit_ffi.kt
-          if [ ! -f "$kotlin" ]; then
-            cargo run -p troupekit-ffi --features bindgen --release --locked --bin uniffi-bindgen -- \
-              generate --library target/release/libtroupekit_ffi.dylib --language kotlin --out-dir target/kotlin-bindings
-            mkdir -p "$(dirname "$kotlin")"
-            cp target/kotlin-bindings/dev/troupekit/troupekit_ffi.kt "$kotlin"
-          fi
+          test -f "$kotlin"
           sh scripts/build-wheel.sh dist
           python3 -m venv bench-venv
           bench-venv/bin/python -m pip install --quiet dist/troupekit-*-abi3-*.whl
