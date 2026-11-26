@@ -89,6 +89,7 @@ enum Out {
 /// knowledge tools wired by hand, an eval, a budget, a law and SQLite
 /// checkpoints, traced with every category. Output: the answer.
 async fn fixture_a(dir: &Path, out: Out, content: bool) -> String {
+    std::fs::create_dir_all(dir).unwrap();
     let db = dir.join("office.db");
     let embedder: Arc<dyn Embedder> = Arc::new(HashingEmbedder::new(DIMS));
     let (store, vectors, report) = agent::open(&db, &docs(), embedder.as_ref()).await.unwrap();
@@ -258,4 +259,14 @@ async fn private_request_never_reaches_the_network() {
         .unwrap();
     assert!(!answer.is_empty());
     assert!(transport.sent().is_empty(), "no request left the device");
+}
+
+#[tokio::test]
+async fn fixture_runs_in_a_directory_it_creates() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("a").join("b");
+    assert!(!nested.exists());
+    let answer = fixture_a(&nested, Out::Sink(Arc::new(MemorySink::default())), false).await;
+    assert!(answer.contains(ANSWER), "{answer}");
+    assert!(nested.join("office.db").is_file());
 }
