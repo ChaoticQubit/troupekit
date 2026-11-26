@@ -68,7 +68,10 @@ impl BuiltAgent {
         let mut steps = 0u32;
         while steps < MAX_STEPS_PER_WINDOW && !spent(Duration::ZERO) {
             let step = run.step(io).await;
-            store.save(run.checkpoint()).await?;
+            store
+                .save(run.checkpoint())
+                .await
+                .map_err(|e| KitError::in_run(run_id, e.into()))?;
             steps += 1;
             match step {
                 StepOutcome::Continue => {}

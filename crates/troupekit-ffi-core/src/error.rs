@@ -54,12 +54,21 @@ impl FfiError {
 
 impl From<troupekit_kit::KitError> for FfiError {
     /// Maps every kit error to its stable code, with the kit's message
-    /// (which never holds a key) and the run id for run outcomes. A run
-    /// failed by a host model is `HostCallback`. A kit variant added later
-    /// maps to `Internal` until it gets its own code.
+    /// (which never holds a key) and the run id for run outcomes. An
+    /// `InRun` failure takes its inner error's code and its own run id.
+    /// A run failed by a host model is `HostCallback`. A kit variant
+    /// added later maps to `Internal` until it gets its own code.
     fn from(err: troupekit_kit::KitError) -> FfiError {
         use troupekit_kit::KitError as K;
         let message = err.to_string();
+        if let K::InRun { run_id, source } = err {
+            let inner = FfiError::from(*source);
+            return FfiError {
+                code: inner.code,
+                message,
+                run_id: Some(run_id.to_string()),
+            };
+        }
         let (code, run_id) = match &err {
             K::Config { .. } => (ErrorCode::Config, None),
             K::MissingKey { .. } => (ErrorCode::MissingKey, None),

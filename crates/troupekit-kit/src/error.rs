@@ -49,6 +49,11 @@ pub enum KitError {
         attempts: u32,
         last_error: String,
     },
+    #[error("run {run_id}: {source}")]
+    InRun {
+        run_id: RunId,
+        source: Box<KitError>,
+    },
 }
 
 impl KitError {
@@ -56,6 +61,27 @@ impl KitError {
         KitError::Config {
             agent: agent.to_string(),
             message: message.into(),
+        }
+    }
+
+    /// Ties an execution failure to run `run_id`, so the caller can
+    /// resume or inspect it. Input: the run id and the failure.
+    /// Output: `InRun`, or `err` as is when it already names a run.
+    pub(crate) fn in_run(run_id: RunId, err: KitError) -> Self {
+        let named = matches!(
+            err,
+            KitError::Failed { .. }
+                | KitError::Paused { .. }
+                | KitError::Cancelled { .. }
+                | KitError::Retries { .. }
+                | KitError::InRun { .. }
+        );
+        if named {
+            return err;
+        }
+        KitError::InRun {
+            run_id,
+            source: Box::new(err),
         }
     }
 }

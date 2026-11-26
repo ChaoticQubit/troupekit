@@ -81,6 +81,20 @@ fn kit_errors(run_id: RunId) -> Vec<(KitError, ErrorCode)> {
         ),
         (KitError::Cancelled { run_id }, ErrorCode::Cancelled),
         (
+            KitError::InRun {
+                run_id,
+                source: Box::new(KitError::Store(CoreError::InvalidMessage("full".into()))),
+            },
+            ErrorCode::Store,
+        ),
+        (
+            KitError::InRun {
+                run_id,
+                source: Box::new(KitError::Agent(AgentError::Checkpoint("torn".into()))),
+            },
+            ErrorCode::Agent,
+        ),
+        (
             KitError::Retries {
                 run_id,
                 attempts: 3,
@@ -112,6 +126,7 @@ fn every_kit_error_has_its_code() {
                 | KitError::Paused { .. }
                 | KitError::Retries { .. }
                 | KitError::Cancelled { .. }
+                | KitError::InRun { .. }
         );
         let err = FfiError::from(kit);
         assert_eq!(err.code, code, "{message}");
