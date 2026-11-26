@@ -154,3 +154,23 @@ async fn macro_delegates_key_reaches_builder() {
         .unwrap();
     assert_eq!(by_hand.persona(), built.persona());
 }
+
+/// Manage the crew.
+#[agent(model = "fake/m", manages = [echo_researcher, crew::echo_checker])]
+fn boss() {}
+
+#[tokio::test]
+async fn macro_manages_key_reaches_builder() {
+    let built = boss().model_client(echo_model()).build().await.unwrap();
+    let by_hand = Agent::new("boss")
+        .instructions("Manage the crew.")
+        .model("fake/m")
+        .model_client(echo_model())
+        .manages([echo_researcher(), crew::echo_checker()])
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(built.persona(), by_hand.persona());
+    let text = built.run("Go").await.unwrap();
+    assert!(text.starts_with("Hello! You said: "), "{text}");
+}

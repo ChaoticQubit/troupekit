@@ -6,7 +6,7 @@ use crate::tokens::{Delim, Error, Piece, SpanId, Tok};
 use crate::tool::crate_path;
 
 const WHAT: &str = "#[agent]";
-const KEYS: [&str; 20] = [
+const KEYS: [&str; 21] = [
     "model",
     "tools",
     "evals",
@@ -25,6 +25,7 @@ const KEYS: [&str; 20] = [
     "knowledge",
     "agents",
     "delegates",
+    "manages",
     "name",
     "crate",
 ];
@@ -43,7 +44,7 @@ pub struct Call {
 
 /// How a call passes its value: `Plain` as written, `Invoke` as the call
 /// `path()`, `InvokeList` as the one-element array `[path()]`.
-/// `agents` and `delegates` name `#[agent]` fns, so they invoke them.
+/// `agents`, `delegates` and `manages` name fns that return an Agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
     Plain,
@@ -198,10 +199,11 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     shape: Shape::Plain,
                 });
             }
-            "agents" | "delegates" => {
+            "agents" | "delegates" | "manages" => {
                 let (method, shape) = match arg.key.as_str() {
                     "agents" => ("agent_tool", Shape::Invoke),
-                    _ => ("delegates", Shape::InvokeList),
+                    "delegates" => ("delegates", Shape::InvokeList),
+                    _ => ("manages", Shape::InvokeList),
                 };
                 calls.extend(agent_paths(arg, method, shape)?);
             }
@@ -277,16 +279,16 @@ pub fn expand_agent(a: &AgentFn) -> Vec<Piece> {
     out
 }
 
-/// Parses an `agents` or `delegates` list of `#[agent]` fn paths into one
+/// Parses an `agents`, `delegates` or `manages` list of fn paths into one
 /// `method` call per path, in list order. Returns an error on a value
-/// that is not a list of paths, or on an empty `delegates` list.
+/// that is not a list of paths, or on an empty `delegates` or `manages`.
 fn agent_paths(arg: &Arg, method: &'static str, shape: Shape) -> Result<Vec<Call>, Error> {
     let message = format!(
         "{} = takes a list like [researcher, team::checker]",
         arg.key
     );
     let paths = list(arg, &message)?;
-    if paths.is_empty() && arg.key == "delegates" {
+    if paths.is_empty() && arg.key != "agents" {
         return Err(Error::new(arg.value_span(), message));
     }
     let mut calls = Vec::with_capacity(paths.len());
@@ -464,6 +466,17 @@ mod tests {
     }
 
     #[test]
+    fn manages_calls_once_with_every_path() {
+        let item = lex(&format!("{DOC}fn boss() {{}}"));
+        let a = parse_agent(&lex("manages = [researcher, ::x::editor]"), &item).unwrap();
+        assert_eq!(methods(&a), ["manages", "manages"]);
+        assert!(a.calls.iter().all(|c| c.shape == Shape::InvokeList));
+        let message = "manages = takes a list like [researcher, team::checker]";
+        rejects("manages = []", &format!("{DOC}fn boss() {{}}"), message);
+        rejects("manages = boss", &format!("{DOC}fn boss() {{}}"), message);
+    }
+
+    #[test]
     fn agents_and_delegates_take_paths() {
         let item = format!("{DOC}fn lead() {{}}");
         let agents = "agents = takes a list like [researcher, team::checker]";
@@ -626,7 +639,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_key() {
-        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, agents, delegates, name, crate");
+        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, agents, delegates, manages, name, crate");
     }
 
     #[test]
