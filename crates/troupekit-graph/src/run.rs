@@ -60,18 +60,27 @@ impl Stop {
 }
 
 /// Why a run failed inside a step. `Tool`: a tool node's call failed on a
-/// store or network error; `Transient`: transient retries ran out. Both
-/// can be retried. `Final`: anything else, which a retry would repeat.
+/// store or network error; `Transient`: transient retries ran out; `Child`:
+/// a subflow child failed retryably. These can be retried. `Final`:
+/// anything else, which a retry would repeat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Failure {
     Final,
     Tool,
     Transient,
+    Child,
 }
 
 impl Failure {
     fn of_error(error: &str) -> Failure {
+        let subflow = error
+            .strip_prefix("node `")
+            .and_then(|rest| rest.split_once("`: "))
+            .is_some_and(|(_, rest)| rest.starts_with("subflow: "));
+        if subflow {
+            return Failure::Child;
+        }
         let after_node = error
             .strip_prefix("node `")
             .and_then(|rest| rest.split_once("`: tool `"))
@@ -578,7 +587,10 @@ impl GraphRun {
     /// on a tool's store or network error or ran out of transient retries.
     /// False for runs that run, wait, finished, or failed for good.
     pub fn retryable(&self) -> bool {
-        self.stopped.is_some() || matches!(self.failure, Some(Failure::Tool | Failure::Transient))
+        self.stopped.is_some()
+            || matches!(self.failure, Some(Failure::Tool | Failure::Transient))
+            || (self.failure == Some(Failure::Child)
+                && self.branches.iter().any(|b| matches!(&b.at, At::Flow { run } if run.retryable())))
     }
 
     /// Continues a stopped or retryably failed run where it stopped, with
@@ -592,6 +604,15 @@ impl GraphRun {
             ));
         }
         assert!(matches!(self.status, GraphStatus::Failed { .. }), "a retryable run is failed");
+        if self.stopped.is_none() && self.failure == Some(Failure::Child) {
+            for b in &mut self.branches {
+                if let At::Flow { run } = &mut b.at {
+                    if run.retryable() {
+                        run.retry(time_limit_ms)?;
+                    }
+                }
+            }
+        }
         if self.stopped.is_none() && self.failure == Some(Failure::Tool) {
             let step = self.steps;
             let tools: Vec<bool> = self
@@ -1349,6 +1370,9 @@ impl GraphRun {
                     }
                 }
                 Work::Flow(GraphOutcome::Failed(e)) => {
+                    if matches!(&self.branches[i].at, At::Flow { run } if run.retryable()) {
+                        self.failure = Some(Failure::Child);
+                    }
                     return self.fail_after(reduced, format!("node `{}`: subflow: {e}", node.id));
                 }
                 Work::Flow(GraphOutcome::Done(child)) => {

@@ -309,3 +309,54 @@ async fn child_retry_at_keeps_the_parent_retrying_not_failed() {
     assert_eq!(state["y"], json!("polished"));
     assert_eq!(gates.calls("c1").len(), 1, "the child's tool ran once");
 }
+
+#[tokio::test]
+async fn retryable_child_failure_makes_the_parent_retryable() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(troupekit_graph::testing::FnTool::new("c1", move |_, _| {
+            let first = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            async move {
+                if first {
+                    return Err(troupekit_tools::ToolError::Failed(
+                        "database: max clients reached".into(),
+                    ));
+                }
+                Ok(ToolOutput::text("c1!"))
+            }
+        }))
+        .unwrap();
+    let agent = SimpleIo::new(tools).with_model("fake/m", model(), PRICE);
+    let personas = PersonaLoader::new(vec![Arc::new(MemorySource::new(
+        "test",
+        [("writer.toml".to_string(), WRITER.to_string())],
+    ))]);
+    let io = Flows {
+        inner: SimpleGraphIo::new(Arc::new(agent), personas),
+        flows: [("parent", parent("polish")), ("polish", CHILD.into())]
+            .into_iter()
+            .map(|(n, t)| (n.to_string(), t))
+            .collect(),
+    };
+    let mut run = start("parent", &io).await.unwrap();
+    let out = drive(&mut run, &io).await;
+    assert!(
+        matches!(&out, GraphOutcome::Failed(e) if e.contains("subflow")),
+        "{out:?}"
+    );
+    assert!(run.retryable(), "a child's store failure is retryable");
+    let mut run = GraphRun::from_checkpoint(&run.checkpoint()).unwrap();
+    assert!(run.retryable(), "the class survives a checkpoint");
+    run.retry(None).unwrap();
+    let GraphOutcome::Done(state) = drive(&mut run, &io).await else {
+        panic!("the retried parent finishes");
+    };
+    assert_eq!(state["y"], json!("polished"));
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the child's tool re-ran once"
+    );
+}
