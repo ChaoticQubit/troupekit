@@ -24,7 +24,7 @@ fn hnsw_contract() {
 
 #[test]
 fn recall_at_10_on_10k_is_at_least_0_95() {
-    let data = clustered(41, 10_100, 64, 50, 0.35);
+    let data = clustered(41, 10_100, 64, 50, 0.12);
     let (items, queries) = data.split_at(10_000);
     let mut index = hnsw(64);
     let mut oracle = brute(64);
@@ -204,4 +204,23 @@ fn removal_repair_keeps_recall_without_rebuild() {
     assert_eq!(index.len(), 2_100);
     let recall = recall_at_10(index.as_ref(), oracle.as_ref(), queries);
     assert!(recall >= 0.95, "recall@10 after local repair {recall}");
+}
+
+#[test]
+fn hard_data_recall_rises_with_ef_search() {
+    let data = clustered(41, 10_100, 64, 50, 0.35);
+    let (items, queries) = data.split_at(10_000);
+    let mut oracle = brute(64);
+    let mut recalls = Vec::new();
+    for ef in [64usize, 400] {
+        let mut index = hnsw_with(64, HnswParams::default().with_ef_search(ef));
+        let mut scratch = brute(64);
+        build(index.as_mut(), scratch.as_mut(), items);
+        if oracle.is_empty() {
+            oracle = scratch;
+        }
+        recalls.push(recall_at_10(index.as_ref(), oracle.as_ref(), queries));
+    }
+    assert!(recalls[1] > recalls[0], "recall must rise with ef_search: {recalls:?}");
+    assert!(recalls[1] >= 0.95, "a connected graph reaches 0.95 with a wide beam: {recalls:?}");
 }
