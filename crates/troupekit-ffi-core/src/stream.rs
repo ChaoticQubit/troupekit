@@ -12,12 +12,6 @@ pub struct RunStream {
 }
 
 impl RunStream {
-    pub(crate) fn unsupported() -> Arc<RunStream> {
-        Arc::new(RunStream {
-            run_id: String::new(),
-        })
-    }
-
     /// Waits for the next event of the run.
     /// Output: the event, `None` once the run has finished, failed,
     /// paused or been cancelled, or `InvalidArgument` with a listener set.

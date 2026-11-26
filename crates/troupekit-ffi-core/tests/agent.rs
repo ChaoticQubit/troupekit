@@ -121,3 +121,11 @@ async fn bad_api_key_is_refused_without_echo() {
     assert_eq!(err.code, ErrorCode::InvalidArgument);
     assert!(err.message.contains("api_key"), "{err}");
 }
+
+#[tokio::test]
+async fn stream_is_async_and_returns_a_result() {
+    let handle = calc().build().await.unwrap();
+    let err = handle.stream("1 + 2".into()).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    assert!(err.message.contains("AgentHandle::stream"), "{err}");
+}
