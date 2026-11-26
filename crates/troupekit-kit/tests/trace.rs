@@ -119,7 +119,9 @@ async fn trace_list_limits_categories() {
         .unwrap();
     let records = records(&sink.lines());
     assert_eq!(records[0]["categories"], serde_json::json!(["agents"]));
-    assert!(records.iter().skip(1).all(|r| r["cat"] == "agents"));
+    let named = records.iter().filter(|r| r["t"] == "start" || r["t"] == "event");
+    assert!(named.clone().count() > 0);
+    assert!(named.into_iter().all(|r| r["cat"] == "agents"));
     assert!(names(&records, "start").contains(&"agent.run".to_owned()));
 
     let none = Arc::new(MemorySink::default());

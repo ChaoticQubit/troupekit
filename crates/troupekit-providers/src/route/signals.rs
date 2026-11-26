@@ -58,15 +58,12 @@ impl Signals {
         self
     }
 
-    /// Returns these signals with the battery percent set.
-    /// Below the policy minimum, on-device targets are dropped.
-    /// `None` is unknown and drops nothing.
+    /// Returns these signals with the battery percent set; a value above
+    /// 100 counts as 100. Below the policy minimum, on-device targets are
+    /// dropped. `None` is unknown and drops nothing.
     pub fn with_battery_percent(mut self, percent: Option<u8>) -> Self {
-        assert!(
-            percent.is_none_or(|p| p <= 100),
-            "battery percent above 100"
-        );
-        self.battery_percent = percent;
+        self.battery_percent = percent.map(|p| p.min(100));
+        assert!(self.battery_percent.is_none_or(|p| p <= 100));
         self
     }
 
@@ -271,17 +268,13 @@ impl DeviceState {
         Self(Arc::new((AtomicU8::new(UNKNOWN), AtomicU8::new(UNKNOWN))))
     }
 
-    /// Sets the battery percent, or unknown with `None`.
-    /// Panics on a value above 100, a caller bug.
-    /// Every clone sees the change.
+    /// Sets the battery percent, or unknown with `None`; a value above
+    /// 100 counts as 100. Every clone sees the change.
+    /// Never blocks.
     pub fn set_battery_percent(&self, percent: Option<u8>) {
-        assert!(
-            percent.is_none_or(|p| p <= 100),
-            "battery percent above 100"
-        );
-        self.0
-             .0
-            .store(percent.unwrap_or(UNKNOWN), Ordering::SeqCst);
+        let stored = percent.map_or(UNKNOWN, |p| p.min(100));
+        assert!(stored <= 100 || stored == UNKNOWN);
+        self.0 .0.store(stored, Ordering::SeqCst);
     }
 
     /// Sets the thermal state, or unknown with `None`.

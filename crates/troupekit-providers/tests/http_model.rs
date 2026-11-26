@@ -288,7 +288,7 @@ async fn http_model_span_has_no_headers_or_query() {
         assert_eq!(start["fields"]["model"], "vendor/m-1");
         assert_eq!(start["fields"]["stream"], stream);
         let url = start["fields"]["url"].as_str().unwrap();
-        assert!(url.starts_with("https://h.test/v1"));
+        assert_eq!(url, "https://h.test/v1");
         let span = start["span"].clone();
         let end = records
             .iter()

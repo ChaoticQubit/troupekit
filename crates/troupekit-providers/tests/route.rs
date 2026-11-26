@@ -823,12 +823,12 @@ async fn route_decide_emits_routing_span() {
         .expect("a route.decide span");
     assert_eq!(start["cat"], "routing");
     assert_eq!(start["fields"]["private"], false);
-    assert_eq!(start["fields"]["plan"], "cloud,local");
     let end = records
         .iter()
         .find(|r| r["t"] == "end" && r["span"] == start["span"])
         .expect("the span ends");
     assert_eq!(end["ok"], true);
+    assert_eq!(end["fields"]["plan"], "cloud,local");
     assert_eq!(end["fields"]["chosen"], "local");
     let fallback = records
         .iter()
@@ -861,4 +861,17 @@ async fn private_law_event_is_emitted() {
     assert_eq!(law["fields"]["held"], true);
     assert_eq!(law["fields"]["private"], true);
     assert_eq!(cloud_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn battery_above_100_counts_as_full() {
+    let device = DeviceState::new();
+    device.set_battery_percent(Some(250));
+    assert_eq!(device.battery_percent(), Some(100));
+    assert_eq!(
+        Signals::default()
+            .with_battery_percent(Some(101))
+            .battery_percent,
+        Some(100)
+    );
 }
