@@ -67,6 +67,7 @@ pub struct Agent {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    pub(crate) trace: crate::trace::TraceConfig,
 }
 
 impl Agent {
@@ -104,6 +105,7 @@ impl Agent {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            trace: crate::trace::TraceConfig::default(),
         }
     }
 
@@ -353,6 +355,26 @@ impl Agent {
     /// Fails with the first problem: settings, tools, persona, laws,
     /// evals, model, key or storage. Makes no model call.
     pub async fn build(self) -> Result<BuiltAgent, KitError> {
+        let secrets: Vec<Secret> = self.trace_secret().into_iter().collect();
+        let traced = self.trace.open(&self.name, &self.name, &secrets)?;
+        match traced {
+            Some(t) => {
+                let tracer = t.tracer.clone();
+                tracer.in_scope(self.build_in(Some(t))).await
+            }
+            None => self.build_in(None).await,
+        }
+    }
+
+    pub(crate) fn trace_secret(&self) -> Option<Secret> {
+        crate::model::trace_secret(
+            self.model.as_deref().unwrap_or_default(),
+            self.api_key.clone(),
+            self.api_key_env.as_deref(),
+        )
+    }
+
+    async fn build_in(self, traced: Option<crate::trace::Traced>) -> Result<BuiltAgent, KitError> {
         if self.retries > MAX_RETRIES {
             return Err(KitError::config(
                 &self.name,
@@ -391,7 +413,8 @@ impl Agent {
             store,
             this.retries,
             prepared.laws,
-        );
+        )
+        .with_trace(traced);
         #[cfg(feature = "knowledge")]
         let built = built.with_preamble(preamble);
         Ok(built)
@@ -404,6 +427,8 @@ impl Agent {
             Some("laws; set them on the graph")
         } else if self.ledger.is_some() {
             Some("ledger; set it on the graph")
+        } else if self.trace.is_on() {
+            Some("tracing; set it on the graph")
         } else if self.has_context() {
             Some("memory or knowledge; graphs do not take them in 0.2")
         } else {

@@ -16,4 +16,5 @@ mod output;
 mod storage;
 #[path = "fixtures/tools_mod.rs"]
 mod tools_mod;
+mod trace;
 mod ui;

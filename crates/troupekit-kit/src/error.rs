@@ -56,4 +56,13 @@ impl KitError {
             message: message.into(),
         }
     }
+
+    pub(crate) fn run_id(&self) -> Option<RunId> {
+        match self {
+            KitError::Failed { run_id, .. }
+            | KitError::Paused { run_id, .. }
+            | KitError::Retries { run_id, .. } => Some(*run_id),
+            _ => None,
+        }
+    }
 }

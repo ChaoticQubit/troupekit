@@ -1,7 +1,10 @@
 use crate::error::KitError;
 use crate::laws::Laws;
 use serde_json::Value;
+use crate::trace::{path_of, root_span, Traced};
 use std::fmt;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use troupekit_agent::{
@@ -12,6 +15,7 @@ use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::message::{Message, Role};
 use troupekit_core::store::CheckpointStore;
+use troupekit_trace::Trace;
 
 const BASE_RETRY_MS: u64 = 500;
 const MAX_RETRY_MS: u64 = 30_000;
@@ -64,6 +68,7 @@ pub struct RunOutcome {
     model_calls: u32,
     run_id: RunId,
     messages: Vec<Message>,
+    trace_path: Option<PathBuf>,
 }
 
 impl RunOutcome {
@@ -108,6 +113,13 @@ impl RunOutcome {
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
+
+    /// Returns the trace file this run was written to.
+    /// `None` when tracing is off or goes to a custom sink.
+    /// Every run of one built agent shares the file.
+    pub fn trace_path(&self) -> Option<&Path> {
+        self.trace_path.as_deref()
+    }
 }
 
 /// An agent that passed every `build` check, ready to run many times.
@@ -125,6 +137,7 @@ struct Inner {
     store: Option<Arc<dyn CheckpointStore>>,
     retries: u32,
     laws: Laws,
+    trace: Option<Traced>,
     #[cfg(feature = "knowledge")]
     preamble: Option<troupekit_context::tools::KnowledgeKit>,
 }
@@ -146,10 +159,35 @@ impl BuiltAgent {
                 store,
                 retries,
                 laws,
+                trace: None,
                 #[cfg(feature = "knowledge")]
                 preamble: None,
             }),
         }
+    }
+
+    pub(crate) fn with_trace(mut self, trace: Option<Traced>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("a fresh BuiltAgent is not shared");
+        inner.trace = trace;
+        self
+    }
+
+    /// Returns the trace file this agent writes, one root span per run.
+    /// `None` when tracing is off or goes to a custom sink.
+    /// The file is created at `build`.
+    pub fn trace_path(&self) -> Option<&Path> {
+        path_of(&self.inner.trace)
+    }
+
+    async fn traced<T>(
+        &self,
+        run_id: Option<RunId>,
+        work: impl Future<Output = Result<T, KitError>>,
+        id_of: impl Fn(&T) -> RunId,
+    ) -> Result<T, KitError> {
+        let owner = self.inner.persona.name.as_str();
+        let traced = self.inner.trace.as_ref();
+        root_span(traced, Trace::Agents, "agent.run", owner, run_id, work, id_of).await
     }
 
     #[cfg(feature = "knowledge")]
@@ -186,8 +224,14 @@ impl BuiltAgent {
     /// Same failures as `run`.
     /// The run id in the outcome works with `resume`.
     pub async fn run_with(&self, input: impl Into<Input>) -> Result<RunOutcome, KitError> {
+        let input = input.into();
+        self.traced(None, self.run_untraced(input), RunOutcome::run_id)
+            .await
+    }
+
+    async fn run_untraced(&self, input: Input) -> Result<RunOutcome, KitError> {
         let inner = &self.inner;
-        let messages = self.messages(input.into()).await?;
+        let messages = self.messages(input).await?;
         let mut run =
             AgentRun::new(&inner.persona, messages, inner.limits.clone(), &inner.io).await?;
         let store: Arc<dyn CheckpointStore> = match &inner.store {
@@ -201,6 +245,11 @@ impl BuiltAgent {
     /// or restart, and returns the answer. A finished run returns its
     /// answer again. Needs `Storage::sqlite(..)` or `Storage::custom(..)`.
     pub async fn resume(&self, run_id: RunId) -> Result<String, KitError> {
+        self.traced(Some(run_id), self.resume_untraced(run_id), |_| run_id)
+            .await
+    }
+
+    async fn resume_untraced(&self, run_id: RunId) -> Result<String, KitError> {
         let name = self.inner.persona.name.as_str();
         let Some(store) = &self.inner.store else {
             return Err(KitError::config(
@@ -239,7 +288,7 @@ impl BuiltAgent {
     ) -> Result<RunOutcome, KitError> {
         let io: &dyn AgentIo = &self.inner.io;
         match run.state().clone() {
-            RunState::Done { output } => return Ok(outcome(run, output)),
+            RunState::Done { output } => return Ok(self.outcome(run, output)),
             RunState::Failed { error } => {
                 return Err(KitError::Failed {
                     run_id: run.run_id(),
@@ -257,7 +306,7 @@ impl BuiltAgent {
         let mut attempts = 0u32;
         loop {
             match drive(run, io, store).await? {
-                StepOutcome::Done(output) => return Ok(outcome(run, output)),
+                StepOutcome::Done(output) => return Ok(self.outcome(run, output)),
                 StepOutcome::Retry {
                     error,
                     retry_after_ms,
@@ -291,6 +340,12 @@ impl BuiltAgent {
             assert!(attempts <= self.inner.retries);
         }
     }
+
+    fn outcome(&self, run: &AgentRun, output: Value) -> RunOutcome {
+        let mut outcome = outcome(run, output);
+        outcome.trace_path = self.trace_path().map(Path::to_path_buf);
+        outcome
+    }
 }
 
 impl fmt::Debug for BuiltAgent {
@@ -319,6 +374,7 @@ fn outcome(run: &AgentRun, output: Value) -> RunOutcome {
         model_calls: run.model_calls(),
         run_id: run.run_id(),
         messages: run.messages().to_vec(),
+        trace_path: None,
     }
 }
 
