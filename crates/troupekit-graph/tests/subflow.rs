@@ -276,3 +276,36 @@ async fn private_override_inside_a_subflow_is_refused_at_start() {
     );
     assert!(gates.calls("c1").is_empty(), "nothing in the child ran");
 }
+
+#[tokio::test]
+async fn child_retry_at_keeps_the_parent_retrying_not_failed() {
+    let gates = GatedTool::new();
+    gates.open("c1");
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let model = Arc::new(FnModel::new("fake/m", move |_| {
+        if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Err(troupekit_core::error::ProviderError::new(
+                troupekit_core::error::ProviderErrorKind::RateLimited,
+                "wait",
+            ));
+        }
+        text_reply("polished", 10)
+    }));
+    let io = io(
+        &gates,
+        model,
+        &[("parent", parent("polish")), ("polish", CHILD.into())],
+    );
+    let mut run = start("parent", &io).await.unwrap();
+    let out = drive(&mut run, &io).await;
+    assert!(
+        matches!(&out, GraphOutcome::RetryAt { error, .. } if error.contains("RateLimited")),
+        "{out:?}"
+    );
+    let GraphOutcome::Done(state) = drive(&mut run, &io).await else {
+        panic!("the parent finishes after the child's retry");
+    };
+    assert_eq!(state["y"], json!("polished"));
+    assert_eq!(gates.calls("c1").len(), 1, "the child's tool ran once");
+}

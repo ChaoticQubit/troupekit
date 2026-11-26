@@ -1334,6 +1334,7 @@ impl GraphRun {
 
     async fn apply(&mut self, io: &dyn GraphIo, results: Vec<Work>) -> GraphOutcome {
         let mut retry: Option<(String, Option<u64>)> = None;
+        let mut child_retry: Option<(i64, String)> = None;
         let mut reduced: Vec<Reduced> = Vec::new();
         for (i, w) in results.into_iter().enumerate() {
             let node = self.node(&self.branches[i].node).clone();
@@ -1341,7 +1342,13 @@ impl GraphRun {
                 Work::Idle
                 | Work::Agent(StepOutcome::Continue | StepOutcome::Paused(_))
                 | Work::Flow(GraphOutcome::Continue | GraphOutcome::Waiting(_)) => {}
-                Work::Flow(GraphOutcome::Failed(e) | GraphOutcome::RetryAt { error: e, .. }) => {
+                Work::Flow(GraphOutcome::RetryAt { at_ms, error }) => {
+                    let error = format!("node `{}`: subflow: {error}", node.id);
+                    if child_retry.as_ref().is_none_or(|(at, _)| at_ms < *at) {
+                        child_retry = Some((at_ms, error));
+                    }
+                }
+                Work::Flow(GraphOutcome::Failed(e)) => {
                     return self.fail_after(reduced, format!("node `{}`: subflow: {e}", node.id));
                 }
                 Work::Flow(GraphOutcome::Done(child)) => {
@@ -1424,6 +1431,9 @@ impl GraphRun {
             let backoff = BASE_RETRY_DELAY_MS.saturating_mul(1 << (self.retries - 1).min(20));
             let delay = after.unwrap_or(backoff.min(MAX_RETRY_DELAY_MS));
             let at_ms = io.agent().clock().now_ms() + i64::try_from(delay).unwrap_or(i64::MAX / 2);
+            return GraphOutcome::RetryAt { at_ms, error };
+        }
+        if let Some((at_ms, error)) = child_retry {
             return GraphOutcome::RetryAt { at_ms, error };
         }
         self.retries = 0;
