@@ -7,6 +7,7 @@ use troupekit_core::error::CoreError;
 use troupekit_core::event::Usage;
 use troupekit_core::tool::WEB_SEARCH;
 use troupekit_providers::{CompletionRequest, Price};
+use troupekit_trace::{trace_span, Trace};
 
 /// A spend limit for one period, such as a goal's or a user's month.
 /// `key` names the ledger total (for example `goal:42`); the ledger decides
@@ -124,6 +125,27 @@ pub fn estimate(req: &CompletionRequest, price: &Price) -> u64 {
 /// given `run_spent` so far and the ledger's period totals. Returns the
 /// first crossed layer: `unverified_price`, `call`, `run`, `scope`, `user`.
 pub async fn check(
+    limits: &Limits,
+    price: &Price,
+    run_spent: u64,
+    estimate: u64,
+    ledger: &dyn UsageLedger,
+) -> Result<Option<&'static str>, CoreError> {
+    let mut span = trace_span!(
+        Trace::Budget,
+        "budget.check",
+        estimate = estimate,
+        run_spent = run_spent,
+    );
+    let result = span.instrument(crossed(limits, price, run_spent, estimate, ledger)).await;
+    match &result {
+        Ok(layer) => span.record("crossed", layer.unwrap_or("none")),
+        Err(e) => span.fail(e.to_string()),
+    }
+    result
+}
+
+async fn crossed(
     limits: &Limits,
     price: &Price,
     run_spent: u64,

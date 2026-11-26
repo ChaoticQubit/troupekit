@@ -1055,3 +1055,162 @@ async fn tool_calls_carry_idempotency_keys() {
     assert_eq!(run.step(&io).await, StepOutcome::Continue);
     assert_eq!(keys.lock().unwrap()[4], format!("{id}:4:0"));
 }
+
+fn traced(content: bool) -> (troupekit_trace::Tracer, Arc<troupekit_trace::MemorySink>) {
+    let sink = Arc::new(troupekit_trace::MemorySink::default());
+    let tracer = troupekit_trace::Tracer::builder()
+        .content(content)
+        .sink(sink.clone())
+        .build()
+        .unwrap();
+    (tracer, sink)
+}
+
+fn trace_records(sink: &troupekit_trace::MemorySink) -> Vec<Value> {
+    sink.lines()
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn starts<'a>(records: &'a [Value], name: &str) -> Vec<&'a Value> {
+    records
+        .iter()
+        .filter(|r| r["t"] != "end" && r["name"] == name)
+        .collect()
+}
+
+fn end_of<'a>(records: &'a [Value], start: &Value) -> &'a Value {
+    records
+        .iter()
+        .find(|r| r["t"] == "end" && r["span"] == start["span"])
+        .unwrap()
+}
+
+#[tokio::test]
+async fn model_call_span_has_tokens_and_no_content_by_default() {
+    let s = setup(vec![text("hello there")], PRICE);
+    let (tracer, sink) = traced(false);
+    let mut run = AgentRun::new(&persona(""), ask(), Limits::default(), &s.io)
+        .await
+        .unwrap();
+    tracer.in_scope(run_to_end(&mut run, &s.io)).await;
+    drop(tracer);
+    let records = trace_records(&sink);
+    let step = starts(&records, "agent.step")[0];
+    assert_eq!(step["cat"], "agents");
+    assert_eq!(step["fields"]["run"], run.run_id().to_string().as_str());
+    assert_eq!(step["fields"]["state"], "call_model");
+    assert_eq!(step["fields"]["persona"], "coach");
+    let call = starts(&records, "model.call")[0];
+    assert_eq!(call["parent"], step["span"]);
+    assert_eq!(call["cat"], "models");
+    assert_eq!(call["fields"]["selector"], "fake/m");
+    assert_eq!(call["fields"]["stream"], true);
+    assert!(call["fields"]["messages"]["bytes"].as_u64().unwrap() > 0);
+    let end = end_of(&records, call);
+    assert_eq!(end["ok"], true);
+    assert_eq!(end["fields"]["input_tokens"], 10);
+    assert_eq!(end["fields"]["output_tokens"], 5);
+    assert_eq!(end["fields"]["cost_usd_micros"], 20);
+    assert_eq!(end["fields"]["stop"], "EndTurn");
+    assert!(end["fields"]["ttft_us"].is_u64());
+    assert!(end["fields"]["reply"]["bytes"].is_u64());
+    for line in sink.lines() {
+        assert!(!line.contains("hello there") && !line.contains("Plan my week"), "{line}");
+    }
+}
+
+#[tokio::test]
+async fn tool_arguments_are_content() {
+    for content in [false, true] {
+        let s = setup(vec![calls(&[("c1", "echo")]), text("done")], PRICE);
+        let (tracer, sink) = traced(content);
+        let mut run = AgentRun::new(&persona("tools = ['echo']"), ask(), Limits::default(), &s.io)
+            .await
+            .unwrap();
+        tracer.in_scope(run_to_end(&mut run, &s.io)).await;
+        drop(tracer);
+        let records = trace_records(&sink);
+        let tool = starts(&records, "tool.call")[0];
+        assert_eq!(tool["cat"], "tools");
+        assert_eq!(tool["fields"]["name"], "echo");
+        assert_eq!(tool["fields"]["call_id"], "c1");
+        let step = starts(&records, "agent.step")
+            .into_iter()
+            .find(|r| r["fields"]["state"] == "call_tools")
+            .unwrap();
+        assert_eq!(tool["parent"], step["span"]);
+        let end = end_of(&records, tool);
+        assert_eq!(end["fields"]["is_error"], false);
+        if content {
+            assert_eq!(tool["fields"]["args"], "{\"q\":\"c1\"}");
+            assert_eq!(end["fields"]["output"], "got c1");
+        } else {
+            assert_eq!(tool["fields"]["args"]["bytes"], 10);
+            assert!(sink.lines().iter().all(|l| !l.contains("got c1")));
+        }
+    }
+}
+
+#[tokio::test]
+async fn max_turns_law_event_is_emitted() {
+    let replies = (0..20)
+        .map(|i| calls(&[(&format!("c{i}"), "echo")]))
+        .collect();
+    let s = setup(replies, PRICE);
+    let (tracer, sink) = traced(false);
+    let mut run = AgentRun::new(&persona("tools = ['echo']"), ask(), Limits::default(), &s.io)
+        .await
+        .unwrap();
+    tracer.in_scope(run_to_end(&mut run, &s.io)).await;
+    drop(tracer);
+    let records = trace_records(&sink);
+    let laws = starts(&records, "law.check");
+    assert!(laws.iter().all(|r| r["t"] == "event" && r["cat"] == "laws"));
+    assert!(laws
+        .iter()
+        .all(|r| r["fields"]["law"] == "step_keeps_model_calls_within_max_turns"));
+    assert_eq!(laws.iter().filter(|r| r["fields"]["held"] == true).count(), 8);
+    assert_eq!(laws.iter().filter(|r| r["fields"]["held"] == false).count(), 1);
+}
+
+#[tokio::test]
+async fn budget_check_emits_span() {
+    let s = setup(vec![text("hi")], PRICE);
+    let (tracer, sink) = traced(false);
+    let limits = Limits {
+        run: Some(10),
+        ..Limits::default()
+    };
+    let mut run = AgentRun::new(&persona(""), ask(), limits, &s.io)
+        .await
+        .unwrap();
+    tracer.in_scope(run.step(&s.io)).await;
+    drop(tracer);
+    let records = trace_records(&sink);
+    let check = starts(&records, "budget.check")[0];
+    assert_eq!(check["cat"], "budget");
+    assert!(check["fields"]["estimate"].as_u64().unwrap() > 10);
+    assert_eq!(check["fields"]["run_spent"], 0);
+    assert_eq!(end_of(&records, check)["fields"]["crossed"], "run");
+    assert!(starts(&records, "model.call").is_empty());
+}
+
+#[tokio::test]
+async fn eval_emits_span() {
+    let s = setup(vec![text("{\"n\": 1, \"items\": [\"a\", \"b\"]}")], PRICE);
+    let (tracer, sink) = traced(false);
+    let p = persona(&format!("evals = ['min_items(items, 2)']\n{TYPED}"));
+    let mut run = AgentRun::new(&p, ask(), Limits::default(), &s.io)
+        .await
+        .unwrap();
+    let out = tracer.in_scope(run_to_end(&mut run, &s.io)).await;
+    drop(tracer);
+    assert!(matches!(out, StepOutcome::Done(_)), "{out:?}");
+    let records = trace_records(&sink);
+    let eval = starts(&records, "eval.run")[0];
+    assert_eq!(eval["cat"], "evals");
+    assert_eq!(eval["fields"]["name"], "min_items");
+    assert_eq!(end_of(&records, eval)["fields"]["passed"], true);
+}

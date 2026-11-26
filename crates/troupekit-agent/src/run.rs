@@ -8,12 +8,14 @@ use crate::schema::{parse_json, validate};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Instant;
 use troupekit_core::event::{Event, EventBody, PauseReason, Usage};
 use troupekit_core::ids::RunId;
 use troupekit_core::message::{ContentPart, Message, Role};
 use troupekit_core::store::{Checkpoint, CheckpointStore};
 use troupekit_providers::{CompletionRequest, CompletionResponse, Delta, StopReason};
 use troupekit_tools::{ToolContext, ToolOutput};
+use troupekit_trace::{content, trace, trace_span, Trace};
 
 /// Version of the serialized run.
 /// `from_checkpoint` refuses any other, so a deploy never resumes
@@ -273,6 +275,13 @@ impl AgentRun {
         }
         self.steps += 1;
         let name = self.state.step_name();
+        let mut span = trace_span!(
+            Trace::Agents,
+            "agent.step",
+            run = self.run_id.to_string(),
+            state = name,
+            persona = self.spec.persona.as_str(),
+        );
         self.emit(
             io,
             EventBody::StepStarted {
@@ -281,19 +290,26 @@ impl AgentRun {
             },
         );
         let mut used = Usage::default();
-        let outcome = match self.state.clone() {
-            RunState::CallModel => self.call_model(io, &mut used).await,
-            RunState::CallTools { calls } => self.call_tools(io, &calls).await,
-            RunState::Check { answer } => self.check(io, &answer, &mut used).await,
-            RunState::Repair { errors } => {
-                self.messages.push(repair_message(&errors));
-                self.state = RunState::CallModel;
-                StepOutcome::Continue
-            }
-            RunState::Done { .. } | RunState::Failed { .. } | RunState::Paused { .. } => {
-                unreachable!("handled above")
-            }
-        };
+        let outcome = span
+            .instrument(async {
+                match self.state.clone() {
+                    RunState::CallModel => self.call_model(io, &mut used).await,
+                    RunState::CallTools { calls } => self.call_tools(io, &calls).await,
+                    RunState::Check { answer } => self.check(io, &answer, &mut used).await,
+                    RunState::Repair { errors } => {
+                        self.messages.push(repair_message(&errors));
+                        self.state = RunState::CallModel;
+                        StepOutcome::Continue
+                    }
+                    RunState::Done { .. } | RunState::Failed { .. } | RunState::Paused { .. } => {
+                        unreachable!("handled above")
+                    }
+                }
+            })
+            .await;
+        if let StepOutcome::Failed(error) = &outcome {
+            span.fail(error.as_str());
+        }
         self.emit(
             io,
             EventBody::StepFinished {
@@ -369,7 +385,16 @@ impl AgentRun {
     }
 
     async fn call_model(&mut self, io: &dyn AgentIo, used: &mut Usage) -> StepOutcome {
-        if self.model_calls >= self.spec.max_turns {
+        let held = self.model_calls < self.spec.max_turns;
+        trace!(
+            Trace::Laws,
+            "law.check",
+            law = "step_keeps_model_calls_within_max_turns",
+            held = held,
+            model_calls = self.model_calls,
+            max_turns = self.spec.max_turns,
+        );
+        if !held {
             return self.fail(format!("max_turns {} reached", self.spec.max_turns));
         }
         let handle = match io.model(&self.spec.model).await {
@@ -450,9 +475,20 @@ impl AgentRun {
             }
             Ok(None) => {}
         }
+        let mut span = trace_span!(
+            Trace::Models,
+            "model.call",
+            selector = handle.model.id(),
+            stream = stream,
+            messages = content(serde_json::to_string(&req.messages).expect("messages serialize")),
+        );
+        let started = Instant::now();
+        let mut first_delta: Option<Instant> = None;
         let result = if stream {
             let (sink, clock, run_id, seq) = (io.events(), io.clock(), self.run_id, &mut self.seq);
+            let first = &mut first_delta;
             let mut on_delta = |d: &Delta| {
+                first.get_or_insert_with(Instant::now);
                 if let Delta::TextDelta { text } = d {
                     sink.emit(Event {
                         run_id,
@@ -463,10 +499,16 @@ impl AgentRun {
                     *seq += 1;
                 }
             };
-            handle.model.stream(req, &mut on_delta).await
+            span.instrument(handle.model.stream(req, &mut on_delta)).await
         } else {
-            handle.model.complete(req).await
+            span.instrument(handle.model.complete(req)).await
         };
+        if let Some(at) = first_delta {
+            span.record("ttft_us", at.saturating_duration_since(started).as_micros() as u64);
+        }
+        if let Err(e) = &result {
+            span.fail(e.to_string());
+        }
         let mut reply = match result {
             Ok(r) => r,
             Err(e) if e.is_retryable() => {
@@ -478,6 +520,14 @@ impl AgentRun {
             Err(e) => return Err(self.fail(e.to_string())),
         };
         reply.usage.cost_usd_micros = handle.price.cost_usd_micros(&reply.usage);
+        if span.is_enabled() {
+            span.record("input_tokens", reply.usage.input_tokens);
+            span.record("output_tokens", reply.usage.output_tokens);
+            span.record("cost_usd_micros", reply.usage.cost_usd_micros);
+            span.record("stop", format!("{:?}", reply.stop));
+            span.record("reply", content(reply.message.text_content()));
+        }
+        drop(span);
         self.usage += reply.usage;
         *used += reply.usage;
         if let Err(e) = budget::record(&self.limits, io.ledger(), reply.usage).await {
@@ -502,13 +552,24 @@ impl AgentRun {
         let outputs = join_all(calls.iter().enumerate().map(|(i, c)| {
             let ctx = ToolContext::for_call(run_id, step, i);
             async move {
-                if !allowed.contains(&c.name) {
-                    return ToolOutput::error(format!(
-                        "tool `{}` is not allowed for this agent",
-                        c.name
-                    ));
+                let mut span = trace_span!(
+                    Trace::Tools,
+                    "tool.call",
+                    name = c.name.as_str(),
+                    call_id = c.id.as_str(),
+                    args = content(c.arguments.to_string()),
+                );
+                let out = if allowed.contains(&c.name) {
+                    let call = io.tools().call(&c.name, c.arguments.clone(), &ctx);
+                    ToolOutput::from_result(span.instrument(call).await)
+                } else {
+                    ToolOutput::error(format!("tool `{}` is not allowed for this agent", c.name))
+                };
+                if span.is_enabled() {
+                    span.record("is_error", out.is_error);
+                    span.record("output", content(out.content.as_str()));
                 }
-                ToolOutput::from_result(io.tools().call(&c.name, c.arguments.clone(), &ctx).await)
+                out
             }
         }))
         .await;
@@ -558,7 +619,10 @@ impl AgentRun {
                 let Some(f) = io.evals().get(&call.name) else {
                     return self.fail(format!("eval `{}` is not registered", call.name));
                 };
-                if let Err(e) = f(&output, &call.args) {
+                let mut span = trace_span!(Trace::Evals, "eval.run", name = call.name.as_str());
+                let passed = f(&output, &call.args);
+                span.record("passed", passed.is_ok());
+                if let Err(e) = passed {
                     errors.push(format!("{}: {e}", call.name));
                 }
             }
@@ -601,16 +665,39 @@ impl AgentRun {
             .and_then(Value::as_str)
             .unwrap_or(self.spec.model.as_str())
             .to_string();
+        let mut span = trace_span!(
+            Trace::Evals,
+            "eval.judge",
+            name = "judge",
+            selector = selector.as_str(),
+        );
         let handle = match io.model(&selector).await {
             Ok(h) => h,
-            Err(e) => return Err(self.fail(format!("judge: {e}"))),
+            Err(e) => {
+                span.fail(e.to_string());
+                return Err(self.fail(format!("judge: {e}")));
+            }
         };
         let req = judge_request(criteria, output);
         let resume = RunState::Check {
             answer: answer.to_string(),
         };
-        let reply = self.call(io, &handle, &req, false, used, resume).await?;
-        Ok(judge_verdict(&reply.message.text_content(), min_score).err())
+        let reply = match span.instrument(self.call(io, &handle, &req, false, used, resume)).await {
+            Ok(reply) => reply,
+            Err(outcome) => {
+                span.fail("judge call did not complete");
+                return Err(outcome);
+            }
+        };
+        let text = reply.message.text_content();
+        let verdict = judge_verdict(&text, min_score);
+        if span.is_enabled() {
+            span.record("passed", verdict.is_ok());
+            if let Some(score) = parse_json(&text).ok().and_then(|v| v["score"].as_f64()) {
+                span.record("score", score);
+            }
+        }
+        Ok(verdict.err())
     }
 }
 

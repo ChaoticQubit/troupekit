@@ -24,4 +24,3 @@ pub use loader::{builtin, DirSource, MemorySource, PersonaLoader, PersonaSource}
 pub use persona::{Budget, Persona, DEFAULT_MAX_TOKENS, DEFAULT_MAX_TURNS};
 pub use schema::{compile_output, validate};
 
-use troupekit_trace as _;
