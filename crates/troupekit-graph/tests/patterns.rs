@@ -37,6 +37,19 @@ fn node<'a>(table: &'a Table, id: &str) -> &'a Table {
         .unwrap_or_else(|| panic!("no node `{id}`"))
 }
 
+fn edge_list(table: &Table) -> Vec<(&str, &str, Option<&str>)> {
+    table["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let e = e.as_table().unwrap();
+            let when = e.get("when").and_then(Value::as_str);
+            (e["from"].as_str().unwrap(), e["to"].as_str().unwrap(), when)
+        })
+        .collect()
+}
+
 fn strs(v: &Value) -> Vec<&str> {
     v.as_array()
         .unwrap()
@@ -140,16 +153,7 @@ fn approve_inserts_a_human_approval_before_member_answer() {
     let check = node(&table, "check_billing");
     assert_eq!(check["kind"].as_str(), Some("switch"));
     assert_eq!(check["on"].as_str(), Some("billing_approved"));
-    let edges: Vec<(&str, &str, Option<&str>)> = table["edges"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| {
-            let e = e.as_table().unwrap();
-            let when = e.get("when").and_then(Value::as_str);
-            (e["from"].as_str().unwrap(), e["to"].as_str().unwrap(), when)
-        })
-        .collect();
+    let edges = edge_list(&table);
     assert!(edges.contains(&("approve_billing", "check_billing", None)));
     assert!(edges.contains(&("check_billing", "billing", Some("true"))));
     assert!(edges.contains(&("check_billing", "end", Some("false"))));
@@ -255,4 +259,202 @@ fn defaults_are_the_safe_values() {
         .iter()
         .all(|n| n["kind"].as_str() != Some("human")));
     assert!(table.get("max_steps").is_none(), "the workflow step cap applies");
+}
+
+const REPORT: &str = "name = 'report'\n[crew]\nprocess = 'sequential'\n\
+    [crew.state]\nneeds_report = 'bool'\n\
+    [[crew.tasks]]\nid = 'research'\nagent = 'researcher'\n\
+    description = 'Collect facts about {input}.'\nexpected_output = 'A list of facts.'\n\
+    [[crew.tasks]]\nid = 'fact_check'\nagent = 'checker'\ndescription = 'Check the facts.'\n\
+    context = ['research']\nasync = true\n\
+    [[crew.tasks]]\nid = 'write'\nagent = 'writer'\ndescription = 'Write the report.'\n\
+    context = ['research', 'fact_check']\nhuman_input = true\nwhen = 'needs_report'\n";
+
+fn crew(tasks: &[&str]) -> String {
+    let mut text = "name = 'c'\n[crew]\nprocess = 'sequential'\n".to_string();
+    for t in tasks {
+        text.push_str("[[crew.tasks]]\n");
+        text.push_str(t);
+        text.push('\n');
+    }
+    text
+}
+
+fn task(id: &str, extra: &str) -> String {
+    format!("id = '{id}'\nagent = 'a-{id}'\ndescription = 'Do {id}.'\n{extra}")
+}
+
+#[test]
+fn sequential_crew_chains_tasks_in_order() {
+    let table = compile(FILE, &crew(&[&task("a", ""), &task("b", ""), &task("c", "")])).unwrap();
+    assert_eq!(table["start"].as_str(), Some("a"));
+    assert_eq!(
+        edge_list(&table),
+        [("a", "b", None), ("b", "c", None), ("c", "end", None)]
+    );
+    assert_eq!(node(&table, "a")["writes"].as_str(), Some("a"));
+    assert_eq!(node(&table, "b")["writes"].as_str(), Some("b"));
+    assert_eq!(node(&table, "c")["writes"].as_str(), Some("output"));
+    assert_eq!(node(&table, "b")["persona"].as_str(), Some("a-b"));
+    assert_eq!(node(&table, "b")["prompt"].as_str(), Some("Do b."));
+    assert_eq!(table["state"]["a"].as_str(), Some("string?"));
+}
+
+#[test]
+fn task_context_feeds_named_outputs_only() {
+    let text = crew(&[
+        &task("a", ""),
+        &task("b", ""),
+        &task("c", "context = ['a']\nexpected_output = 'One line.'"),
+    ]);
+    let table = compile(FILE, &text).unwrap();
+    assert_eq!(strs(&node(&table, "a")["reads"]), ["input"]);
+    assert_eq!(strs(&node(&table, "b")["reads"]), ["input"]);
+    assert_eq!(strs(&node(&table, "c")["reads"]), ["input", "a"]);
+    let prompt = node(&table, "c")["prompt"].as_str().unwrap();
+    assert_eq!(prompt, "Do c.\n\nExpected output: One line.");
+}
+
+#[test]
+fn async_tasks_compile_to_a_fan_out_joined_before_first_reader() {
+    let text = crew(&[
+        &task("a", ""),
+        &task("check", "context = ['a']\nasync = true"),
+        &task("outline", "context = ['a']"),
+        &task("write", "context = ['check', 'outline']"),
+    ]);
+    let table = compile(FILE, &text).unwrap();
+    assert_eq!(node(&table, "join_check")["kind"].as_str(), Some("join"));
+    assert_eq!(
+        edge_list(&table),
+        [
+            ("a", "check", None),
+            ("check", "join_check", None),
+            ("a", "outline", None),
+            ("outline", "join_check", None),
+            ("join_check", "write", None),
+            ("write", "end", None),
+        ]
+    );
+    let unread = crew(&[&task("a", ""), &task("b", "async = true"), &task("c", "")]);
+    let unread = compile(FILE, &unread).unwrap();
+    let edges = edge_list(&unread);
+    assert!(edges.contains(&("c", "join_b", None)));
+    assert!(edges.contains(&("join_b", "end", None)));
+    refused(
+        &crew(&[&task("a", "async = true"), &task("b", "")]),
+        "crew.tasks[0].async",
+        "nothing to run beside",
+    );
+    refused(
+        &crew(&[
+            &task("a", ""),
+            &task("b", "async = true"),
+            &task("c", "async = true"),
+            &task("d", "context = ['b', 'c']"),
+        ]),
+        "crew.tasks[2].async",
+        "inside another async span",
+    );
+    assert_eq!(compile(FILE, REPORT).unwrap(), golden("crew_sequential.toml"));
+}
+
+#[test]
+fn conditional_task_compiles_to_switch() {
+    let text = crew(&[&task("a", ""), &task("b", "when = 'go'"), &task("c", "")]).replacen(
+        "[[crew.tasks]]",
+        "[crew.state]\ngo = 'bool'\n[[crew.tasks]]",
+        1,
+    );
+    let table = compile(FILE, &text).unwrap();
+    let switch = node(&table, "when_b");
+    assert_eq!(switch["kind"].as_str(), Some("switch"));
+    assert_eq!(switch["on"].as_str(), Some("go"));
+    let edges = edge_list(&table);
+    assert!(edges.contains(&("a", "when_b", None)));
+    assert!(edges.contains(&("when_b", "b", Some("true"))));
+    assert!(edges.contains(&("when_b", "c", Some("false"))));
+    assert!(edges.contains(&("b", "c", None)));
+    refused(
+        &crew(&[&task("a", ""), &task("b", "when = 'nope'")]),
+        "crew.tasks[1].when",
+        "not declared in [crew.state]",
+    );
+}
+
+#[test]
+fn human_input_task_keeps_an_approval_node() {
+    let text = crew(&[&task("a", "human_input = true"), &task("b", "")]);
+    let table = compile(FILE, &text).unwrap();
+    let review = node(&table, "review_a");
+    assert_eq!(review["kind"].as_str(), Some("human"));
+    assert_eq!(review["ask"].as_str(), Some("question"));
+    assert_eq!(strs(&review["reads"]), ["a"]);
+    assert_eq!(review["writes"].as_str(), Some("a_feedback"));
+    assert_eq!(strs(&node(&table, "b")["reads"]), ["input", "a_feedback"]);
+    let edges = edge_list(&table);
+    assert!(edges.contains(&("a", "review_a", None)));
+    assert!(edges.contains(&("review_a", "b", None)));
+}
+
+const HIERARCHY: &str = "name = 'report'\n[crew]\nprocess = 'hierarchical'\n\
+    manager_model = 'openai/gpt-6-luna'\n\
+    [[crew.tasks]]\nid = 'research'\nagent = 'researcher'\n\
+    description = 'Collect facts about {input}.'\nexpected_output = 'A list of facts.'\n\
+    [[crew.tasks]]\nid = 'fact_check'\nagent = 'checker'\ndescription = 'Check the facts.'\n\
+    [[crew.tasks]]\nid = 'write'\nagent = 'writer'\ndescription = 'Write the report.'\n";
+
+#[test]
+fn hierarchical_crew_uses_builtin_manager_with_members_as_delegates() {
+    let table = compile(FILE, HIERARCHY).unwrap();
+    assert_eq!(table, golden("crew_hierarchical.toml"));
+    let manager = node(&table, "manager");
+    assert_eq!(manager["persona"].as_str(), Some("crew-manager"));
+    assert_eq!(strs(&manager["delegates"]), ["researcher", "checker", "writer"]);
+    let async_task = HIERARCHY.replace("description = 'Check the facts.'\n", "description = 'Check the facts.'\nasync = true\n");
+    refused(&async_task, "crew.tasks[1]", "only for process `sequential`");
+}
+
+#[test]
+fn custom_manager_persona_replaces_builtin() {
+    let text = HIERARCHY.replace("manager_model = 'openai/gpt-6-luna'", "manager = 'editor'");
+    let table = compile(FILE, &text).unwrap();
+    let manager = node(&table, "manager");
+    assert_eq!(manager["persona"].as_str(), Some("editor"));
+    assert!(manager.get("model").is_none());
+    refused(
+        &crew(&[&task("a", "")]).replace("process = 'sequential'", "process = 'sequential'\nmanager = 'editor'"),
+        "crew.manager",
+        "only for process `hierarchical`",
+    );
+    refused(
+        &HIERARCHY.replace("hierarchical", "chaotic"),
+        "crew.process",
+        "`chaotic` must be `sequential` or `hierarchical`",
+    );
+}
+
+#[test]
+fn context_naming_a_later_task_is_refused() {
+    refused(
+        &crew(&[&task("a", "context = ['b']"), &task("b", "")]),
+        "crew.tasks[0].context[0]",
+        "not an earlier task",
+    );
+    refused(
+        &crew(&[&task("a", "context = ['a']")]),
+        "crew.tasks[0].context[0]",
+        "not an earlier task",
+    );
+    refused(
+        &crew(&[&task("a", ""), &task("b", "context = ['zz']")]),
+        "crew.tasks[1].context[0]",
+        "`zz` is not a task",
+    );
+    refused(
+        &crew(&[&task("a", ""), &task("a", "")]),
+        "crew.tasks[1].id",
+        "repeats",
+    );
+    refused(&crew(&[&task("output", "")]), "crew.tasks[0].id", "must be 1 to 64");
 }
