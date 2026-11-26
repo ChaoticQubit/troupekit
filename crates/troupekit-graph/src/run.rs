@@ -319,6 +319,8 @@ pub struct GraphRun {
     reserve: Option<Reserve>,
     #[serde(skip)]
     registries: NodeTools,
+    #[serde(skip)]
+    scratch: Map<String, Value>,
 }
 
 /// Per-node tool registries of agent nodes with delegates, by node id.
@@ -447,6 +449,7 @@ impl GraphRun {
             merged: BTreeMap::new(),
             reserve: None,
             registries: NodeTools::default(),
+            scratch: Map::new(),
         })
     }
 
@@ -466,6 +469,9 @@ impl GraphRun {
                 flow.name()
             )));
         }
+        if let Some(m) = untracked_misuse(&flow) {
+            return Err(GraphError::Setup(format!("flow `{}`: {m}", flow.name())));
+        }
         let mut path = vec![flow.name().to_string()];
         check_children(&flow, io, &mut path).await?;
         GraphRun::start_child(flow, input, limits, io).await
@@ -478,6 +484,11 @@ impl GraphRun {
         io: &dyn GraphIo,
     ) -> Result<GraphRun, GraphError> {
         let mut run = GraphRun::setup(flow.workflow().clone(), Some(&flow), input, limits, io).await?;
+        for key in flow.untracked() {
+            if let Some(v) = run.state.remove(key) {
+                run.scratch.insert(key.clone(), v);
+            }
+        }
         if !flow.is_v1() {
             run.format = GRAPH_FORMAT_FLOW;
             run.flow = Some(Box::new(flow));
@@ -1167,7 +1178,8 @@ impl GraphRun {
     }
 
     fn switch_to(&self, id: &str, on: &str) -> Result<String, String> {
-        let label = match self.state.get(on) {
+        let view = self.view();
+        let label = match view.get(on) {
             Some(Value::String(v)) => v.clone(),
             Some(Value::Bool(v)) => v.to_string(),
             Some(Value::Null) | None => return Err(format!("reads `{on}`, which is not set")),
@@ -1464,8 +1476,15 @@ impl GraphRun {
         mut done: BTreeMap<usize, Finished>,
     ) -> (Vec<Work>, Option<CoreError>) {
         let workers = self.workers();
-        let (wf, state, run_id, step) = (&self.workflow, &self.state, self.run_id, self.steps);
+        let merged = (!self.scratch.is_empty()).then(|| {
+            let mut m = self.state.clone();
+            m.extend(self.scratch.iter().map(|(k, v)| (k.clone(), v.clone())));
+            m
+        });
+        let (wf, run_id, step) = (&self.workflow, self.run_id, self.steps);
+        let state = merged.as_ref().unwrap_or(&self.state);
         let regs = &self.registries.0;
+        let untracked: &[String] = self.flow.as_ref().map_or(&[], |f| f.untracked());
         let futures = self
             .branches
             .iter_mut()
@@ -1506,7 +1525,8 @@ impl GraphRun {
                         }
                         _ => unreachable!("only agent and tool branches work"),
                     };
-                    let (Some(store), Some(finished)) = (store, finished) else {
+                    let secret = node.writes.as_ref().is_some_and(|w| untracked.contains(w));
+                    let (Some(store), Some(finished), false) = (store, finished, secret) else {
                         return (work, None);
                     };
                     let branch = u32::try_from(i).expect("a step has far fewer than 2^32 branches");
@@ -1566,8 +1586,25 @@ impl GraphRun {
                 errs.join("; ")
             ));
         }
-        self.state.insert(key.clone(), value);
+        if self.untracked(key) {
+            self.scratch.insert(key.clone(), value);
+        } else {
+            self.state.insert(key.clone(), value);
+        }
         Ok(())
+    }
+
+    fn untracked(&self, key: &str) -> bool {
+        self.flow.as_ref().is_some_and(|f| f.untracked().iter().any(|k| k == key))
+    }
+
+    fn view(&self) -> std::borrow::Cow<'_, Map<String, Value>> {
+        if self.scratch.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.state);
+        }
+        let mut merged = self.state.clone();
+        merged.extend(self.scratch.iter().map(|(k, v)| (k.clone(), v.clone())));
+        std::borrow::Cow::Owned(merged)
     }
 
     fn reducer(&self, key: &str) -> Option<crate::flow::Reducer> {
@@ -1686,7 +1723,7 @@ impl GraphRun {
                         let f = io.conditions().get(&condition.name).ok_or_else(|| {
                             fail(format!("condition `{}` is not registered", condition.name))
                         })?;
-                        let label = f(&self.state, &condition.args).map_err(fail)?;
+                        let label = f(&self.view(), &condition.args).map_err(fail)?;
                         let edge = self
                             .workflow
                             .next(&node.id)
@@ -1927,6 +1964,9 @@ fn check_children<'a>(
             if let Some(feature) = unsupported(&child) {
                 return Err(setup(format!("flow `{name}`: {feature} is not run by this engine yet")));
             }
+            if let Some(m) = untracked_misuse(&child) {
+                return Err(setup(format!("flow `{name}`: {m}")));
+            }
             if !child.workflow().state.contains_key(returns) {
                 return Err(setup(format!("flow `{name}` has no state key `{returns}` to return")));
             }
@@ -1945,12 +1985,38 @@ fn check_children<'a>(
     })
 }
 
+fn untracked_misuse(flow: &Flow) -> Option<String> {
+    let secret = |k: &str| flow.untracked().iter().any(|u| u == k);
+    if let Some(k) = flow.untracked().iter().find(|k| flow.reducer(k).is_some()) {
+        return Some(format!("untracked key `{k}` cannot have a reducer: reduced values are kept per step"));
+    }
+    for n in &flow.workflow().nodes {
+        let kind = flow.kind(&n.id);
+        let keeps_reads = matches!(
+            kind,
+            Some(FlowKind::Agent { .. } | FlowKind::Human { .. } | FlowKind::Flow { .. })
+        );
+        if let Some(k) = n.reads.iter().find(|k| keeps_reads && secret(k)) {
+            return Some(format!(
+                "node `{}` cannot read untracked key `{k}`: agent, human and flow nodes keep what they read in the checkpoint",
+                n.id
+            ));
+        }
+        if let Some(FlowKind::Map { over, .. }) = kind {
+            if secret(over) || n.writes.as_deref().is_some_and(secret) {
+                return Some(format!("map node `{}` cannot run over or write an untracked key", n.id));
+            }
+        }
+        if matches!(kind, Some(FlowKind::Human { .. })) && n.writes.as_deref().is_some_and(secret) {
+            return Some(format!("human node `{}` cannot write untracked key: its answer is checkpointed", n.id));
+        }
+    }
+    None
+}
+
 fn unsupported(flow: &Flow) -> Option<String> {
     if flow.budget_split() == BudgetSplit::Shared {
         return Some("a shared budget split".into());
-    }
-    if !flow.untracked().is_empty() {
-        return Some("untracked state".into());
     }
     let node = flow.workflow().nodes.iter().find(|n| match flow.kind(&n.id) {
         Some(FlowKind::Map { .. } | FlowKind::Switch { .. } | FlowKind::Flow { .. }) => false,

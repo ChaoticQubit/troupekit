@@ -974,23 +974,3 @@ async fn deferred_agent_with_a_model_override_runs_last_on_its_model() {
     assert_eq!(state["a"], json!("a!"));
     assert_eq!((base.calls(), other.calls()), (0, 1));
 }
-
-#[tokio::test]
-async fn untracked_state_is_still_refused_at_start() {
-    let gates = GatedTool::new();
-    let io = chain_io(&gates, &["s"]);
-    let text = graph(
-        &["s", "tmp"],
-        &[tool_node("s", ""), END_NODE.into()],
-        &[("s", "e")],
-    )
-    .replace("name = 'g'\n", "name = 'g'\nuntracked = ['tmp']\n");
-    let flow = Flow::parse("test/g.toml", &text).unwrap();
-    let err = GraphRun::start(flow, Map::new(), Limits::default(), &io)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&err, troupekit_graph::GraphError::Setup(m) if m.contains("untracked state")),
-        "{err}"
-    );
-}
