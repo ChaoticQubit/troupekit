@@ -3,7 +3,8 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use troupekit::{Agent, AsTool, KitError, Storage, Tool, ToolContext};
+use troupekit::{Agent, AsTool, KitError, Storage, TeamMode, Tool, ToolContext};
+use troupekit_agent::Limits;
 use troupekit_core::event::Usage;
 use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
@@ -155,7 +156,10 @@ async fn graph_refuses_agent_with_members() {
         .await
         .unwrap_err();
     let message = format!("{err}");
-    assert!(message.contains("agent tools, delegates or members"), "{message}");
+    assert!(
+        message.contains("agent tools, delegates or members"),
+        "{message}"
+    );
 }
 
 #[tokio::test]
@@ -277,4 +281,156 @@ async fn continue_from_message() {
     ];
     let err = built.continue_from(out.run_id(), 3, two).await.unwrap_err();
     assert!(config_message(err).contains("at most one message"));
+}
+
+fn counted_echo(count: Arc<AtomicUsize>) -> Arc<dyn Model> {
+    Arc::new(FnModel::new("fake/m", move |req| {
+        count.fetch_add(1, Ordering::SeqCst);
+        let asked = req
+            .messages
+            .last()
+            .map(|m| m.text_content())
+            .unwrap_or_default();
+        text_reply(&format!("Hello! You said: {asked}"), 10)
+    }))
+}
+
+fn team_agent(name: &str, model: Arc<dyn Model>) -> Agent {
+    Agent::new(name)
+        .instructions("Do the work.")
+        .model("fake/m")
+        .model_client(model)
+}
+
+fn delegate_then_answer() -> Arc<dyn Model> {
+    Arc::new(FnModel::new("fake/m", |req| {
+        let result = req
+            .messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .find_map(|p| match p {
+                ContentPart::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            });
+        match result {
+            Some(content) => text_reply(&format!("Manager got: {content}"), 10),
+            None => Ok(CompletionResponse {
+                message: Message::new(
+                    Role::Assistant,
+                    vec![ContentPart::ToolCall {
+                        id: "c1".into(),
+                        name: "delegate_work".into(),
+                        arguments: json!({"coworker": "tech", "task": "check the cable"}),
+                    }],
+                )
+                .unwrap(),
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cost_usd_micros: 0,
+                },
+                stop: StopReason::ToolUse,
+            }),
+        }
+    }))
+}
+
+fn team_config(err: KitError) -> String {
+    match err {
+        KitError::Config { message, .. } => message,
+        other => panic!("expected a config error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn members_route_in_one_line() {
+    let (billing, tech) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let router = Arc::new(FnModel::new("fake/m", |_req| {
+        text_reply("{\"next\":\"tech\"}", 10)
+    }));
+    let built = team_agent("desk", router)
+        .members(
+            [
+                team_agent("billing", counted_echo(billing.clone())),
+                team_agent("tech", counted_echo(tech.clone())),
+            ],
+            TeamMode::Route,
+        )
+        .build()
+        .await
+        .unwrap();
+    let out = built.run_with("My laptop broke").await.unwrap();
+    assert!(
+        out.text().starts_with("Hello! You said: "),
+        "{}",
+        out.text()
+    );
+    assert!(out.text().contains("My laptop broke"), "{}", out.text());
+    assert_eq!(tech.load(Ordering::SeqCst), 1);
+    assert_eq!(billing.load(Ordering::SeqCst), 0);
+    assert_eq!(out.model_calls(), 0);
+    assert_eq!(out.messages().len(), 2);
+    assert!(out.member_runs().is_empty());
+    let plain = team_agent("desk", counted_echo(Arc::new(AtomicUsize::new(0))))
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(plain.run("hi").await.unwrap(), "Hello! You said: hi");
+}
+
+#[tokio::test]
+async fn manages_runs_hierarchical_crew() {
+    let tech = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(InMemCheckpoints::with_history());
+    let built = team_agent("manager", delegate_then_answer())
+        .checkpoints(Storage::custom(store.clone()))
+        .manages([team_agent("tech", counted_echo(tech.clone()))])
+        .build()
+        .await
+        .unwrap();
+    let out = built.run_with("Fix my network").await.unwrap();
+    assert!(out.text().starts_with("Manager got: "), "{}", out.text());
+    assert!(
+        out.text().contains("Hello! You said: check the cable"),
+        "{}",
+        out.text()
+    );
+    assert_eq!(tech.load(Ordering::SeqCst), 1);
+    assert_eq!(built.resume(out.run_id()).await.unwrap(), out.text());
+    let history = built.history(out.run_id()).await.unwrap_err();
+    assert!(team_config(history).contains("team agent"));
+    let two = vec![
+        Message::text(Role::User, "a"),
+        Message::text(Role::User, "b"),
+    ];
+    let err = built.run_with(two).await.unwrap_err();
+    assert!(team_config(err).contains("one user text"));
+}
+
+#[tokio::test]
+async fn team_build_refusals() {
+    let echo0 = || counted_echo(Arc::new(AtomicUsize::new(0)));
+    let tasks = team_agent("lead", echo0()).members([team_agent("a", echo0())], TeamMode::Tasks);
+    assert!(team_config(tasks.build().await.unwrap_err()).contains("tasks is not built yet"));
+    let none = team_agent("lead", echo0()).members(Vec::<Agent>::new(), TeamMode::Route);
+    assert!(team_config(none.build().await.unwrap_err()).contains("1 to 32 members"));
+    let limited = team_agent("a", echo0()).limits(Limits {
+        run: Some(5),
+        ..Limits::default()
+    });
+    let own = team_agent("lead", echo0()).members([limited], TeamMode::Broadcast);
+    let message = team_config(own.build().await.unwrap_err());
+    assert!(
+        message.contains("member `a` sets its own limits"),
+        "{message}"
+    );
+    assert!(message.contains("on the leader"), "{message}");
+    let team = team_agent("inner", echo0()).members([team_agent("a", echo0())], TeamMode::Route);
+    let outer = team_agent("lead", echo0()).agent_tool(team.clone());
+    let message = team_config(outer.build().await.unwrap_err());
+    assert!(message.contains("leads a team"), "{message}");
+    let built = team.build().await.unwrap();
+    let ctx = ToolContext::for_call(RunId::new(), 1, 0);
+    let refused = built.call(json!({"task": "x"}), &ctx).await.unwrap_err();
+    assert!(refused.to_string().contains("leads a team"), "{refused}");
 }

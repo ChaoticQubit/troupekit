@@ -174,3 +174,45 @@ async fn macro_manages_key_reaches_builder() {
     let text = built.run("Go").await.unwrap();
     assert!(text.starts_with("Hello! You said: "), "{text}");
 }
+
+/// Send each request to the right desk.
+#[agent(model = "fake/m", members = [echo_researcher, crew::echo_checker], team = "broadcast")]
+fn front_desk() {}
+
+/// Lead the default team.
+#[agent(model = "fake/m", members = [echo_researcher])]
+fn default_lead() {}
+
+#[tokio::test]
+async fn macro_members_and_team_keys_reach_builder() {
+    let built = front_desk()
+        .model_client(echo_model())
+        .build()
+        .await
+        .unwrap();
+    let by_hand = Agent::new("front-desk")
+        .instructions("Send each request to the right desk.")
+        .model("fake/m")
+        .model_client(echo_model())
+        .members(
+            [echo_researcher(), crew::echo_checker()],
+            troupekit::TeamMode::Broadcast,
+        )
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(built.persona(), by_hand.persona());
+    let out = built.run_with("Hi").await.unwrap();
+    assert_eq!(
+        out.output().as_array().map(Vec::len),
+        Some(2),
+        "{:?}",
+        out.output()
+    );
+    let text = default_lead()
+        .model_client(echo_model())
+        .run("Go")
+        .await
+        .unwrap();
+    assert!(text.starts_with("Hello! You said: "), "{text}");
+}

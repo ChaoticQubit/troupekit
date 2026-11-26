@@ -6,7 +6,7 @@ use crate::tokens::{Delim, Error, Piece, SpanId, Tok};
 use crate::tool::crate_path;
 
 const WHAT: &str = "#[agent]";
-const KEYS: [&str; 21] = [
+const KEYS: [&str; 23] = [
     "model",
     "tools",
     "evals",
@@ -26,6 +26,8 @@ const KEYS: [&str; 21] = [
     "agents",
     "delegates",
     "manages",
+    "members",
+    "team",
     "name",
     "crate",
 ];
@@ -44,13 +46,25 @@ pub struct Call {
 
 /// How a call passes its value: `Plain` as written, `Invoke` as the call
 /// `path()`, `InvokeList` as the one-element array `[path()]`.
-/// `agents`, `delegates` and `manages` name fns that return an Agent.
+/// `Members(mode)` as `[path()]` followed by the `TeamMode` variant.
+/// `agents`, `delegates`, `manages` and `members` name fns that return
+/// an Agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
     Plain,
     Invoke,
     InvokeList,
+    Members(&'static str),
 }
+
+const TEAM_MODES: [(&str, &str); 5] = [
+    ("route", "Route"),
+    ("coordinate", "Coordinate"),
+    ("collaborate", "Collaborate"),
+    ("broadcast", "Broadcast"),
+    ("tasks", "Tasks"),
+];
+const TEAM_MESSAGE: &str = "team = takes one of route, coordinate, collaborate, broadcast, tasks";
 
 /// A validated `#[agent]` fn, ready for code generation.
 /// `name` is the persona name, `instructions` the doc comment unless an
@@ -120,6 +134,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
     let mut krate = DEFAULT_CRATE.to_string();
     let mut name_set = false;
     let mut calls = Vec::new();
+    let mut team: Option<(&'static str, SpanId)> = None;
     for arg in &args {
         let spans = || arg.value.iter().map(Tok::span).collect::<Vec<_>>();
         match arg.key.as_str() {
@@ -199,6 +214,24 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     shape: Shape::Plain,
                 });
             }
+            "members" => {
+                let message = "members = takes a list like [billing, tech]";
+                let paths = list(arg, message)?;
+                if paths.is_empty() {
+                    return Err(Error::new(arg.value_span(), message));
+                }
+                for path in paths {
+                    if !is_path(&path) {
+                        return Err(Error::new(path[0].span(), message));
+                    }
+                    calls.push(Call {
+                        method: "members",
+                        value: path.iter().map(Tok::span).collect(),
+                        shape: Shape::Members("Coordinate"),
+                    });
+                }
+            }
+            "team" => team = Some((team_mode(arg)?, arg.key_span)),
             "agents" | "delegates" | "manages" => {
                 let (method, shape) = match arg.key.as_str() {
                     "agents" => ("agent_tool", Shape::Invoke),
@@ -214,6 +247,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
             }),
         }
     }
+    set_team_mode(&mut calls, team)?;
     if !name_set && !valid_ident {
         return Err(Error::new(
             f.ident_span,
@@ -270,8 +304,11 @@ pub fn expand_agent(a: &AgentFn) -> Vec<Piece> {
         if call.shape != Shape::Plain {
             value.push(Piece::Code("()".into()));
         }
-        if call.shape == Shape::InvokeList {
+        if matches!(call.shape, Shape::InvokeList | Shape::Members(_)) {
             value = vec![Piece::Group(Delim::Bracket, value)];
+        }
+        if let Shape::Members(mode) = call.shape {
+            value.push(Piece::Code(format!(", {p}::TeamMode::{mode}")));
         }
         body.push(Piece::Group(Delim::Paren, value));
     }
@@ -306,6 +343,50 @@ fn agent_paths(arg: &Arg, method: &'static str, shape: Shape) -> Result<Vec<Call
         .iter()
         .all(|c| !c.value.is_empty() && c.shape != Shape::Plain));
     Ok(calls)
+}
+
+/// Reads the `team` value, a string literal naming one team mode, and
+/// returns its `TeamMode` variant name. Returns the team error for any
+/// other value.
+fn team_mode(arg: &Arg) -> Result<&'static str, Error> {
+    let text = match arg.value.as_slice() {
+        [Tok::Lit(l, _)] if l.starts_with('"') && l.ends_with('"') && l.len() >= 2 => {
+            &l[1..l.len() - 1]
+        }
+        _ => return Err(Error::new(arg.value_span(), TEAM_MESSAGE)),
+    };
+    let Some((_, variant)) = TEAM_MODES.iter().find(|(name, _)| *name == text) else {
+        return Err(Error::new(arg.value_span(), TEAM_MESSAGE));
+    };
+    assert!(variant
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase()));
+    Ok(variant)
+}
+
+/// Gives every `members` call the mode of the `team` key, or keeps the
+/// default `Coordinate`. Returns an error for `team` without `members`.
+/// Calls of other keys are left as they are.
+fn set_team_mode(calls: &mut [Call], team: Option<(&'static str, SpanId)>) -> Result<(), Error> {
+    let has_members = calls.iter().any(|c| matches!(c.shape, Shape::Members(_)));
+    let Some((mode, span)) = team else {
+        return Ok(());
+    };
+    if !has_members {
+        return Err(Error::new(
+            span,
+            format!("{WHAT} key `team` needs members = [..]"),
+        ));
+    }
+    for call in calls
+        .iter_mut()
+        .filter(|c| matches!(c.shape, Shape::Members(_)))
+    {
+        call.shape = Shape::Members(mode);
+    }
+    assert!(calls.iter().any(|c| c.shape == Shape::Members(mode)));
+    Ok(())
 }
 
 fn method(key: &str) -> &'static str {
@@ -477,6 +558,41 @@ mod tests {
     }
 
     #[test]
+    fn members_take_the_team_mode() {
+        let item = format!("{DOC}fn desk() {{}}");
+        let a = parse("members = [billing, ::x::tech], team = \"route\"", &item).unwrap();
+        assert_eq!(methods(&a), ["members", "members"]);
+        assert!(a.calls.iter().all(|c| c.shape == Shape::Members("Route")));
+        let a = parse("team = \"broadcast\", members = [billing]", &item).unwrap();
+        assert_eq!(a.calls[0].shape, Shape::Members("Broadcast"));
+        let a = parse("members = [billing]", &item).unwrap();
+        assert_eq!(a.calls[0].shape, Shape::Members("Coordinate"));
+        let pieces = expand_agent(&a);
+        let Some(Piece::Group(Delim::Brace, body)) = pieces.last() else {
+            panic!("the body is the last piece");
+        };
+        let Piece::Group(Delim::Paren, args) = &body[2] else {
+            panic!("members takes arguments");
+        };
+        assert!(matches!(&args[0], Piece::Group(Delim::Bracket, _)));
+        assert!(
+            matches!(&args[1], Piece::Code(c) if c == ", ::troupekit::__private::TeamMode::Coordinate")
+        );
+        let mode = "team = takes one of route, coordinate, collaborate, broadcast, tasks";
+        rejects("members = [a], team = \"solo\"", &item, mode);
+        rejects("members = [a], team = route", &item, mode);
+        rejects(
+            "team = \"route\"",
+            &item,
+            "#[agent] key `team` needs members = [..]",
+        );
+        let list = "members = takes a list like [billing, tech]";
+        rejects("members = billing", &item, list);
+        rejects("members = []", &item, list);
+        rejects("members = [\"billing\"]", &item, list);
+    }
+
+    #[test]
     fn agents_and_delegates_take_paths() {
         let item = format!("{DOC}fn lead() {{}}");
         let agents = "agents = takes a list like [researcher, team::checker]";
@@ -639,7 +755,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_key() {
-        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, agents, delegates, manages, name, crate");
+        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, agents, delegates, manages, members, team, name, crate");
     }
 
     #[test]

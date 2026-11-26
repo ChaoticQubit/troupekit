@@ -233,10 +233,13 @@ const RETRY_WAIT_MAX_MS: i64 = 30_000;
 
 /// A team agent's flow and the graph io its nodes run on: the leader's
 /// and members' personas, models, tools and evals, the leader's ledger and
-/// events. Built once at `build`, shared by every run.
+/// events, and the state key that holds the answer: `answers` for
+/// broadcast, which keeps every member's answer, else `output`. Built once
+/// at `build`, shared by every run.
 pub(crate) struct TeamFlow {
     flow: Flow,
     io: SimpleGraphIo,
+    answer: &'static str,
 }
 
 impl Agent {
@@ -281,7 +284,15 @@ impl Agent {
         let probe = input_state("build check");
         GraphRun::start(flow.clone(), probe, leader.limits().clone(), &io).await?;
         assert!(!flow.workflow().nodes.is_empty());
-        Ok(leader.with_team(TeamFlow { flow, io }))
+        Ok(leader.with_team(TeamFlow {
+            flow,
+            io,
+            answer: if mode == TeamMode::Broadcast {
+                "answers"
+            } else {
+                "output"
+            },
+        }))
     }
 }
 
@@ -448,7 +459,9 @@ impl TeamFlow {
                         reason,
                     })
                 }
-                GraphOutcome::Done(state) => return Ok(team_outcome(run, state, input)),
+                GraphOutcome::Done(state) => {
+                    return Ok(team_outcome(run, state, self.answer, input))
+                }
             }
         }
         Err(KitError::Failed {
@@ -458,9 +471,14 @@ impl TeamFlow {
     }
 }
 
-fn team_outcome(run: &GraphRun, mut state: Map<String, Value>, input: &str) -> RunOutcome {
-    let output = state.remove("output").unwrap_or(Value::Null);
-    assert!(!state.contains_key("output"));
+fn team_outcome(
+    run: &GraphRun,
+    mut state: Map<String, Value>,
+    key: &str,
+    input: &str,
+) -> RunOutcome {
+    let output = state.remove(key).unwrap_or(Value::Null);
+    assert!(!state.contains_key(key));
     let text = match &output {
         Value::String(text) => text.clone(),
         other => other.to_string(),
@@ -470,170 +488,4 @@ fn team_outcome(run: &GraphRun, mut state: Map<String, Value>, input: &str) -> R
         Message::text(Role::Assistant, text.clone()),
     ];
     RunOutcome::team(text, output, run.usage(), run.run_id(), messages)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Agent, Storage};
-    use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use troupekit_agent::Limits;
-    use troupekit_core::event::Usage;
-    use troupekit_core::message::ContentPart;
-    use troupekit_graph::testing::{text_reply, FnModel};
-    use troupekit_providers::{CompletionResponse, Model, StopReason};
-
-    fn echo(count: Arc<AtomicUsize>) -> Arc<dyn Model> {
-        Arc::new(FnModel::new("fake/m", move |req| {
-            count.fetch_add(1, Ordering::SeqCst);
-            let asked = req
-                .messages
-                .last()
-                .map(|m| m.text_content())
-                .unwrap_or_default();
-            text_reply(&format!("Hello! You said: {asked}"), 10)
-        }))
-    }
-
-    fn agent(name: &str, model: Arc<dyn Model>) -> Agent {
-        Agent::new(name)
-            .instructions("Do the work.")
-            .model("fake/m")
-            .model_client(model)
-    }
-
-    fn delegate_then_answer() -> Arc<dyn Model> {
-        Arc::new(FnModel::new("fake/m", |req| {
-            let result = req
-                .messages
-                .iter()
-                .flat_map(|m| &m.parts)
-                .find_map(|p| match p {
-                    ContentPart::ToolResult { content, .. } => Some(content.clone()),
-                    _ => None,
-                });
-            match result {
-                Some(content) => text_reply(&format!("Manager got: {content}"), 10),
-                None => Ok(CompletionResponse {
-                    message: Message::new(
-                        Role::Assistant,
-                        vec![ContentPart::ToolCall {
-                            id: "c1".into(),
-                            name: "delegate_work".into(),
-                            arguments: json!({"coworker": "tech", "task": "check the cable"}),
-                        }],
-                    )
-                    .unwrap(),
-                    usage: Usage {
-                        input_tokens: 10,
-                        output_tokens: 5,
-                        cost_usd_micros: 0,
-                    },
-                    stop: StopReason::ToolUse,
-                }),
-            }
-        }))
-    }
-
-    fn config(err: KitError) -> String {
-        match err {
-            KitError::Config { message, .. } => message,
-            other => panic!("expected a config error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn members_route_in_one_line() {
-        let (billing, tech) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let router = Arc::new(FnModel::new("fake/m", |_req| {
-            text_reply("{\"next\":\"tech\"}", 10)
-        }));
-        let built = agent("desk", router)
-            .members(
-                [
-                    agent("billing", echo(billing.clone())),
-                    agent("tech", echo(tech.clone())),
-                ],
-                TeamMode::Route,
-            )
-            .build()
-            .await
-            .unwrap();
-        assert!(built.is_team());
-        let out = built.run_with("My laptop broke").await.unwrap();
-        assert!(
-            out.text().starts_with("Hello! You said: "),
-            "{}",
-            out.text()
-        );
-        assert!(out.text().contains("My laptop broke"), "{}", out.text());
-        assert_eq!(tech.load(Ordering::SeqCst), 1);
-        assert_eq!(billing.load(Ordering::SeqCst), 0);
-        assert_eq!(out.model_calls(), 0);
-        assert_eq!(out.messages().len(), 2);
-        assert!(out.member_runs().is_empty());
-        let plain = agent("desk", echo(Arc::new(AtomicUsize::new(0))))
-            .build()
-            .await
-            .unwrap();
-        assert!(!plain.is_team());
-    }
-
-    #[tokio::test]
-    async fn manages_runs_hierarchical_crew() {
-        let tech = Arc::new(AtomicUsize::new(0));
-        let store = Arc::new(InMemCheckpoints::with_history());
-        let built = agent("manager", delegate_then_answer())
-            .checkpoints(Storage::custom(store.clone()))
-            .manages([agent("tech", echo(tech.clone()))])
-            .build()
-            .await
-            .unwrap();
-        let out = built.run_with("Fix my network").await.unwrap();
-        assert!(out.text().starts_with("Manager got: "), "{}", out.text());
-        assert!(
-            out.text().contains("Hello! You said: check the cable"),
-            "{}",
-            out.text()
-        );
-        assert_eq!(tech.load(Ordering::SeqCst), 1);
-        assert_eq!(built.resume(out.run_id()).await.unwrap(), out.text());
-        let history = built.history(out.run_id()).await.unwrap_err();
-        assert!(config(history).contains("team agent"));
-        let two = vec![
-            Message::text(Role::User, "a"),
-            Message::text(Role::User, "b"),
-        ];
-        let err = built.run_with(two).await.unwrap_err();
-        assert!(config(err).contains("one user text"));
-    }
-
-    #[tokio::test]
-    async fn team_build_refusals() {
-        let echo0 = || echo(Arc::new(AtomicUsize::new(0)));
-        let tasks = agent("lead", echo0()).members([agent("a", echo0())], TeamMode::Tasks);
-        assert!(config(tasks.build().await.unwrap_err()).contains("tasks is not built yet"));
-        let none = agent("lead", echo0()).members(Vec::<Agent>::new(), TeamMode::Route);
-        assert!(config(none.build().await.unwrap_err()).contains("1 to 32 members"));
-        let limited = agent("a", echo0()).limits(Limits {
-            run: Some(5),
-            ..Limits::default()
-        });
-        let own = agent("lead", echo0()).members([limited], TeamMode::Broadcast);
-        let message = config(own.build().await.unwrap_err());
-        assert!(
-            message.contains("member `a` sets its own limits"),
-            "{message}"
-        );
-        assert!(message.contains("on the leader"), "{message}");
-        let team = agent("inner", echo0()).members([agent("a", echo0())], TeamMode::Route);
-        let outer = agent("lead", echo0()).agent_tool(team.clone());
-        let message = config(outer.build().await.unwrap_err());
-        assert!(message.contains("leads a team"), "{message}");
-        let built = team.build().await.unwrap();
-        let ctx = ToolContext::for_call(RunId::new(), 1, 0);
-        let refused = built.call(json!({"task": "x"}), &ctx).await.unwrap_err();
-        assert!(refused.to_string().contains("leads a team"), "{refused}");
-    }
 }

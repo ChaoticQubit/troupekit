@@ -31,6 +31,7 @@ pub use laws::Laws;
 pub use memory::AgentMemory;
 pub use output::{IntoToolOutput, Json};
 pub use storage::Storage;
+pub use team_agent::TeamMode;
 pub use tool::{tool, AsTool};
 pub use troupekit_macros::{agent, tool};
 pub use troupekit_tools::{Tool, ToolContext, ToolOutput};
