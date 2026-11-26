@@ -6,7 +6,7 @@ use crate::tokens::{Delim, Error, Piece, SpanId, Tok};
 use crate::tool::crate_path;
 
 const WHAT: &str = "#[agent]";
-const KEYS: [&str; 18] = [
+const KEYS: [&str; 20] = [
     "model",
     "tools",
     "evals",
@@ -23,18 +23,32 @@ const KEYS: [&str; 18] = [
     "auto_laws",
     "memory",
     "knowledge",
+    "agents",
+    "delegates",
     "name",
     "crate",
 ];
 const DEFAULT_CRATE: &str = "::troupekit";
 
-/// One builder call the `#[agent]` expansion makes: the method name and
-/// the original value tokens passed to it, re-emitted with their spans.
-/// Calls run in attribute order, after `new` and `instructions`.
+/// One builder call the `#[agent]` expansion makes: the method name, the
+/// original value tokens passed to it, re-emitted with their spans, and
+/// the shape they take. Calls run in attribute order, after `new` and
+/// `instructions`.
 #[derive(Clone, Debug)]
 pub struct Call {
     pub method: &'static str,
     pub value: Vec<SpanId>,
+    pub shape: Shape,
+}
+
+/// How a call passes its value: `Plain` as written, `Invoke` as the call
+/// `path()`, `InvokeList` as the one-element array `[path()]`.
+/// `agents` and `delegates` name `#[agent]` fns, so they invoke them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Plain,
+    Invoke,
+    InvokeList,
 }
 
 /// A validated `#[agent]` fn, ready for code generation.
@@ -119,6 +133,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                 calls.push(Call {
                     method: method(&arg.key),
                     value: spans(),
+                    shape: Shape::Plain,
                 });
             }
             "tools" => {
@@ -132,6 +147,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     calls.push(Call {
                         method: "tool",
                         value: path.iter().map(Tok::span).collect(),
+                        shape: Shape::Plain,
                     });
                 }
             }
@@ -145,6 +161,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     calls.push(Call {
                         method: "eval",
                         value: vec![entry[0].span()],
+                        shape: Shape::Plain,
                     });
                 }
             }
@@ -163,6 +180,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     calls.push(Call {
                         method: "laws",
                         value: one.value.iter().map(Tok::span).collect(),
+                        shape: Shape::Plain,
                     });
                 }
             }
@@ -177,11 +195,20 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                 calls.push(Call {
                     method: "auto_laws",
                     value: spans(),
+                    shape: Shape::Plain,
                 });
+            }
+            "agents" | "delegates" => {
+                let (method, shape) = match arg.key.as_str() {
+                    "agents" => ("agent_tool", Shape::Invoke),
+                    _ => ("delegates", Shape::InvokeList),
+                };
+                calls.extend(agent_paths(arg, method, shape)?);
             }
             _ => calls.push(Call {
                 method: method(&arg.key),
                 value: spans(),
+                shape: Shape::Plain,
             }),
         }
     }
@@ -237,13 +264,46 @@ pub fn expand_agent(a: &AgentFn) -> Vec<Piece> {
     ))];
     for call in &a.calls {
         body.push(Piece::Code(format!(".{}", call.method)));
-        body.push(Piece::Group(
-            Delim::Paren,
-            call.value.iter().map(|s| Piece::Orig(*s)).collect(),
-        ));
+        let mut value: Vec<Piece> = call.value.iter().map(|s| Piece::Orig(*s)).collect();
+        if call.shape != Shape::Plain {
+            value.push(Piece::Code("()".into()));
+        }
+        if call.shape == Shape::InvokeList {
+            value = vec![Piece::Group(Delim::Bracket, value)];
+        }
+        body.push(Piece::Group(Delim::Paren, value));
     }
     out.push(Piece::Group(Delim::Brace, body));
     out
+}
+
+/// Parses an `agents` or `delegates` list of `#[agent]` fn paths into one
+/// `method` call per path, in list order. Returns an error on a value
+/// that is not a list of paths, or on an empty `delegates` list.
+fn agent_paths(arg: &Arg, method: &'static str, shape: Shape) -> Result<Vec<Call>, Error> {
+    let message = format!(
+        "{} = takes a list like [researcher, team::checker]",
+        arg.key
+    );
+    let paths = list(arg, &message)?;
+    if paths.is_empty() && arg.key == "delegates" {
+        return Err(Error::new(arg.value_span(), message));
+    }
+    let mut calls = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !is_path(&path) {
+            return Err(Error::new(path[0].span(), message));
+        }
+        calls.push(Call {
+            method,
+            value: path.iter().map(Tok::span).collect(),
+            shape,
+        });
+    }
+    assert!(calls
+        .iter()
+        .all(|c| !c.value.is_empty() && c.shape != Shape::Plain));
+    Ok(calls)
 }
 
 fn method(key: &str) -> &'static str {
@@ -354,6 +414,66 @@ mod tests {
             ]
         );
         assert_eq!(a.calls[3].value.len(), 5);
+    }
+
+    #[test]
+    fn agents_and_delegates_call_each_path() {
+        let a = parse(
+            "agents = [researcher, team::checker], delegates = [writer, ::x::editor]",
+            &format!("{DOC}fn lead() {{}}"),
+        )
+        .unwrap();
+        assert_eq!(
+            methods(&a),
+            ["agent_tool", "agent_tool", "delegates", "delegates"]
+        );
+        let shapes: Vec<Shape> = a.calls.iter().map(|c| c.shape).collect();
+        assert_eq!(
+            shapes,
+            [
+                Shape::Invoke,
+                Shape::Invoke,
+                Shape::InvokeList,
+                Shape::InvokeList
+            ]
+        );
+        let lens: Vec<usize> = a.calls.iter().map(|c| c.value.len()).collect();
+        assert_eq!(lens, [1, 4, 1, 5]);
+        let item = lex(&format!("{DOC}fn lead() {{}}"));
+        let a = parse_agent(&lex("agents = [researcher], delegates = [writer]"), &item).unwrap();
+        let pieces = expand_agent(&a);
+        let Some(Piece::Group(Delim::Brace, body)) = pieces.last() else {
+            panic!("the body is the last piece");
+        };
+        let invoke = |p: &Piece| match p {
+            Piece::Group(Delim::Paren, inner) => {
+                matches!(inner.as_slice(), [Piece::Orig(_), Piece::Code(c)] if c == "()")
+            }
+            _ => false,
+        };
+        assert!(matches!(&body[1], Piece::Code(c) if c == ".agent_tool"));
+        assert!(invoke(&body[2]));
+        assert!(matches!(&body[3], Piece::Code(c) if c == ".delegates"));
+        let Piece::Group(Delim::Paren, outer) = &body[4] else {
+            panic!("delegates takes one argument");
+        };
+        let [Piece::Group(Delim::Bracket, list)] = outer.as_slice() else {
+            panic!("delegates takes an array");
+        };
+        assert!(invoke(&Piece::Group(Delim::Paren, list.clone())));
+    }
+
+    #[test]
+    fn agents_and_delegates_take_paths() {
+        let item = format!("{DOC}fn lead() {{}}");
+        let agents = "agents = takes a list like [researcher, team::checker]";
+        let delegates = "delegates = takes a list like [researcher, team::checker]";
+        rejects("agents = researcher", &item, agents);
+        rejects("agents = [researcher()]", &item, agents);
+        rejects("delegates = writer", &item, delegates);
+        rejects("delegates = [\"writer\"]", &item, delegates);
+        rejects("delegates = []", &item, delegates);
+        assert!(parse("agents = []", &item).unwrap().calls.is_empty());
     }
 
     #[test]
@@ -506,7 +626,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_key() {
-        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, name, crate");
+        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, agents, delegates, name, crate");
     }
 
     #[test]

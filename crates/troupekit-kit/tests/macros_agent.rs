@@ -87,3 +87,70 @@ async fn macro_and_builder_build_the_same_persona() {
         .unwrap();
     assert_eq!(from_macro.persona(), from_builder.persona());
 }
+
+/// Find facts about the task.
+#[agent(model = "fake/m", role = "A researcher.", goal = "Find facts.")]
+fn researcher() {}
+
+/// Check the facts in the task.
+#[agent(model = "fake/m")]
+fn checker() {}
+
+fn echo_researcher() -> Agent {
+    researcher().model_client(echo_model())
+}
+
+mod crew {
+    pub fn echo_checker() -> troupekit::Agent {
+        super::checker().model_client(crate::common::echo_model())
+    }
+}
+
+/// Lead with agent tools.
+#[agent(model = "fake/m", agents = [echo_researcher, crew::echo_checker])]
+fn tool_lead() {}
+
+/// Lead with coworkers.
+#[agent(model = "fake/m", delegates = [echo_researcher, self::crew::echo_checker])]
+fn delegate_lead() {}
+
+/// Lead with a member that has no model client.
+#[agent(model = "fake/m", agents = [checker])]
+fn broken_lead() {}
+
+#[tokio::test]
+async fn macro_agents_key_reaches_builder() {
+    let built = tool_lead()
+        .model_client(echo_model())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(built.persona().tools, ["researcher", "checker"]);
+    let text = built.run("Go").await.unwrap();
+    assert_eq!(text, "Hello! You said: Go");
+    let err = broken_lead()
+        .model_client(echo_model())
+        .build()
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("checker"), "{err:?}");
+}
+
+#[tokio::test]
+async fn macro_delegates_key_reaches_builder() {
+    let built = delegate_lead()
+        .model_client(echo_model())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(built.persona().tools, ["delegate_work", "ask_question"]);
+    let by_hand = Agent::new("delegate-lead")
+        .instructions("Lead with coworkers.")
+        .model("fake/m")
+        .model_client(echo_model())
+        .delegates([echo_researcher(), crew::echo_checker()])
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(by_hand.persona(), built.persona());
+}
