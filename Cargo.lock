@@ -2881,6 +2881,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "troupekit-local"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "troupekit-context",
+ "troupekit-core",
+ "troupekit-providers",
+ "troupekit-trace",
+]
+
+[[package]]
 name = "troupekit-macros"
 version = "0.1.0"
 
@@ -2928,6 +2944,13 @@ dependencies = [
  "toml",
  "troupekit-core",
  "url",
+]
+
+[[package]]
+name = "troupekit-trace"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,21 @@
+[package]
+name = "troupekit-trace"
+description = "Zero-dependency trace spans, sinks and viewers for the Troupekit agent framework."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[dependencies]
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
