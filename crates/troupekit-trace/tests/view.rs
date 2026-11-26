@@ -1,7 +1,9 @@
 use crate::support::lock;
 use std::io::Cursor;
 use std::sync::Arc;
-use troupekit_trace::view::{read_jsonl, FieldValue, NodeKind, SpanTree, ViewLimits};
+use troupekit_trace::view::{
+    read_jsonl, render_terminal, FieldValue, NodeKind, SpanTree, TermOptions, ViewLimits,
+};
 use troupekit_trace::{content, trace, trace_span, MemorySink, Trace, TraceSet, Tracer};
 
 fn read(text: &str, limits: ViewLimits) -> SpanTree {
@@ -145,4 +147,74 @@ fn record_limit_is_enforced() {
     let all = read(&text, ViewLimits::default());
     assert_eq!(all.roots().len(), 10);
     assert!(!all.record_limit_hit());
+}
+
+const SAMPLE: &str = include_str!("data/sample.jsonl");
+const SAMPLE_TERMINAL: &str = include_str!("data/sample_terminal.txt");
+
+fn plain(width: usize) -> TermOptions {
+    TermOptions::default().with_width(width).with_color(false)
+}
+
+#[test]
+fn tree_lists_children_in_start_order() {
+    let tree = read(SAMPLE, ViewLimits::default());
+    assert_eq!(render_terminal(&tree, &plain(40)), SAMPLE_TERMINAL);
+}
+
+#[test]
+fn timeline_bars_scale_to_width() {
+    let tree = read(SAMPLE, ViewLimits::default());
+    let out = render_terminal(&tree, &plain(60));
+    let rows: Vec<&str> = out.lines().filter(|l| l.ends_with('|')).collect();
+    assert_eq!(rows.len(), 3);
+    for row in &rows {
+        assert_eq!(row.chars().count(), 60, "{row:?}");
+    }
+    assert!(rows[0].ends_with(&format!("|{}|", "#".repeat(60 - 24 - 3))));
+    let narrow = render_terminal(&tree, &plain(5));
+    let row = narrow.lines().find(|l| l.ends_with('|')).unwrap();
+    assert_eq!(row.chars().count(), 24 + 3 + 10);
+}
+
+#[test]
+fn filter_keeps_only_selected_categories() {
+    let tree = read(SAMPLE, ViewLimits::default());
+    let only = plain(40).with_only(TraceSet::none().with(Trace::Tools));
+    let out = render_terminal(&tree, &only);
+    assert!(out.contains("\ntool.call [tools] open\n"), "{out}");
+    assert!(!out.contains("agent.run"));
+    assert!(!out.contains("law.check"));
+}
+
+#[test]
+fn control_characters_are_escaped() {
+    let hostile = format!(
+        "{{\"v\":1,\"t\":\"start\",\"trace\":\"00000000000000ab\",\"span\":1,\"parent\":0,\"cat\":\"tools\",\"name\":\"x\\u001b[2Jy\",\"ts_us\":1,\"fields\":{{\"k\\u0007\":\"a\\rb\\u009bc\"}}}}\n"
+    );
+    let tree = read(&hostile, ViewLimits::default());
+    let out = render_terminal(&tree, &plain(40));
+    assert!(out.bytes().all(|b| b >= 0x20 || b == b'\n'), "{out:?}");
+    assert!(out.contains("x\\x1b[2Jy"));
+    assert!(out.contains("k\\x07=a\\x0db\\u{9b}c"));
+    assert!(!out.contains('\u{9b}'));
+    let colored = render_terminal(&tree, &plain(40).with_color(true));
+    for (at, _) in colored.match_indices('\u{1b}') {
+        let code = &colored[at..];
+        assert!(["\u{1b}[0m", "\u{1b}[32m", "\u{1b}[31m", "\u{1b}[33m"]
+            .iter()
+            .any(|c| code.starts_with(c)));
+    }
+}
+
+#[test]
+fn row_cap_prints_more_line() {
+    let text: String = (1..=10).map(|i| start(i, 0, "s", i)).collect();
+    let tree = read(&text, ViewLimits::default());
+    let out = render_terminal(&tree, &plain(40).with_max_rows(3));
+    assert_eq!(out.matches("... 7 more\n").count(), 2, "{out}");
+    assert_eq!(
+        out.lines().filter(|l| l.starts_with("s [agents]")).count(),
+        3
+    );
 }

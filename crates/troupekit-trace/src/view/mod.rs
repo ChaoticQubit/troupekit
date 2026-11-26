@@ -3,8 +3,10 @@
 //! huge JSON lines file; `render_terminal` and `render_html` show it.
 
 mod parse;
+mod terminal;
 mod tree;
 
+pub use terminal::{render_terminal, TermOptions};
 pub use tree::{FieldValue, Node, NodeKind, SpanTree};
 
 use parse::{parse, ParseError};
