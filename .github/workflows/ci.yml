@@ -265,6 +265,10 @@ jobs:
         shell: bash
         working-directory: proofs/agent-run
         run: bend PROOF.bend | tee out.txt && grep -qx "ALL PROOFS CHECK" out.txt
+      - name: proofs graph
+        shell: bash
+        working-directory: proofs/graph
+        run: bend PROOF.bend | tee out.txt && grep -qx "ALL PROOFS CHECK" out.txt
 
   full:
     name: full ${{ matrix.runner }}
