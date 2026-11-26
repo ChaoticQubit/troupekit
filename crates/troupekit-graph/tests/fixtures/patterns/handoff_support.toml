@@ -1,0 +1,48 @@
+name = "support"
+start = "frontdesk"
+max_steps = 144
+
+[state]
+input = "string"
+output = "string"
+handoffs = "list?"
+
+[reducers]
+handoffs = "append"
+
+[[nodes]]
+id = "frontdesk"
+kind = "agent"
+persona = "frontdesk"
+prompt = "Answer the request yourself, or hand it to a teammate who fits it better."
+reads = ["input", "handoffs"]
+writes = "handoffs"
+goto = ["billing", "tech", "end"]
+fields = { answer = "string" }
+sets = { answer = "output" }
+
+[[nodes]]
+id = "billing"
+kind = "agent"
+persona = "billing"
+prompt = "Answer the request yourself, or hand it to a teammate who fits it better."
+reads = ["input", "handoffs"]
+writes = "handoffs"
+goto = ["frontdesk", "end"]
+fields = { answer = "string" }
+sets = { answer = "output" }
+
+[[nodes]]
+id = "tech"
+kind = "agent"
+persona = "tech"
+prompt = "Answer the request yourself, or hand it to a teammate who fits it better."
+reads = ["input", "handoffs"]
+writes = "handoffs"
+goto = ["frontdesk", "end"]
+fields = { answer = "string" }
+sets = { answer = "output" }
+
+[[nodes]]
+id = "end"
+kind = "end"

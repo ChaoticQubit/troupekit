@@ -880,3 +880,118 @@ fn every_shortcut_parses_as_a_flow() {
     let text = std::fs::read_to_string(&path).unwrap();
     Flow::parse(&path, &text).unwrap();
 }
+
+const SUPPORT: &str = "name = 'support'\n[handoff]\nstart = 'frontdesk'\nmax_handoffs = 8\n\
+    receipts = true\nrequire_reason = false\n[handoff.allow]\nfrontdesk = ['billing', 'tech']\n\
+    billing = ['frontdesk']\ntech = ['frontdesk']\n";
+
+#[test]
+fn handoff_compiles_to_goto_agents_with_allowed_targets() {
+    let table = compile(FILE, SUPPORT).unwrap();
+    assert_eq!(table, golden("handoff_support.toml"));
+    assert_eq!(table["start"].as_str(), Some("frontdesk"));
+    assert_eq!(
+        strs(&node(&table, "frontdesk")["goto"]),
+        ["billing", "tech", "end"]
+    );
+    assert_eq!(strs(&node(&table, "billing")["goto"]), ["frontdesk", "end"]);
+    assert_eq!(strs(&node(&table, "tech")["goto"]), ["frontdesk", "end"]);
+    for id in ["frontdesk", "billing", "tech"] {
+        let n = node(&table, id);
+        assert_eq!(n["fields"]["answer"].as_str(), Some("string"), "{id}");
+        assert_eq!(n["sets"]["answer"].as_str(), Some("output"), "{id}");
+    }
+    let leaf = "name = 's'\n[handoff]\nstart = 'a'\n[handoff.allow]\na = ['b']\n";
+    let table = compile(FILE, leaf).unwrap();
+    assert_eq!(strs(&node(&table, "b")["goto"]), ["end"]);
+    assert_eq!(table["max_steps"].as_integer(), Some(9 * 16));
+}
+
+#[test]
+fn handoff_to_unlisted_agent_is_refused() {
+    let table = compile(FILE, SUPPORT).unwrap();
+    assert!(!strs(&node(&table, "billing")["goto"]).contains(&"tech"));
+    assert!(table.get("edges").is_none(), "handoffs route only by goto");
+    let edge = format!("{SUPPORT}[[edges]]\nfrom = 'billing'\nto = 'tech'\n");
+    assert!(compile(FILE, &edge).is_err());
+    refused(
+        &SUPPORT.replace("billing = ['frontdesk']", "billing = ['billing']"),
+        "handoff.allow.billing[0]",
+        "hands off to itself",
+    );
+    refused(
+        &SUPPORT.replace("tech = ['frontdesk']", "tech = ['frontdesk', 'frontdesk']"),
+        "handoff.allow.tech[1]",
+        "repeats",
+    );
+    refused(
+        &SUPPORT.replace("start = 'frontdesk'", "start = 'Front'"),
+        "handoff.start",
+        "",
+    );
+    refused(
+        &SUPPORT.replace("require_reason = false", "require_reason = true"),
+        "handoff.require_reason",
+        "not built yet",
+    );
+}
+
+#[test]
+fn handoff_receipts_append_from_to_reason() {
+    let table = compile(FILE, SUPPORT).unwrap();
+    assert_eq!(table["state"]["handoffs"].as_str(), Some("list?"));
+    assert_eq!(table["reducers"]["handoffs"].as_str(), Some("append"));
+    for id in ["frontdesk", "billing", "tech"] {
+        let n = node(&table, id);
+        assert_eq!(n["writes"].as_str(), Some("handoffs"), "{id}");
+        assert_eq!(strs(&n["reads"]), ["input", "handoffs"], "{id}");
+    }
+    let quiet = compile(
+        FILE,
+        &SUPPORT.replace("receipts = true", "receipts = false"),
+    )
+    .unwrap();
+    assert!(quiet["state"].get("handoffs").is_none());
+    assert!(node(&quiet, "billing").get("writes").is_none());
+    assert_eq!(strs(&node(&quiet, "billing")["reads"]), ["input"]);
+}
+
+#[test]
+fn max_handoffs_bounds_the_cycle() {
+    let table = compile(FILE, SUPPORT).unwrap();
+    assert_eq!(table["max_steps"].as_integer(), Some(9 * 16));
+    let one = compile(
+        FILE,
+        &SUPPORT.replace("max_handoffs = 8", "max_handoffs = 1"),
+    )
+    .unwrap();
+    assert_eq!(one["max_steps"].as_integer(), Some(2 * 16));
+    refused(
+        &SUPPORT.replace("max_handoffs = 8", "max_handoffs = 0"),
+        "handoff.max_handoffs",
+        "1 to 100",
+    );
+    refused(
+        &SUPPORT.replace("max_handoffs = 8", "max_handoffs = 101"),
+        "handoff.max_handoffs",
+        "1 to 100",
+    );
+}
+
+#[test]
+fn every_handoff_parses_as_a_flow() {
+    let flow = loaded(SUPPORT);
+    assert_eq!(flow.start(), "frontdesk");
+    assert!(
+        matches!(flow.kind("billing"), Some(FlowKind::Agent { goto, .. })
+        if goto == &["frontdesk", "end"])
+    );
+    assert_eq!(flow.reducer("handoffs"), Some(Reducer::Append));
+    loaded(&SUPPORT.replace("receipts = true", "receipts = false"));
+    let path = format!(
+        "{}/tests/fixtures/patterns/handoff_support.toml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    Flow::parse(&path, &text).unwrap();
+}

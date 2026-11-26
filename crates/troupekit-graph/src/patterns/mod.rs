@@ -132,6 +132,14 @@ impl FlowTable {
     }
 
 
+    /// Sets the flow's `max_steps`, the bound on every step the run takes.
+    /// Patterns with a cycle set it from their own limit.
+    /// `steps` must be 1 to 10 000, the range `Flow::parse` accepts.
+    pub(crate) fn max_steps(&mut self, steps: i64) {
+        assert!((1..=10_000).contains(&steps), "max_steps fits the flow range");
+        self.head.insert("max_steps".into(), Value::Integer(steps));
+    }
+
     /// Declares state key `key` of type `ty` for pattern field `field`.
     /// Returns an error naming the field for a key already declared,
     /// including the reserved `input` and `output`.
