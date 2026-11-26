@@ -556,7 +556,7 @@ final class ContractTests: XCTestCase {
             let transport = StubTransport(chunks: answerChunks())
             let database = try scratch().appendingPathComponent("runs.db").path
             let agent = try await cloudAgent(transport, sqlite: database).build()
-            let stream = agent.stream(input: "hi")
+            let stream = try await agent.stream(input: "hi")
             stream.cancel()
             let (code, message) = await expectFailure { _ = try await stream.result() }
             try rethrowUnbuilt(code, message)
