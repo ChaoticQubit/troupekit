@@ -72,12 +72,15 @@ fn check(root: &Path, name: &str) -> (bool, String) {
             "--offline",
             "--message-format",
             "short",
+            "--color",
+            "never",
             "--bin",
             name,
         ])
         .arg("--manifest-path")
         .arg(root.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", target)
+        .env("CARGO_TERM_COLOR", "never")
         .output()
         .unwrap();
     (

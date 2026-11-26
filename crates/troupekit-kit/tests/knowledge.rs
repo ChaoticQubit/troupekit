@@ -52,7 +52,11 @@ impl Embedder for LateWriter {
             )
             .await
             .unwrap();
-            assert_eq!(newer.added, 1);
+            assert_eq!(
+                (newer.added, newer.replaced, newer.skipped),
+                (0, 2, 1),
+                "late.md was still indexed, so the newer run replaces it"
+            );
         }
         self.inner.embed(texts).await
     }
