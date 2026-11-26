@@ -244,7 +244,7 @@ impl Ctx {
     pub fn in_scope<F: Future>(&self, fut: F) -> Instrumented<F> {
         Instrumented {
             fut: Box::pin(fut),
-            ctx: Some(self.clone()),
+            ctx: self.clone(),
         }
     }
 
@@ -402,19 +402,10 @@ impl Drop for ScopeGuard {
 
 /// A future that installs a trace scope on every poll and restores the
 /// previous one after, so the scope follows the task across threads.
-/// Made by `Tracer::in_scope`, `Ctx::in_scope` and `Span::instrument`.
+/// Made by `Tracer::in_scope` and `Ctx::in_scope`.
 pub struct Instrumented<F> {
     fut: Pin<Box<F>>,
-    ctx: Option<Ctx>,
-}
-
-impl<F> Instrumented<F> {
-    pub(crate) fn passthrough(fut: F) -> Instrumented<F> {
-        Instrumented {
-            fut: Box::pin(fut),
-            ctx: None,
-        }
-    }
+    ctx: Ctx,
 }
 
 impl<F: Future> Future for Instrumented<F> {
@@ -422,7 +413,7 @@ impl<F: Future> Future for Instrumented<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let this = self.get_mut();
-        let _guard = this.ctx.clone().map(|ctx| ScopeGuard::set(Some(ctx)));
+        let _guard = ScopeGuard::set(Some(this.ctx.clone()));
         this.fut.as_mut().poll(cx)
     }
 }

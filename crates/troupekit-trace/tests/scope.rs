@@ -178,3 +178,23 @@ fn span_outside_scope_is_disabled() {
         .iter()
         .all(|r| r["t"] == "header" || r["t"] == "footer"));
 }
+
+#[test]
+fn disabled_span_instrument_keeps_the_caller_scope() {
+    let _guard = lock();
+    let sink = Collect::new();
+    let t = tracer(&sink, TraceSet::none().with(Trace::Tools));
+    let mut fut = Box::pin(t.in_scope(async {
+        let off = trace_span!(Trace::Models, "model.call");
+        assert!(!off.is_enabled());
+        off.instrument(async {
+            YieldOnce::default().await;
+            trace!(Trace::Tools, "tool.inside");
+        })
+        .await;
+    }));
+    assert!(poll_once(fut.as_mut()).is_pending());
+    assert!(poll_once(fut.as_mut()).is_ready());
+    drop(t);
+    assert_eq!(num(&sink.named("tool.inside"), "parent"), 0);
+}

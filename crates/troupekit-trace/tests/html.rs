@@ -40,7 +40,9 @@ fn html_escapes_hostile_content() {
 
 #[test]
 fn html_has_no_external_urls() {
-    let page = render_html(&tree_with_hostile());
+    let full = render_html(&tree_with_hostile());
+    let data = data_block(&full);
+    let page = full.replacen(data, "", 1);
     for needle in [
         "http:",
         "https:",

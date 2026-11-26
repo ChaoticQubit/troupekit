@@ -218,3 +218,10 @@ fn row_cap_prints_more_line() {
         3
     );
 }
+
+#[test]
+fn huge_line_limit_does_not_overflow() {
+    let text = start(1, 0, "a", 1) + &end(1, 2, 1);
+    let tree = read(&text, ViewLimits::default().with_line_bytes_max(usize::MAX));
+    assert_eq!(tree.roots().len(), 1);
+}
