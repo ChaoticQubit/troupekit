@@ -2,5 +2,14 @@
 //! a checked model catalog and cache, and llama.cpp behind the `llama`
 //! feature. The default build compiles no C or C++ code.
 
+mod error;
+mod model;
+
+pub use error::LocalError;
+pub use model::{
+    ChatMessage, ChatRole, Flow, GenParams, GenStop, Generation, Grammar, LocalInfo, LocalMetrics,
+    LocalModel,
+};
+
 use troupekit_providers as _;
 use troupekit_trace as _;
