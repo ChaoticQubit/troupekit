@@ -591,3 +591,38 @@ async fn whole_steps_store_keeps_the_0_1_seq_after_restore() {
     );
     assert_eq!(after, (next..next + after.len() as u64).collect::<Vec<_>>());
 }
+
+fn swap_run_ids(v: &mut serde_json::Value, to: &str) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if k == "run_id" && x.is_string() {
+                    *x = json!(to);
+                } else {
+                    swap_run_ids(x, to);
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| swap_run_ids(x, to)),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn kept_agent_run_of_another_run_is_refused() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let io = io(&gates, model());
+    let id = crash_after_branch_a(AGENT_FAN, &io, &store, &gates).await;
+    let kept = store.take(id, 2, 0);
+    assert_eq!(kept.node(), "a", "branch 0 is the agent branch");
+    let mut value = kept.write().clone();
+    swap_run_ids(&mut value, &RunId::new().to_string());
+    store.put(id, 2, BranchWrite::new(0, "a", value));
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    gates.open("b");
+    let err = run.step_durable(&io, &store).await.unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Checkpoint(m) if m.contains("not this branch's agent run")),
+        "{err}"
+    );
+}

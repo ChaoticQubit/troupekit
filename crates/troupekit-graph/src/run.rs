@@ -1247,8 +1247,16 @@ impl GraphRun {
             }
             match (&finished, &b.at) {
                 (Finished::Tool { .. }, At::Enter) => {}
-                (Finished::Agent { run, .. }, At::Agent { .. }) => {
-                    AgentRun::from_checkpoint(&run.checkpoint()).map_err(|e| bad(e.to_string()))?;
+                (Finished::Agent { run: kept, .. }, At::Agent { run: current, .. }) => {
+                    let (k, c) = (kept.checkpoint(), current.checkpoint());
+                    AgentRun::from_checkpoint(&k).map_err(|e| bad(e.to_string()))?;
+                    let same = k.run_id == c.run_id
+                        && k.step >= c.step
+                        && k.state["spec"] == c.state["spec"]
+                        && k.state["limits"] == c.state["limits"];
+                    if !same {
+                        return Err(bad("it is not this branch's agent run (run id, step, persona or limits differ)".into()));
+                    }
                 }
                 _ => return Err(bad(format!("its kind does not fit the work at `{node}`"))),
             }
@@ -1594,7 +1602,7 @@ impl GraphRun {
         let list = match self.state.get(&over) {
             Some(Value::Array(list)) => list.clone(),
             Some(Value::Null) | None => return Err(fail(format!("reads `{over}`, which is not set"))),
-            Some(other) => return Err(fail(format!("`{over}` is not a list: {other}"))),
+            Some(other) => return Err(fail(format!("`{over}` is {}, not a list", crate::flow::shape(other)))),
         };
         if list.len() > max_items as usize {
             return Err(fail(format!(
