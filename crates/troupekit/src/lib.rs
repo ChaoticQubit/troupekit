@@ -6,6 +6,9 @@ pub use troupekit_agent as agent;
 pub use troupekit_core as core;
 pub use troupekit_graph as graph;
 pub use troupekit_host as host;
+pub use troupekit_trace as trace;
+#[cfg(feature = "local")]
+pub use troupekit_local as local;
 
 #[cfg(feature = "sqlite")]
 pub use troupekit_store_sqlite::{Durability, SqliteStore, SqliteStoreBuilder};
@@ -155,8 +158,5 @@ impl Troupe {
     }
 }
 
-use troupekit_trace as _;
-#[cfg(feature = "local")]
-use troupekit_local as _;
 #[cfg(feature = "local")]
 use troupekit_kit as _;
