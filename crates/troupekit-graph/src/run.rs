@@ -1530,6 +1530,27 @@ impl GraphRun {
         }
     }
 
+    fn any_region(&self, join: &str) -> BTreeSet<String> {
+        let fork = self
+            .workflow
+            .nodes
+            .iter()
+            .map(|n| n.id.clone())
+            .find(|id| self.fork_outs(id).is_some() && self.join_of(id, 0) == join)
+            .expect("every join closes one fan-out");
+        let mut region = BTreeSet::new();
+        self.region(&fork, join, &mut region, 0);
+        region.insert(join.to_string());
+        region
+    }
+
+    fn lost_to_any(&self, node: &str) -> bool {
+        self.branches
+            .iter()
+            .filter(|b| b.at == At::Joined && self.is_any(&b.node))
+            .any(|b| self.any_region(&b.node).contains(node))
+    }
+
     fn close_any(&mut self) -> bool {
         let Some(join) = self
             .branches
@@ -1539,16 +1560,7 @@ impl GraphRun {
         else {
             return false;
         };
-        let fork = self
-            .workflow
-            .nodes
-            .iter()
-            .map(|n| n.id.clone())
-            .find(|id| self.fork_outs(id).is_some() && self.join_of(id, 0) == join)
-            .expect("every join closes one fan-out");
-        let mut region = BTreeSet::new();
-        self.region(&fork, &join, &mut region, 0);
-        region.insert(join.clone());
+        let region = self.any_region(&join);
         let before = self.usage();
         let mut first = None;
         let mut kept = Vec::with_capacity(self.branches.len());
@@ -1972,6 +1984,9 @@ impl GraphRun {
                 let node = self.node(&self.branches[i].node).clone();
                 let fail = |m: String| format!("node `{}`: {m}", node.id);
                 if matches!(self.flow_kind(&node.id), Some(FlowKind::Map { .. })) {
+                    if self.lost_to_any(&node.id) {
+                        continue;
+                    }
                     self.expand_map(i)?;
                     changed = true;
                     break;

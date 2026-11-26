@@ -817,6 +817,90 @@ async fn any_join_drops_losing_branches_and_their_pending_writes() {
 }
 
 #[tokio::test]
+async fn any_join_loser_never_expands_its_map() {
+    for input_xs in [None, Some(json!(["x", "y"]))] {
+        let names = ["s", "a", "b1", "b2", "after"];
+        let gates = GatedTool::new();
+        open_all(&gates, &names);
+        open_all(&gates, &["w/x", "w/y"]);
+        let mut tools = ToolRegistry::new();
+        for name in names {
+            let reply = format!("{name}!");
+            tools
+                .register(gates.tool(name, move |_| ToolOutput::text(reply.clone())))
+                .unwrap();
+        }
+        tools
+            .register(gates.tool_per_item("w", "x", |args| {
+                ToolOutput::text(args["x"].as_str().unwrap().to_string())
+            }))
+            .unwrap();
+        let io = SimpleGraphIo::new(Arc::new(SimpleIo::new(tools)), PersonaLoader::new(vec![]));
+        let mut nodes: Vec<String> = names.iter().map(|n| tool_node(n, "")).collect();
+        nodes.push(
+        "[[nodes]]\nid = 'm'\nkind = 'map'\nover = 'xs'\nitem = 'x'\nbody = 'w'\nwrites = 'out'\nmax_items = 1\n"
+            .into(),
+    );
+        nodes.push(
+            "[[nodes]]\nid = 'w'\nkind = 'tool'\ntool = 'w'\nreads = ['x']\nwrites = 'y'\n".into(),
+        );
+        nodes.push(join_node("j", "mode = 'any'\n"));
+        nodes.push(END_NODE.into());
+        let mut text = graph(
+            &names,
+            &nodes,
+            &[
+                ("s", "a"),
+                ("s", "b1"),
+                ("b1", "m"),
+                ("m", "b2"),
+                ("a", "j"),
+                ("b2", "j"),
+                ("j", "after"),
+                ("after", "e"),
+            ],
+        );
+        text = text.replace(
+            "[state]\n",
+            "[state]\nxs = 'list?'\nx = 'string'\ny = 'string'\nout = 'list'\n",
+        );
+        let flow = Flow::parse("test/g.toml", &text).unwrap();
+        let mut input = Map::new();
+        if let Some(v) = input_xs.clone() {
+            input.insert("xs".into(), v);
+        }
+        let mut run = GraphRun::start(flow, input, Limits::default(), &io)
+            .await
+            .unwrap();
+        let out = bounded(
+            "the any-join run",
+            || started(&gates),
+            drive_plain(&mut run, &io),
+        )
+        .await;
+        let GraphOutcome::Done(state) = out else {
+            panic!("{out:?}");
+        };
+        assert_eq!(state["a"], json!("a!"));
+        assert_eq!(
+            state["b1"],
+            json!("b1!"),
+            "a loser's write finished before the close stays"
+        );
+        assert!(
+            gates.calls("w/x").is_empty() && gates.calls("w/y").is_empty(),
+            "dropped map items never run"
+        );
+        assert!(
+            gates.calls("b2").is_empty(),
+            "the loser's next node never runs"
+        );
+        assert_eq!(state.get("out"), None, "the dropped map writes nothing");
+        assert_eq!(gates.calls("after").len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn deferred_node_waits_for_all_other_work() {
     let names = ["s", "d", "a1", "a2", "after"];
     let gates = GatedTool::new();
