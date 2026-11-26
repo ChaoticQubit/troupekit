@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
 use troupekit_core::error::CoreError;
+use troupekit_trace::{trace_span, Trace};
 use troupekit_core::event::Usage;
 use troupekit_core::ids::RunId;
 use troupekit_core::message::Message;
@@ -109,7 +110,8 @@ impl CheckpointStore for SqliteStore {
         }
         let run = cp.run_id.to_string();
         let actual = cp.step;
-        self.call(move |conn| {
+        let mut span = trace_span!(Trace::Store, "checkpoint.save", store = "sqlite", run = run.as_str(), step = actual, bytes = bytes.len());
+        let result = span.instrument(self.call(move |conn| {
             let tx = immediate(conn)?;
             let expected = match max_step(&tx, &run)? {
                 None => 0,
@@ -129,13 +131,18 @@ impl CheckpointStore for SqliteStore {
             assert_eq!(inserted, 1);
             assert_eq!(max_step(&tx, &run)?, Some(actual));
             tx.commit().map_err(db)
-        })
-        .await
+        }))
+        .await;
+        if let Err(e) = &result {
+            span.fail(e.to_string());
+        }
+        result
     }
 
     async fn latest(&self, run_id: RunId) -> Result<Option<Checkpoint>, CoreError> {
         let run = run_id.to_string();
-        self.call(move |conn| {
+        let mut span = trace_span!(Trace::Store, "checkpoint.latest", store = "sqlite", run = run.as_str());
+        let result = span.instrument(self.call(move |conn| {
             let row: Option<(i64, Vec<u8>)> = conn
                 .query_row(
                     "SELECT step, state_json FROM checkpoint WHERE run_id = ?1 \
@@ -147,8 +154,14 @@ impl CheckpointStore for SqliteStore {
                 .map_err(db)?;
             row.map(|(step, bytes)| row_checkpoint(run_id, step, &bytes))
                 .transpose()
-        })
-        .await
+        }))
+        .await;
+        match &result {
+            Ok(Some(cp)) => span.record("found_step", cp.step),
+            Ok(None) => span.record("found", false),
+            Err(e) => span.fail(e.to_string()),
+        }
+        result
     }
 
     async fn history(&self, run_id: RunId) -> Result<Vec<Checkpoint>, CoreError> {

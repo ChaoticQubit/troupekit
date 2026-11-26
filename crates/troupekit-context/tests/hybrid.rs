@@ -139,3 +139,28 @@ fn defaults_are_the_safe_values() {
     assert_eq!(cfg.max_query_chars(), 2_000);
     assert_eq!(HybridMode::default(), HybridMode::Hybrid);
 }
+
+#[tokio::test]
+async fn hybrid_search_emits_knowledge_span_without_query_text() {
+    let k = kit().await;
+    let cfg = HybridConfig::default().with_top_k(3).with_candidates(10);
+    for keep in [false, true] {
+        let sink = std::sync::Arc::new(troupekit_trace::MemorySink::default());
+        let tracer = troupekit_trace::Tracer::builder().content(keep).sink(sink.clone()).build().unwrap();
+        let ids = tracer.in_scope(run(&k, "zebra refund to the card", &tenant("a"), &cfg)).await.unwrap();
+        drop(tracer);
+        let records: Vec<serde_json::Value> = sink.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let search: Vec<&serde_json::Value> = records.iter().filter(|r| r["t"] == "start" && r["name"] == "knowledge.search").collect();
+        assert_eq!(search.len(), 1);
+        assert_eq!(search[0]["cat"], "knowledge");
+        assert_eq!(search[0]["fields"]["mode"], "hybrid");
+        assert_eq!(search[0]["fields"]["k"], 3);
+        assert_eq!(search[0]["fields"]["scopes"], 1);
+        let end = records.iter().find(|r| r["t"] == "end" && r["span"] == search[0]["span"]).unwrap();
+        assert_eq!(end["fields"]["hits"], ids.len() as u64);
+        let index_search = records.iter().find(|r| r["t"] == "start" && r["name"] == "index.search").unwrap();
+        assert_eq!(index_search["parent"], search[0]["span"]);
+        let leaked = sink.lines().iter().any(|l| l.contains("zebra"));
+        assert_eq!(leaked, keep, "query text appears only with content on");
+    }
+}

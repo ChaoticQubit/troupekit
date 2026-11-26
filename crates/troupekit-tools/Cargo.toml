@@ -11,6 +11,7 @@ categories.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+troupekit-trace = { path = "../troupekit-trace", version = "0.2.0" }
 troupekit-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

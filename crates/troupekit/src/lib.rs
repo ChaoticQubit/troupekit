@@ -154,3 +154,9 @@ impl Troupe {
         Runner::new(self.queue.clone(), self.checkpoints.clone(), io)
     }
 }
+
+use troupekit_trace as _;
+#[cfg(feature = "local")]
+use troupekit_local as _;
+#[cfg(feature = "local")]
+use troupekit_kit as _;

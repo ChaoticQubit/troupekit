@@ -1,0 +1,7 @@
+{"v":1,"t":"header","trace":"00000000000000ab","name":"demo","started_us":1000,"categories":["agents","laws","tools"],"content":false,"troupekit":"0.1.0"}
+{"v":1,"t":"start","trace":"00000000000000ab","span":1,"parent":0,"cat":"agents","name":"agent.run","ts_us":1000,"fields":{"run":"r1"}}
+{"v":1,"t":"start","trace":"00000000000000ab","span":2,"parent":1,"cat":"agents","name":"agent.step","ts_us":1100}
+{"v":1,"t":"event","trace":"00000000000000ab","span":0,"parent":2,"cat":"laws","name":"law.check","ts_us":1200,"fields":{"held":false}}
+{"v":1,"t":"end","trace":"00000000000000ab","span":2,"ts_us":1500,"dur_us":400,"ok":false,"err":"bad"}
+{"v":1,"t":"start","trace":"00000000000000ab","span":3,"parent":1,"cat":"tools","name":"tool.call","ts_us":1600}
+{"v":1,"t":"end","trace":"00000000000000ab","span":1,"ts_us":2000,"dur_us":1000,"ok":true}

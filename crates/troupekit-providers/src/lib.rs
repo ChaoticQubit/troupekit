@@ -23,3 +23,5 @@ pub use middleware::{FallbackModel, MeteredModel, RetryModel, RetryPolicy};
 pub use model::{Endpoint, HttpModel, Model};
 pub use request::{CompletionRequest, CompletionResponse, Delta, StopReason};
 pub use transport::Transport;
+
+use troupekit_trace as _;
