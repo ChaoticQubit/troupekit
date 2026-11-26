@@ -5,6 +5,8 @@ mod host;
 mod records;
 mod runtime;
 mod stream;
+#[cfg(test)]
+mod stream_tests;
 
 pub use agent::{AgentBuilder, AgentHandle};
 pub use error::{ErrorCode, FfiError};

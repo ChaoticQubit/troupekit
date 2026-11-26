@@ -105,6 +105,16 @@ where
     }
 }
 
+/// Returns a handle to the troupekit runtime, starting it on first use,
+/// for code on a plain thread that must wait on runtime work.
+/// Output: the handle, or `Internal` when the runtime did not start.
+pub(crate) fn handle() -> Result<tokio::runtime::Handle, FfiError> {
+    match RUNTIME.get_or_init(start) {
+        Ok(runtime) => Ok(runtime.handle().clone()),
+        Err(message) => Err(FfiError::new(ErrorCode::Internal, message.clone())),
+    }
+}
+
 fn start() -> Result<Runtime, String> {
     let settings = settings();
     tokio::runtime::Builder::new_multi_thread()

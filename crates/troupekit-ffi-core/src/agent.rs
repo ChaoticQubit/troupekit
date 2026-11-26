@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use troupekit_core::ids::RunId;
 use troupekit_core::secret::Secret;
-use troupekit_kit::{Agent, BuiltAgent};
+use troupekit_kit::{Agent, BuiltAgent, StreamSettings};
 use troupekit_providers::Catalog;
 
 /// Builds an agent in steps from the host language. Every setter
@@ -380,8 +380,19 @@ impl AgentHandle {
     /// Starts a run on `input` and returns its event stream once the
     /// run id is known. Output: the stream, or the setup error (input,
     /// tools, models) with its code, as `start` reports it.
-    pub async fn stream(&self, _input: String) -> Result<Arc<RunStream>, FfiError> {
-        Err(FfiError::unsupported("AgentHandle::stream"))
+    pub async fn stream(&self, input: String) -> Result<Arc<RunStream>, FfiError> {
+        check_input("input", &input)?;
+        let agent = self.agent.clone();
+        let mut settings = StreamSettings::default();
+        settings.capacity = crate::runtime::settings().event_buffer;
+        let stream = spawn(async move {
+            agent
+                .stream_with(input, settings)
+                .await
+                .map_err(FfiError::from)
+        })
+        .await?;
+        Ok(RunStream::agent(stream))
     }
 }
 

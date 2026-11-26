@@ -123,9 +123,18 @@ async fn bad_api_key_is_refused_without_echo() {
 }
 
 #[tokio::test]
-async fn stream_is_async_and_returns_a_result() {
+async fn stream_returns_once_the_run_id_is_known() {
     let handle = calc().build().await.unwrap();
-    let err = handle.stream("1 + 2".into()).await.unwrap_err();
-    assert_eq!(err.code, ErrorCode::Unsupported);
-    assert!(err.message.contains("AgentHandle::stream"), "{err}");
+    let stream = handle.stream("1 + 2".into()).await.unwrap();
+    stream.cancel();
+    assert_eq!(stream.run_id().len(), 36);
+    assert_eq!(stream.dropped_deltas(), 0);
+}
+
+#[tokio::test]
+async fn stream_input_over_cap_is_refused() {
+    let handle = calc().build().await.unwrap();
+    let cap = RuntimeSettings::default().max_input_bytes;
+    let err = handle.stream("x".repeat(cap + 1)).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
 }

@@ -27,15 +27,10 @@ impl RunResult {
     /// becomes JSON text and the run id its text form.
     /// Output: the record.
     pub(crate) fn from_outcome(outcome: &troupekit_kit::RunOutcome) -> RunResult {
-        let usage = outcome.usage();
         RunResult {
             text: outcome.text().to_string(),
             output_json: outcome.output().to_string(),
-            usage: FfiUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cost_usd_micros: usage.cost_usd_micros,
-            },
+            usage: crate::stream::usage_of(outcome.usage()),
             model_calls: outcome.model_calls(),
             run_id: outcome.run_id().to_string(),
         }
