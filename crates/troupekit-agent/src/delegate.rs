@@ -107,7 +107,8 @@ impl DelegateSettings {
         self
     }
 
-    /// Turns the `ask_question` delegation tool on or off.
+    /// Turns the `ask_question` delegation tool on or off; `delegate_work`
+    /// is always offered.
     /// Returns the settings.
     pub fn with_ask_question(mut self, on: bool) -> Self {
         self.ask_question = on;

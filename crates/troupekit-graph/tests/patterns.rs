@@ -12,7 +12,10 @@ const COORDINATE: &str =
     "name = 'desk'\n[team]\nmode = 'coordinate'\nleader = 'lead'\nmembers = ['billing', 'tech']\n";
 
 fn golden(name: &str) -> Table {
-    let path = format!("{}/tests/fixtures/patterns/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/fixtures/patterns/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let text = std::fs::read_to_string(&path).unwrap();
     toml::from_str(&text).unwrap()
 }
@@ -65,7 +68,10 @@ fn route_compiles_to_goto_leader_and_members() {
     let lead = node(&table, "triage_lead");
     assert_eq!(lead["persona"].as_str(), Some("triage-lead"));
     assert_eq!(strs(&lead["goto"]), ["approve_billing", "tech", "sales"]);
-    assert!(lead.get("writes").is_none(), "a router leader writes nothing");
+    assert!(
+        lead.get("writes").is_none(),
+        "a router leader writes nothing"
+    );
     for id in ["billing", "tech", "sales"] {
         assert_eq!(node(&table, id)["writes"].as_str(), Some("output"));
     }
@@ -108,7 +114,9 @@ fn broadcast_compiles_to_fan_out_and_merge() {
     for id in ["law", "tax"] {
         assert_eq!(node(&table, id)["writes"].as_str(), Some("answers"));
     }
-    assert!(nodes(&table).iter().all(|n| n["id"].as_str() != Some("synthesize")));
+    assert!(nodes(&table)
+        .iter()
+        .all(|n| n["id"].as_str() != Some("synthesize")));
 }
 
 #[test]
@@ -121,11 +129,27 @@ fn team_state_keys_reach_every_member() {
     let state = table["state"].as_table().unwrap();
     assert_eq!(state["plan"].as_str(), Some("enum(free, pro)?"));
     for id in ["triage_lead", "billing", "tech", "sales"] {
-        assert_eq!(strs(&node(&table, id)["reads"]), ["input", "customer", "plan"], "{id}");
+        assert_eq!(
+            strs(&node(&table, id)["reads"]),
+            ["input", "customer", "plan"],
+            "{id}"
+        );
     }
-    let coordinated = compile(FILE, &format!("{COORDINATE}[team.state]\nplan = 'string?'\n"));
+    let unsorted = format!("{COORDINATE}[team.state]\nzone = 'string?'\nage = 'int?'\n");
+    let unsorted = compile(FILE, &unsorted).unwrap();
+    assert_eq!(
+        strs(&node(&unsorted, "lead")["reads"]),
+        ["input", "age", "zone"]
+    );
+    let coordinated = compile(
+        FILE,
+        &format!("{COORDINATE}[team.state]\nplan = 'string?'\n"),
+    );
     let coordinated = coordinated.unwrap();
-    assert_eq!(strs(&node(&coordinated, "lead")["reads"]), ["input", "plan"]);
+    assert_eq!(
+        strs(&node(&coordinated, "lead")["reads"]),
+        ["input", "plan"]
+    );
     refused(
         &format!("{COORDINATE}[team.state]\noutput = 'string'\n"),
         "team.state.output",
@@ -157,7 +181,9 @@ fn approve_inserts_a_human_approval_before_member_answer() {
     assert!(edges.contains(&("approve_billing", "check_billing", None)));
     assert!(edges.contains(&("check_billing", "billing", Some("true"))));
     assert!(edges.contains(&("check_billing", "end", Some("false"))));
-    assert!(!edges.iter().any(|e| e.1 == "billing" && e.0 != "check_billing"));
+    assert!(!edges
+        .iter()
+        .any(|e| e.1 == "billing" && e.0 != "check_billing"));
     refused(
         &ROUTE.replace("approve = ['billing']", "approve = ['nobody']"),
         "team.approve[0]",
@@ -178,7 +204,11 @@ fn team_with_unknown_mode_is_refused() {
         "`anarchy` must be one of route, coordinate, collaborate, broadcast, tasks",
     );
     assert!(!e.message.is_empty());
-    refused(&format!("{COORDINATE}colour = 'red'\n"), "colour", "unknown field");
+    refused(
+        &format!("{COORDINATE}colour = 'red'\n"),
+        "colour",
+        "unknown field",
+    );
     refused(
         &COORDINATE.replace("members = ['billing', 'tech']", "members = []"),
         "team.members",
@@ -242,9 +272,16 @@ fn load_refuses_two_patterns_in_one_file() {
         "crew",
         "found `team` and `crew`",
     );
-    refused("name = 'x'\n", "", "one of nodes, team, crew, handoff or steps");
+    refused(
+        "name = 'x'\n",
+        "",
+        "one of nodes, team, crew, handoff or steps",
+    );
     let flow = "name = 'f'\nstart = 'e'\n[[nodes]]\nid = 'e'\nkind = 'end'\n";
-    assert_eq!(compile(FILE, flow).unwrap(), toml::from_str::<Table>(flow).unwrap());
+    assert_eq!(
+        compile(FILE, flow).unwrap(),
+        toml::from_str::<Table>(flow).unwrap()
+    );
 }
 
 #[test]
@@ -258,7 +295,10 @@ fn defaults_are_the_safe_values() {
     assert!(nodes(&route)
         .iter()
         .all(|n| n["kind"].as_str() != Some("human")));
-    assert!(table.get("max_steps").is_none(), "the workflow step cap applies");
+    assert!(
+        table.get("max_steps").is_none(),
+        "the workflow step cap applies"
+    );
 }
 
 const REPORT: &str = "name = 'report'\n[crew]\nprocess = 'sequential'\n\
@@ -286,7 +326,11 @@ fn task(id: &str, extra: &str) -> String {
 
 #[test]
 fn sequential_crew_chains_tasks_in_order() {
-    let table = compile(FILE, &crew(&[&task("a", ""), &task("b", ""), &task("c", "")])).unwrap();
+    let table = compile(
+        FILE,
+        &crew(&[&task("a", ""), &task("b", ""), &task("c", "")]),
+    )
+    .unwrap();
     assert_eq!(table["start"].as_str(), Some("a"));
     assert_eq!(
         edge_list(&table),
@@ -356,7 +400,10 @@ fn async_tasks_compile_to_a_fan_out_joined_before_first_reader() {
         "crew.tasks[2].async",
         "inside another async span",
     );
-    assert_eq!(compile(FILE, REPORT).unwrap(), golden("crew_sequential.toml"));
+    assert_eq!(
+        compile(FILE, REPORT).unwrap(),
+        golden("crew_sequential.toml")
+    );
 }
 
 #[test]
@@ -410,9 +457,19 @@ fn hierarchical_crew_uses_builtin_manager_with_members_as_delegates() {
     assert_eq!(table, golden("crew_hierarchical.toml"));
     let manager = node(&table, "manager");
     assert_eq!(manager["persona"].as_str(), Some("crew-manager"));
-    assert_eq!(strs(&manager["delegates"]), ["researcher", "checker", "writer"]);
-    let async_task = HIERARCHY.replace("description = 'Check the facts.'\n", "description = 'Check the facts.'\nasync = true\n");
-    refused(&async_task, "crew.tasks[1]", "only for process `sequential`");
+    assert_eq!(
+        strs(&manager["delegates"]),
+        ["researcher", "checker", "writer"]
+    );
+    let async_task = HIERARCHY.replace(
+        "description = 'Check the facts.'\n",
+        "description = 'Check the facts.'\nasync = true\n",
+    );
+    refused(
+        &async_task,
+        "crew.tasks[1]",
+        "only for process `sequential`",
+    );
 }
 
 #[test]
@@ -423,7 +480,10 @@ fn custom_manager_persona_replaces_builtin() {
     assert_eq!(manager["persona"].as_str(), Some("editor"));
     assert!(manager.get("model").is_none());
     refused(
-        &crew(&[&task("a", "")]).replace("process = 'sequential'", "process = 'sequential'\nmanager = 'editor'"),
+        &crew(&[&task("a", "")]).replace(
+            "process = 'sequential'",
+            "process = 'sequential'\nmanager = 'editor'",
+        ),
         "crew.manager",
         "only for process `hierarchical`",
     );
@@ -456,7 +516,11 @@ fn context_naming_a_later_task_is_refused() {
         "crew.tasks[1].id",
         "repeats",
     );
-    refused(&crew(&[&task("output", "")]), "crew.tasks[0].id", "must be 1 to 64");
+    refused(
+        &crew(&[&task("output", "")]),
+        "crew.tasks[0].id",
+        "must be 1 to 64",
+    );
 }
 
 const PIPELINE: &str = "name = 'pipeline'\n\

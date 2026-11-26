@@ -203,9 +203,10 @@ fn check_state(file: &str, state: Table) -> Result<Vec<(String, Value)>, Workflo
         }
         out.push((key, ty));
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     assert!(
         out.windows(2).all(|w| w[0].0 < w[1].0),
-        "keys come in key order"
+        "table keys are distinct, so sorted keys are strictly ordered"
     );
     Ok(out)
 }

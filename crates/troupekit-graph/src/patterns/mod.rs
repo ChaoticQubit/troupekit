@@ -155,6 +155,7 @@ impl FlowTable {
     }
 
     /// Adds `node`, whose `id` came from pattern field `field`.
+    /// Node ids are unique across the whole pattern flow.
     /// Returns an error naming the field for an id already taken.
     pub(crate) fn node(&mut self, field: &str, node: Table) -> Result<(), WorkflowError> {
         let id = node
@@ -185,7 +186,8 @@ impl FlowTable {
         self.edges.push(Value::Table(edge(from, to, Some(when))));
     }
 
-    /// Adds the end node every pattern flow finishes at.
+    /// Adds the end node every pattern flow finishes at, with id `end`
+    /// and no out-edges.
     /// Returns an error when a persona already maps to the id `end`.
     pub(crate) fn end(&mut self, field: &str) -> Result<(), WorkflowError> {
         let mut t = Table::new();
@@ -194,8 +196,9 @@ impl FlowTable {
         self.node(field, t)
     }
 
-    /// Finishes the flow table.
+    /// Finishes the flow table in the shape `Flow::parse` reads.
     /// Returns header, state, reducers when any, nodes and edges.
+    /// The end node must have been added.
     pub(crate) fn finish(self) -> Table {
         assert!(!self.nodes.is_empty(), "a pattern flow has nodes");
         assert!(self.ids.contains(END), "a pattern flow has its end node");

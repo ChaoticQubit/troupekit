@@ -124,6 +124,7 @@ fn check_task(
 
 /// The task index that closes the async span opened by task `i`: the
 /// first later task whose context names it, else the task count.
+/// Returns the index; a join goes in front of that task or of the end.
 fn closer(tasks: &[Task], i: usize) -> usize {
     assert!(tasks[i].run_async, "only async tasks open a span");
     let id = &tasks[i].id;
@@ -205,7 +206,9 @@ fn key_of(tasks: &[Task], i: usize) -> String {
     }
 }
 
-/// Edges waiting for the next node: each from-node with its label.
+/// Edges waiting for the next node: each from-node with its label, such
+/// as a task's exit and a `when` switch's `false` edge.
+/// `connect` points them all at one node.
 struct Wiring {
     pending: Vec<(String, Option<String>)>,
 }
