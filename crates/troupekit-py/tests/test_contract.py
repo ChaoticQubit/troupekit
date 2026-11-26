@@ -122,13 +122,14 @@ class EmbedderCounter(troupekit.HostEmbedder):
 class RecordingTool(troupekit.HostTool):
     """A host tool that records its calls and the threads they ran on.
 
-    Input: what `call` does: echo `text`, raise `error`, or return `output`.
-    Output: `calls` holds `(args, thread_id)` per call.
+    Input: the argument name, and what `call` does: echo it, raise
+    `error`, or return `output`. Output: `calls` holds `(args, thread_id)`.
     """
 
-    def __init__(self, name="echo", error=None, output=None):
+    def __init__(self, name="echo", error=None, output=None, argument="text"):
         super().__init__()
         self.tool_name = name
+        self.argument = argument
         self.error = error
         self.output = output
         self.calls = []
@@ -152,7 +153,8 @@ class RecordingTool(troupekit.HostTool):
 
         Input: none. Output: JSON object text.
         """
-        return json.dumps({"type": "object", "properties": {"text": {"type": "string"}}})
+        properties = {self.argument: {"type": "string"}}
+        return json.dumps({"type": "object", "properties": properties})
 
     def call(self, args_json):
         """Records the call, then echoes, raises or returns the set output.
@@ -165,7 +167,7 @@ class RecordingTool(troupekit.HostTool):
             raise self.error
         if self.output is not None:
             return self.output
-        return args.get("text", "")
+        return args.get(self.argument, "")
 
 
 class ChunkTransport(troupekit.HostTransport):
@@ -557,28 +559,30 @@ def test_toml_agent_runs(stub):
 def test_toml_over_cap_refused():
     """A persona TOML over 1 MiB is refused before it is parsed.
 
-    Input: the fixture padded past 1 MiB. Output: `Config` from the kit
-    (`MAX_PERSONA_BYTES`) or `InvalidArgument` from the caller string cap.
+    Input: the fixture padded past 1 MiB. Output: `InvalidArgument` naming
+    the `max_input_bytes` cap, or `Config` from the kit's `MAX_PERSONA_BYTES`.
     """
     text = FIXTURE.read_text(encoding="utf-8") + "\n" + "a" * (1024 * 1024)
     with pytest.raises(troupekit.TroupekitError) as excinfo:
         troupekit.AgentBuilder.from_toml(text).build()
     assert code_of(excinfo) in (CODES["Config"], CODES["InvalidArgument"])
-    assert "MiB" in excinfo.value.message
+    message = excinfo.value.message
+    assert "max_input_bytes" in message or "MiB" in message
 
 
 def test_graph_agent_then_step_runs():
     """A graph runs an agent node, then a host tool step after it.
 
-    Input: agent `writer` on a host model, step `stamp`, edge writer to
-    stamp. Output: passes when the step ran once and its output is in the
-    graph output.
+    Input: agent `writer` on a host model, step `stamp` whose argument is
+    named after `writer`, edge writer to stamp. Output: passes when the step
+    ran once on the writer's text and its output is in the graph output.
     """
     writer = host_agent(ScriptedModel(["draft"]))
-    stamp = RecordingTool(name="stamp", output="stamped")
+    stamp = RecordingTool(name="stamp", output="stamped", argument="writer")
     graph = troupekit.GraphBuilder("flow").agent("writer", writer).step("stamp", stamp)
     result = graph.edge("writer", "stamp").build().run_result("go")
     assert len(stamp.calls) == 1
+    assert stamp.calls[0][0] == {"writer": "draft"}
     assert "stamped" in result.output_json
 
 
@@ -614,7 +618,7 @@ def test_memory_facts_persist_between_runs(tmp_path):
     remember = tool_reply("remember_fact", {"key": "name", "value": "Ada Lovelace"})
     first = ScriptedModel([remember, answer_reply("noted")])
     assert host_agent(first).memory(config).build().run("My name is Ada Lovelace") == "noted"
-    second = ScriptedModel(["Hello Ada"])
+    second = ScriptedModel([answer_reply("Hello Ada")])
     assert host_agent(second).memory(config).build().run("Who am I?") == "Hello Ada"
     assert "Ada Lovelace" in second.requests[0]
 

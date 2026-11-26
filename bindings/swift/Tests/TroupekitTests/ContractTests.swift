@@ -69,17 +69,19 @@ enum ToolBehaviour {
 }
 
 /// A host tool that records its calls and the threads they ran on.
-/// Input: its name and behaviour. Output: `calls` holds the decoded
-/// arguments and whether the call ran on the main thread.
+/// Input: its name, argument name and behaviour. Output: `calls` holds
+/// the decoded arguments and whether the call ran on the main thread.
 final class RecordingTool: HostTool, @unchecked Sendable {
     private let lock = NSLock()
     private let toolName: String
     private let behaviour: ToolBehaviour
+    private let argument: String
     private var seen: [([String: String], Bool)] = []
 
-    init(name: String = "echo", behaviour: ToolBehaviour = .echo) {
+    init(name: String = "echo", behaviour: ToolBehaviour = .echo, argument: String = "text") {
         self.toolName = name
         self.behaviour = behaviour
+        self.argument = argument
     }
 
     var calls: [([String: String], Bool)] {
@@ -95,7 +97,7 @@ final class RecordingTool: HostTool, @unchecked Sendable {
     }
 
     func schemaJson() -> String {
-        #"{"type":"object","properties":{"text":{"type":"string"}}}"#
+        #"{"type":"object","properties":{"\#(argument)":{"type":"string"}}}"#
     }
 
     func call(argsJson: String) throws -> String {
@@ -103,7 +105,7 @@ final class RecordingTool: HostTool, @unchecked Sendable {
         let args = decoded as? [String: String] ?? [:]
         lock.withLock { seen.append((args, Thread.isMainThread)) }
         switch behaviour {
-        case .echo: return args["text"] ?? ""
+        case .echo: return args[argument] ?? ""
         case .hostError(let message): throw HostError.Failed(detail: message)
         case .crash: throw Boom()
         case .output(let text): return text
@@ -542,16 +544,17 @@ final class ContractTests: XCTestCase {
             _ = try await AgentBuilder.fromToml(text: text).build()
         }
         XCTAssertTrue([codes["Config"], codes["InvalidArgument"]].contains(code))
-        XCTAssertTrue(message.contains("MiB"))
+        XCTAssertTrue(message.contains("max_input_bytes") || message.contains("MiB"))
     }
 
     func test_graph_agent_then_step_runs() async throws {
         let writer = hostAgent(ScriptedModel(["draft"]))
-        let stamp = RecordingTool(name: "stamp", behaviour: .output("stamped"))
+        let stamp = RecordingTool(name: "stamp", behaviour: .output("stamped"), argument: "writer")
         let graph = GraphBuilder(name: "flow").agent(id: "writer", agent: writer)
             .step(id: "stamp", tool: stamp).edge(from: "writer", to: "stamp")
         let result = try await graph.build().runResult(input: "go")
         XCTAssertEqual(stamp.calls.count, 1)
+        XCTAssertEqual(stamp.calls.first?.0, ["writer": "draft"])
         XCTAssertTrue(result.outputJson.contains("stamped"))
     }
 
@@ -582,7 +585,7 @@ final class ContractTests: XCTestCase {
         let rememberer = try await hostAgent(first).memory(config: config).build()
         let noted = try await rememberer.run(input: "My name is Ada Lovelace")
         XCTAssertEqual(noted, "noted")
-        let second = ScriptedModel(["Hello Ada"])
+        let second = ScriptedModel([answerReply("Hello Ada")])
         let recaller = try await hostAgent(second).memory(config: config).build()
         let hello = try await recaller.run(input: "Who am I?")
         XCTAssertEqual(hello, "Hello Ada")

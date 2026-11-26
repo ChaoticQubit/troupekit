@@ -107,12 +107,13 @@ sealed class ToolBehaviour {
 
 /**
  * A host tool that records its calls and the thread each one ran on.
- * Input: its name and behaviour. Output: `calls` holds the raw argument
- * JSON and the calling thread of every call.
+ * Input: its name, behaviour and argument name. Output: `calls` holds the
+ * raw argument JSON and the calling thread of every call.
  */
 class RecordingTool(
     private val toolName: String = "echo",
     private val behaviour: ToolBehaviour = ToolBehaviour.Echo,
+    private val argument: String = "text",
 ) : HostTool {
     private val seen = Collections.synchronizedList(mutableListOf<Pair<String, Thread>>())
 
@@ -124,12 +125,12 @@ class RecordingTool(
     override fun description(): String = "Repeats the text it is given."
 
     override fun schemaJson(): String =
-        """{"type":"object","properties":{"text":{"type":"string"}}}"""
+        """{"type":"object","properties":{"$argument":{"type":"string"}}}"""
 
     override fun call(argsJson: String): String {
         seen.add(argsJson to Thread.currentThread())
         return when (behaviour) {
-            is ToolBehaviour.Echo -> stringField(argsJson, "text")
+            is ToolBehaviour.Echo -> stringField(argsJson, argument)
             is ToolBehaviour.Fails -> throw HostException.Failed(behaviour.detail)
             is ToolBehaviour.Crash -> throw IllegalStateException("tool crashed")
             is ToolBehaviour.Output -> behaviour.text
@@ -558,17 +559,18 @@ abstract class ContractCases {
         val text = shared("agent.toml") + "\n" + "a".repeat(1_048_576)
         val failure = expectFailure { AgentBuilder.fromToml(text).build() }
         assertTrue(failure.code in setOf(CODES["Config"], CODES["InvalidArgument"]))
-        assertTrue(failure.detail.contains("MiB"))
+        assertTrue(failure.detail.contains("max_input_bytes") || failure.detail.contains("MiB"))
     }
 
     @Test
     fun test_graph_agent_then_step_runs() = runBlocking<Unit> {
         val writer = hostAgent(ScriptedModel(listOf("draft")))
-        val stamp = RecordingTool("stamp", ToolBehaviour.Output("stamped"))
+        val stamp = RecordingTool("stamp", ToolBehaviour.Output("stamped"), argument = "writer")
         val graph = GraphBuilder("flow").agent("writer", writer).step("stamp", stamp)
             .edge("writer", "stamp")
         val result = graph.build().runResult("go")
         assertEquals(1, stamp.calls.size)
+        assertEquals("draft", stringField(stamp.calls[0].first, "writer"))
         assertTrue(result.outputJson.contains("stamped"))
     }
 
@@ -599,7 +601,7 @@ abstract class ContractCases {
         val first = ScriptedModel(listOf(remember, answerReply("noted")))
         val noted = hostAgent(first).memory(config).build().run("My name is Ada Lovelace")
         assertEquals("noted", noted)
-        val second = ScriptedModel(listOf("Hello Ada"))
+        val second = ScriptedModel(listOf(answerReply("Hello Ada")))
         assertEquals("Hello Ada", hostAgent(second).memory(config).build().run("Who am I?"))
         assertTrue(second.requests[0].contains("Ada Lovelace"))
     }
