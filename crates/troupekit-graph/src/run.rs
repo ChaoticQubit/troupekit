@@ -233,12 +233,14 @@ const SEQ_STRIDE: u64 = 1 << 32;
 const MAX_SEQ_RANGES: usize = 1 << 16;
 
 /// A seq range `restore` chose for the next attempt of `step`, written by
-/// `step_durable` at branch index `branch` before the step emits.
+/// `step_durable` at branch index `branch` before the step emits. `base`
+/// is the checkpoint's seq, used again when the store does not keep it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Reserve {
     step: u64,
     branch: u32,
     range: SeqRange,
+    base: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -796,9 +798,10 @@ impl GraphRun {
     }
 
     /// Restores run `run_id` from the latest checkpoint and the branch writes
-    /// of the step after it, which the next `step_durable` applies. Event
-    /// `seq` jumps to a fresh range past every earlier attempt's range, so
-    /// numbers have gaps but never repeat. Returns `Resume` with no checkpoint.
+    /// of the step after it, which the next `step_durable` applies. With a
+    /// store that keeps branch writes, event `seq` jumps past every earlier
+    /// attempt's range (gaps, never repeats); with one that keeps whole steps
+    /// only, or with plain `step`, numbering is 0.1's and a re-run step may repeat.
     pub async fn restore(store: &dyn CheckpointStore, run_id: RunId) -> Result<GraphRun, GraphError> {
         let cp = store
             .latest(run_id)
@@ -829,11 +832,13 @@ impl GraphRun {
             .checked_add(SEQ_STRIDE)
             .ok_or_else(|| GraphError::Checkpoint(format!("event seq {floor} of step {step} is exhausted")))?;
         let branch = u32::MAX - u32::try_from(ranges.len()).expect("bounded by MAX_SEQ_RANGES");
+        let base = run.seq;
         run.seq = from;
         run.reserve = Some(Reserve {
             step,
             branch,
             range: SeqRange { from },
+            base,
         });
         if !done.is_empty() {
             run.marks = Some(Marks { step, done });
@@ -857,14 +862,19 @@ impl GraphRun {
             GraphStatus::Running => unreachable!("a step never starts inside another"),
             GraphStatus::Queued | GraphStatus::Checkpointed => {}
         }
-        if let (Some(r), Some(store)) = (reserve, store) {
-            if r.step == self.steps + 1 {
+        match (reserve, store) {
+            (Some(r), Some(store)) if r.step == self.steps + 1 => {
                 assert_eq!(self.seq, r.range.from, "a reserved attempt emits from its range");
                 let value = serde_json::to_value(r.range).expect("a seq range serializes");
-                store
+                let kept = store
                     .save_branch(self.run_id, r.step, BranchWrite::new(r.branch, SEQ_NODE, value))
                     .await?;
+                if !kept {
+                    self.seq = r.base;
+                }
             }
+            (Some(r), None) if r.step == self.steps + 1 => self.seq = r.base,
+            _ => {}
         }
         self.steps += 1;
         self.status = GraphStatus::Running;

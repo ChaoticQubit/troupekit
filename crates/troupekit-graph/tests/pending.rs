@@ -341,11 +341,7 @@ async fn write_for_another_node_is_refused() {
     store.put(
         id,
         2,
-        BranchWrite::new(
-            1,
-            "zz",
-            json!({"kind": "tool", "output": "forged"}),
-        ),
+        BranchWrite::new(1, "zz", json!({"kind": "tool", "output": "forged"})),
     );
     let mut run = GraphRun::restore(&store, id).await.unwrap();
     gates.open("b");
@@ -561,6 +557,39 @@ async fn seq_reservation_that_cannot_be_kept_runs_nothing() {
     store.fail_writes.store(true, Ordering::SeqCst);
     gates.open("b");
     let err = run.step_durable(&io, &store).await.unwrap_err();
-    assert!(matches!(err, GraphError::Store(CoreError::Store(_))), "{err}");
-    assert_eq!(gates.calls("b").len(), 1, "no branch runs before the seq range is kept");
+    assert!(
+        matches!(err, GraphError::Store(CoreError::Store(_))),
+        "{err}"
+    );
+    assert_eq!(
+        gates.calls("b").len(),
+        1,
+        "no branch runs before the seq range is kept"
+    );
+}
+
+#[tokio::test]
+async fn whole_steps_store_keeps_the_0_1_seq_after_restore() {
+    let (store, gates) = (Store::whole_steps_only(), GatedTool::new());
+    for name in ["s", "a", "b"] {
+        gates.open(name);
+    }
+    let (io, sink) = io_events(&gates, model());
+    let mut run = started(FAN, &io, &store, &gates).await;
+    let id = run.run_id();
+    drop(run);
+    let before = sink.events().len();
+    let next = sink.events().iter().map(|e| e.seq).max().unwrap() + 1;
+    run = GraphRun::restore(&store, id).await.unwrap();
+    assert_eq!(
+        run.step_durable(&io, &store).await.unwrap(),
+        GraphOutcome::Continue
+    );
+    let after: Vec<u64> = sink.events()[before..].iter().map(|e| e.seq).collect();
+    assert_eq!(
+        after.first(),
+        Some(&next),
+        "an unkept reservation is not used: {after:?}"
+    );
+    assert_eq!(after, (next..next + after.len() as u64).collect::<Vec<_>>());
 }

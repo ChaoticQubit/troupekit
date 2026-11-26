@@ -130,7 +130,7 @@ async fn switch_without_matching_label_fails_naming_the_value() {
 
 fn goto_flow(extra: &str) -> String {
     format!(
-        "name = 'gt'\nstart = 'a'\n{extra}[state]\npick = '{{next: string, reason: string}}?'\nl = 'string?'\nr = 'string?'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\ngoto = ['l', 'r']\nwrites = 'pick'\n[[nodes]]\nid = 'l'\nkind = 'tool'\ntool = 'l'\nwrites = 'l'\n[[nodes]]\nid = 'r'\nkind = 'tool'\ntool = 'r'\nwrites = 'r'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'l'\nto = 'e'\n[[edges]]\nfrom = 'r'\nto = 'e'\n"
+        "name = 'gt'\nstart = 'a'\n{extra}[state]\npick = '{{next: string, reason: string}}?'\nl = 'string?'\nr = 'string?'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Pick.'\ngoto = ['l', 'r']\nwrites = 'pick'\n[[nodes]]\nid = 'l'\nkind = 'tool'\ntool = 'l'\nwrites = 'l'\n[[nodes]]\nid = 'r'\nkind = 'tool'\ntool = 'r'\nwrites = 'r'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'l'\nto = 'e'\n[[edges]]\nfrom = 'r'\nto = 'e'\n"
     )
 }
 
@@ -167,7 +167,7 @@ async fn goto_agent_output_is_forced_to_its_targets() {
 
 #[tokio::test]
 async fn goto_cycle_is_bounded_by_max_steps() {
-    let text = "name = 'loop'\nstart = 'a'\nmax_steps = 5\n[state]\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\ngoto = ['a', 'e']\n[[nodes]]\nid = 'e'\nkind = 'end'\n";
+    let text = "name = 'loop'\nstart = 'a'\nmax_steps = 5\n[state]\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Pick.'\ngoto = ['a', 'e']\n[[nodes]]\nid = 'e'\nkind = 'end'\n";
     let model = Arc::new(FnModel::new("fake/m", |_| {
         text_reply(r#"{"next": "a", "reason": "again"}"#, 10)
     }));
@@ -181,7 +181,7 @@ async fn goto_cycle_is_bounded_by_max_steps() {
 
 fn writer_flow(node_extra: &str) -> String {
     format!(
-        "name = 'ov'\nstart = 'a'\n[state]\nout = 'string?'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nwrites = 'out'\n{node_extra}[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n"
+        "name = 'ov'\nstart = 'a'\n[state]\nout = 'string?'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Write.'\nwrites = 'out'\n{node_extra}[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n"
     )
 }
 

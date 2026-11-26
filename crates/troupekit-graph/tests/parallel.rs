@@ -924,24 +924,72 @@ async fn deferred_node_runs_once() {
 }
 
 #[tokio::test]
-async fn deferred_agent_with_a_model_override_is_still_refused() {
+async fn deferred_agent_with_a_model_override_runs_last_on_its_model() {
+    use troupekit_agent::MemorySource;
+    use troupekit_graph::testing::{text_reply, FnModel};
+    use troupekit_providers::Price;
+    let price = Price {
+        input_usd_micros_per_mtok: 1_000_000,
+        output_usd_micros_per_mtok: 2_000_000,
+        verified: true,
+        long_context: None,
+        search_usd_micros: 0,
+    };
+    let gates = GatedTool::new();
+    open_all(&gates, &["s", "a"]);
+    let mut tools = ToolRegistry::new();
+    for name in ["s", "a"] {
+        let reply = format!("{name}!");
+        tools
+            .register(gates.tool(name, move |_| ToolOutput::text(reply.clone())))
+            .unwrap();
+    }
+    let base = Arc::new(FnModel::new("fake/m", |_| text_reply("base", 10)));
+    let other = Arc::new(FnModel::new("fake/other", |_| text_reply("other", 10)));
+    let agent = SimpleIo::new(tools)
+        .with_model("fake/m", base.clone(), price)
+        .with_model("fake/other", other.clone(), price);
+    let personas = PersonaLoader::new(vec![Arc::new(MemorySource::new(
+        "test",
+        [(
+            "writer.toml".to_string(),
+            "name = 'writer'\ndisplay_name = 'W'\nrole = 'Writes.'\ngoal = 'Done.'\ninstructions = 'Do it.'\nmodel = 'fake/m'\n".to_string(),
+        )],
+    ))]);
+    let io = SimpleGraphIo::new(Arc::new(agent), personas);
+    let text = graph(
+        &["s", "a", "w"],
+        &[
+            tool_node("s", ""),
+            tool_node("a", ""),
+            "[[nodes]]\nid = 'w'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Write.'\nwrites = 'w'\nmodel = 'fake/other'\ndefer = true\n".into(),
+            join_node("j", ""),
+            END_NODE.into(),
+        ],
+        &[("s", "a"), ("s", "w"), ("a", "j"), ("w", "j"), ("j", "e")],
+    );
+    let (state, _) = finish(&text, &io, &gates).await;
+    assert_eq!(state["w"], json!("other"));
+    assert_eq!(state["a"], json!("a!"));
+    assert_eq!((base.calls(), other.calls()), (0, 1));
+}
+
+#[tokio::test]
+async fn untracked_state_is_still_refused_at_start() {
     let gates = GatedTool::new();
     let io = chain_io(&gates, &["s"]);
     let text = graph(
-        &["s", "w"],
-        &[
-            tool_node("s", ""),
-            "[[nodes]]\nid = 'w'\nkind = 'agent'\npersona = 'writer'\nwrites = 'w'\nmodel = 'fake/other'\ndefer = true\n".into(),
-            END_NODE.into(),
-        ],
-        &[("s", "w"), ("w", "e")],
-    );
+        &["s", "tmp"],
+        &[tool_node("s", ""), END_NODE.into()],
+        &[("s", "e")],
+    )
+    .replace("name = 'g'\n", "name = 'g'\nuntracked = ['tmp']\n");
     let flow = Flow::parse("test/g.toml", &text).unwrap();
     let err = GraphRun::start(flow, Map::new(), Limits::default(), &io)
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, troupekit_graph::GraphError::Setup(m) if m.contains("node `w` of a 0.5 kind or option")),
+        matches!(&err, troupekit_graph::GraphError::Setup(m) if m.contains("untracked state")),
         "{err}"
     );
 }
