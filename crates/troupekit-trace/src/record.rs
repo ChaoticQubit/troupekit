@@ -207,3 +207,23 @@ fn scrub(inner: &Inner, text: &str) -> String {
     }
     clean
 }
+
+/// Returns the `truncated` record a file sink writes when it stops, using
+/// the trace id of the line it refused. Input: that line. Output: one line.
+/// A line without a readable trace id gives the id of all zeros.
+pub(crate) fn truncated_from(line: &str) -> String {
+    let trace_id = line
+        .split_once("\"trace\":\"")
+        .and_then(|(_, rest)| rest.get(..16))
+        .filter(|id| {
+            id.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        })
+        .and_then(|id| u64::from_str_radix(id, 16).ok())
+        .unwrap_or(0);
+    let mut out = String::with_capacity(80);
+    open_record(&mut out, "truncated", trace_id);
+    push_num(&mut out, "ts_us", now_us());
+    out.push('}');
+    out
+}

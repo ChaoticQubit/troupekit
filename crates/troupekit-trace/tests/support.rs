@@ -120,3 +120,19 @@ pub fn num(record: &Json, key: &str) -> u64 {
         .as_u64()
         .unwrap_or_else(|| panic!("{key} missing in {record}"))
 }
+
+/// Returns a fresh path under the system temp folder that does not exist yet.
+/// Input: a label for the test. Output: the path; the test removes it.
+/// Unique per process, label and call, so parallel tests never share one.
+pub fn scratch_dir(label: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir()
+        .join("troupekit-trace-tests")
+        .join(format!("{label}-{}-{n}", std::process::id()));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    dir
+}

@@ -19,7 +19,7 @@ mod value;
 pub use category::{Trace, TraceSet};
 pub use error::TraceError;
 pub use redact::url_for_trace;
-pub use sink::TraceSink;
+pub use sink::{default_trace_path, CallbackSink, JsonlOptions, JsonlSink, MemorySink, TraceSink};
 pub use span::Span;
 pub use spec::TraceSpec;
 pub use switch::{enabled, live_categories};
