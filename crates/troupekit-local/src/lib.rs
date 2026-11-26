@@ -6,6 +6,9 @@ mod error;
 mod model;
 pub mod sha256;
 
+#[cfg(feature = "llama")]
+pub mod llama;
+
 pub use error::LocalError;
 pub use model::{
     ChatMessage, ChatRole, Flow, GenParams, GenStop, Generation, Grammar, LocalInfo, LocalMetrics,
