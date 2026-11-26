@@ -202,6 +202,10 @@ jobs:
       - name: boundary
         if: ${{ !cancelled() && !startsWith(github.head_ref, 'release/') }}
         run: sh scripts/check-boundary.sh
+      - name: size report prints every row
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: test "$(sh scripts/size-report.sh --dry-run | grep -c '^build ')" = 6
       - name: test changed crates
         if: ${{ !cancelled() && !startsWith(github.head_ref, 'release/') }}
         shell: bash
