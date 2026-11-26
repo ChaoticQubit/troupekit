@@ -83,7 +83,6 @@ impl Agent {
         }
     }
 
-    #[cfg(feature = "knowledge")]
     pub(crate) fn toml_selector(&self) -> Option<String> {
         let (_, table) = self.toml_source().ok()??;
         table.get("model")?.as_str().map(str::to_string)

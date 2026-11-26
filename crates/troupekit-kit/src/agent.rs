@@ -14,6 +14,7 @@ use troupekit_agent::{
 };
 use troupekit_core::message::{Message, Role};
 use troupekit_core::secret::Secret;
+use troupekit_providers::catalog::VendorSpec;
 use troupekit_providers::{Catalog, Model, Price, Transport};
 use troupekit_tools::{Tool, ToolRegistry, Toolkit};
 
@@ -465,6 +466,19 @@ impl Agent {
             api_key_env: self.api_key_env.as_deref(),
             transport: self.transport.clone(),
         })
+    }
+
+    /// Returns the catalog vendor the model selector names, from the
+    /// builder's catalog or the built-in one, reading a TOML persona's
+    /// model when no `.model(..)` is set. Output: `None` for an alias or
+    /// a vendor the catalog does not list.
+    pub(crate) fn vendor_spec(&self) -> Option<VendorSpec> {
+        let selector = self.model.clone().or_else(|| self.toml_selector())?;
+        let (vendor, _) = selector.split_once('/')?;
+        let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
+        let spec = catalog.vendor(vendor)?.clone();
+        assert_eq!(spec.id, vendor);
+        Some(spec)
     }
 
     #[cfg(feature = "knowledge")]
