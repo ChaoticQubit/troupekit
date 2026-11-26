@@ -126,6 +126,10 @@ impl BuiltAgent {
     }
 
     fn durable(&self, what: &str) -> Result<Arc<dyn CheckpointStore>, KitError> {
+        if self.is_team() {
+            let m = format!("{what} is not built yet for a team agent");
+            return Err(KitError::config(&self.persona().name, m));
+        }
         let Some(store) = self.store() else {
             let m = format!("{what} needs Storage::sqlite(..) or Storage::custom(..) checkpoints");
             return Err(KitError::config(&self.persona().name, m));

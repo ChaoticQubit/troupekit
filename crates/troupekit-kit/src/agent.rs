@@ -364,9 +364,12 @@ impl Agent {
                 ),
             ));
         }
-        if !self.members.is_empty() {
+        if self.members.has_tools() {
             let flat = self.attach_members().await?;
             return Box::pin(flat.build()).await;
+        }
+        if self.members.is_team() {
+            return self.build_team().await;
         }
         #[cfg(feature = "knowledge")]
         let (this, preamble) = {
@@ -407,7 +410,7 @@ impl Agent {
 
     pub(crate) fn graph_conflict(&self) -> Option<&'static str> {
         if !self.members.is_empty() {
-            Some("agent tools or delegates; graphs do not take them yet")
+            Some("agent tools, delegates or members; graphs do not take them yet")
         } else if self.limits != Limits::default() {
             Some("limits; set them on the graph")
         } else if !self.law_paths.is_empty() || !self.inline_laws.is_empty() {

@@ -1,10 +1,22 @@
 use crate::agent::Agent;
-use crate::built::{describe, member_settings, BuiltAgent};
+use crate::built::{describe, member_settings, BuiltAgent, Input, RunOutcome};
 use crate::error::KitError;
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use toml::Value as Toml;
 use troupekit_agent::delegate::{AgentTool, DelegateSettings, DelegationTools};
-use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolSpec};
+use troupekit_agent::{AgentIo, EvalFn, MemorySource, PersonaLoader, SimpleIo};
+use troupekit_core::ids::RunId;
+use troupekit_core::inmem::InMemCheckpoints;
+use troupekit_core::message::{Message, Role};
+use troupekit_core::store::CheckpointStore;
+use troupekit_graph::flow::Flow;
+use troupekit_graph::patterns;
+use troupekit_graph::{GraphOutcome, GraphRun, SimpleGraphIo};
+use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSpec};
 
 const MEMBERS_MAX: usize = 64;
 const NEST_MAX: u32 = 16;
@@ -18,13 +30,57 @@ pub(crate) struct Members {
     delegates: Vec<Agent>,
     tool_names: Vec<String>,
     nest: u32,
+    team: Option<(TeamMode, Vec<Agent>)>,
+}
+
+/// How a leader works with its `members`: `Route` picks one member,
+/// `Coordinate` delegates to them, `Collaborate` briefs all and combines
+/// their answers, `Broadcast` briefs all and keeps every answer. `Tasks`
+/// is refused at build until the engine runs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TeamMode {
+    Route,
+    #[default]
+    Coordinate,
+    Collaborate,
+    Broadcast,
+    Tasks,
+}
+
+impl TeamMode {
+    /// Returns the mode as the team pattern names it.
+    /// One lowercase word per mode.
+    /// The inverse of the pattern's `mode` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TeamMode::Route => "route",
+            TeamMode::Coordinate => "coordinate",
+            TeamMode::Collaborate => "collaborate",
+            TeamMode::Broadcast => "broadcast",
+            TeamMode::Tasks => "tasks",
+        }
+    }
 }
 
 impl Members {
     /// Returns true when no member waits to be built.
     /// An agent without the 0.5 methods always returns true.
     pub(crate) fn is_empty(&self) -> bool {
-        self.agent_tools.is_empty() && self.delegates.is_empty()
+        !self.has_tools() && self.team.is_none()
+    }
+
+    /// Returns true when agent tools or delegates wait to be built.
+    /// They build before a team does, as tools of the leader.
+    /// False for an agent without them.
+    pub(crate) fn has_tools(&self) -> bool {
+        !self.agent_tools.is_empty() || !self.delegates.is_empty()
+    }
+
+    /// Returns true when the agent leads a team of `members`.
+    /// Such an agent builds into a flow run, not a single agent run.
+    /// False for every other agent.
+    pub(crate) fn is_team(&self) -> bool {
+        self.team.is_some()
     }
 
     /// Returns the names of the tools the members became at build.
@@ -53,6 +109,25 @@ impl Agent {
         self
     }
 
+    /// Makes this agent the leader of `members`, working in `mode`. The
+    /// agent and its members build into one flow from the team pattern and
+    /// run as a graph behind `run` and `run_with`. Members run under the
+    /// leader's limits, ledger and storage, so `build` refuses their own.
+    pub fn members(mut self, members: impl IntoIterator<Item = Agent>, mode: TeamMode) -> Self {
+        let mut list = self.members.team.take().map(|(_, l)| l).unwrap_or_default();
+        list.extend(members);
+        self.members.team = Some((mode, list));
+        self
+    }
+
+    /// Makes this agent the manager of `members`: it hands them work with
+    /// `delegate_work` and `ask_question` as an agent node of a flow, and
+    /// gives the final answer. Provisional: compiles to the team pattern's
+    /// `coordinate` mode until crews with tasks reach the kit.
+    pub fn manages(self, members: impl IntoIterator<Item = Agent>) -> Self {
+        self.members(members, TeamMode::Coordinate)
+    }
+
     /// Builds every member and registers the tools they become. Returns
     /// the leader with no members left and the tool names recorded.
     /// Fails with the first member build error or a members limit.
@@ -60,8 +135,8 @@ impl Agent {
         let members = std::mem::take(&mut self.members);
         let leader = self.name().to_string();
         assert!(
-            !members.is_empty(),
-            "attach runs only for an agent with members"
+            members.has_tools(),
+            "attach runs only for an agent with tool members"
         );
         if members.nest >= NEST_MAX {
             let m = format!("members nest deeper than {NEST_MAX} agents");
@@ -102,9 +177,10 @@ impl Agent {
         self.members = Members {
             tool_names: names,
             nest: members.nest,
+            team: members.team,
             ..Members::default()
         };
-        assert!(self.members.is_empty());
+        assert!(!self.members.has_tools());
         Ok(self)
     }
 }
@@ -112,6 +188,13 @@ impl Agent {
 async fn build_member(mut member: Agent, nest: u32, leader: &str) -> Result<BuiltAgent, KitError> {
     member.members.nest = nest + 1;
     let built = Box::pin(member.build()).await?;
+    if built.is_team() {
+        let m = format!(
+            "member `{}` leads a team, which cannot run as a tool yet",
+            built.persona().name
+        );
+        return Err(KitError::config(leader, m));
+    }
     if built.has_preamble() {
         let m = format!(
             "member `{}` has memory or knowledge, which member runs do not read yet",
@@ -129,6 +212,12 @@ impl Tool for BuiltAgent {
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+        if self.is_team() {
+            return Err(ToolError::Failed(format!(
+                "agent `{}` leads a team, which cannot run as a tool yet",
+                self.persona().name
+            )));
+        }
         if self.has_preamble() {
             return Err(ToolError::Failed(format!(
                 "agent `{}` has memory or knowledge, which a tool call does not read yet",
@@ -136,5 +225,415 @@ impl Tool for BuiltAgent {
             )));
         }
         self.agent_tool().call(args, ctx).await
+    }
+}
+
+const TEAM_MEMBERS_MAX: usize = 32;
+const RETRY_WAIT_MAX_MS: i64 = 30_000;
+
+/// A team agent's flow and the graph io its nodes run on: the leader's
+/// and members' personas, models, tools and evals, the leader's ledger and
+/// events. Built once at `build`, shared by every run.
+pub(crate) struct TeamFlow {
+    flow: Flow,
+    io: SimpleGraphIo,
+}
+
+impl Agent {
+    /// Builds a team agent: the leader alone, for its persona, limits and
+    /// storage, then the team flow over leader and members. Fails on the
+    /// first problem: mode, members, a member's own settings, or the flow.
+    pub(crate) async fn build_team(mut self) -> Result<BuiltAgent, KitError> {
+        let (mode, members) = self
+            .members
+            .team
+            .take()
+            .expect("build_team runs for a team");
+        let name = self.name().to_string();
+        if mode == TeamMode::Tasks {
+            return Err(KitError::config(&name, "team mode tasks is not built yet"));
+        }
+        if members.is_empty() || members.len() > TEAM_MEMBERS_MAX {
+            let m = format!(
+                "a team takes 1 to {TEAM_MEMBERS_MAX} members, got {}",
+                members.len()
+            );
+            return Err(KitError::config(&name, m));
+        }
+        for m in &members {
+            if let Some(what) = m.graph_conflict() {
+                let what = what.replace("the graph", "the leader");
+                return Err(KitError::config(
+                    &name,
+                    format!("member `{}` sets its own {what}", m.name()),
+                ));
+            }
+        }
+        let leader = Box::pin(self.clone().build()).await?;
+        if leader.has_preamble() {
+            let m = "a team leader with memory or knowledge is not built yet";
+            return Err(KitError::config(&name, m));
+        }
+        let mut all: Vec<&Agent> = vec![&self];
+        all.extend(members.iter());
+        let io = team_io(&name, &all, &leader)?;
+        let flow = patterns::load(&format!("agent:{name}"), &team_text(&name, mode, &members)?)?;
+        let probe = input_state("build check");
+        GraphRun::start(flow.clone(), probe, leader.limits().clone(), &io).await?;
+        assert!(!flow.workflow().nodes.is_empty());
+        Ok(leader.with_team(TeamFlow { flow, io }))
+    }
+}
+
+fn team_text(name: &str, mode: TeamMode, members: &[Agent]) -> Result<String, KitError> {
+    let mut team = toml::Table::new();
+    team.insert("mode".into(), Toml::String(mode.as_str().into()));
+    team.insert("leader".into(), Toml::String(name.into()));
+    let names = members
+        .iter()
+        .map(|m| Toml::String(m.name().to_string()))
+        .collect();
+    team.insert("members".into(), Toml::Array(names));
+    let mut table = toml::Table::new();
+    table.insert("name".into(), Toml::String(name.into()));
+    table.insert("team".into(), Toml::Table(team));
+    toml::to_string(&table)
+        .map_err(|e| KitError::config(name, format!("team does not serialize: {e}")))
+}
+
+fn team_io(name: &str, agents: &[&Agent], leader: &BuiltAgent) -> Result<SimpleGraphIo, KitError> {
+    let fail = |m: String| KitError::config(name, m);
+    let mut registry = ToolRegistry::new();
+    let mut agent_io = SimpleIo::new(ToolRegistry::new());
+    let mut files: HashMap<String, String> = HashMap::new();
+    let mut evals: HashMap<String, EvalFn> = HashMap::new();
+    for (i, agent) in agents.iter().enumerate() {
+        let key = format!("agent-{i}");
+        let prepared = agent.prepare(Some(&key))?;
+        let file = format!("{}.toml", prepared.persona.name);
+        if files.insert(file, prepared.persona_text).is_some() {
+            return Err(fail(format!(
+                "two team agents are named `{}`",
+                agent.name()
+            )));
+        }
+        for tool in &prepared.tools {
+            share(&mut registry, tool.clone()).map_err(fail)?;
+        }
+        agent_io.models.insert(key, prepared.handle);
+        for (eval, f) in prepared.eval_fns {
+            match evals.get(&eval) {
+                Some(first) if Arc::ptr_eq(first, &f) => {}
+                Some(_) => return Err(fail(format!("eval `{eval}` has two different callbacks"))),
+                None => {
+                    agent_io.evals.register(&eval, f.clone())?;
+                    evals.insert(eval, f);
+                }
+            }
+        }
+    }
+    assert_eq!(files.len(), agents.len(), "one persona file per team agent");
+    let own = leader.io();
+    agent_io.tools = registry;
+    agent_io.ledger = own.ledger.clone();
+    agent_io.events = own.events.clone();
+    let agent_io: Arc<dyn AgentIo> = Arc::new(agent_io);
+    let loader = PersonaLoader::new(vec![Arc::new(MemorySource::new("team", files))]);
+    Ok(SimpleGraphIo::new(agent_io, loader))
+}
+
+fn share(registry: &mut ToolRegistry, tool: Arc<dyn Tool>) -> Result<(), String> {
+    let name = tool.spec().name.clone();
+    match registry.get(&name) {
+        Some(existing) if Arc::ptr_eq(&existing, &tool) => Ok(()),
+        Some(_) => Err(format!(
+            "tool `{name}` is registered by two team agents; pass one shared tool"
+        )),
+        None => registry.register(tool).map_err(|e| e.to_string()),
+    }
+}
+
+fn input_state(text: &str) -> Map<String, Value> {
+    let mut state = Map::new();
+    state.insert("input".into(), Value::String(text.to_string()));
+    state
+}
+
+impl TeamFlow {
+    /// Starts a team run on `input`, one user text, and runs it to its end.
+    /// Returns the outcome with the `output` key as the answer; fails like
+    /// `BuiltAgent::run_with`, or for an input that is not one text.
+    pub(crate) async fn run(
+        &self,
+        agent: &BuiltAgent,
+        input: Input,
+    ) -> Result<RunOutcome, KitError> {
+        let name = &agent.persona().name;
+        let messages = input.into_messages();
+        let text = match messages.as_slice() {
+            [m] if m.role == Role::User && !m.text_content().is_empty() => m.text_content(),
+            _ => return Err(KitError::config(name, "a team agent runs on one user text")),
+        };
+        let state = input_state(&text);
+        let limits = agent.limits().clone();
+        let mut run = GraphRun::start(self.flow.clone(), state, limits, &self.io).await?;
+        let store: Arc<dyn CheckpointStore> = match agent.store() {
+            Some(store) => store.clone(),
+            None => Arc::new(InMemCheckpoints::default()),
+        };
+        self.finish(&mut run, store.as_ref(), &text).await
+    }
+
+    /// Continues team run `run_id` from its latest checkpoint in `store`
+    /// and returns the answer. Fails when the checkpoint is not a run of
+    /// this team's flow.
+    pub(crate) async fn resume(
+        &self,
+        agent: &BuiltAgent,
+        store: &dyn CheckpointStore,
+        run_id: RunId,
+    ) -> Result<String, KitError> {
+        let mut run = GraphRun::restore(store, run_id).await?;
+        if run.flow() != self.flow {
+            let m =
+                format!("run {run_id} was not started by this team; resume it with its own agent");
+            return Err(KitError::config(&agent.persona().name, m));
+        }
+        let input = run
+            .state()
+            .get("input")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let input = input.to_string();
+        Ok(self
+            .finish(&mut run, store, &input)
+            .await?
+            .text()
+            .to_string())
+    }
+
+    async fn finish(
+        &self,
+        run: &mut GraphRun,
+        store: &dyn CheckpointStore,
+        input: &str,
+    ) -> Result<RunOutcome, KitError> {
+        if store.latest(run.run_id()).await?.is_none() {
+            store.save(run.checkpoint()).await?;
+        }
+        let workflow = self.flow.workflow();
+        let cap = 2 * u64::from(workflow.max_steps) + u64::from(workflow.max_retries) + 8;
+        for _ in 0..cap {
+            let before = run.steps();
+            let outcome = run.step(&self.io).await;
+            if run.steps() != before {
+                store.save(run.checkpoint()).await?;
+            }
+            match outcome {
+                GraphOutcome::Continue => {}
+                GraphOutcome::RetryAt { at_ms, .. } => {
+                    let wait = at_ms.saturating_sub(self.io.agent.clock().now_ms());
+                    let wait = u64::try_from(wait.clamp(0, RETRY_WAIT_MAX_MS)).expect("clamped");
+                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                }
+                GraphOutcome::Waiting(reason) => {
+                    return Err(KitError::Paused {
+                        run_id: run.run_id(),
+                        reason,
+                    })
+                }
+                GraphOutcome::Failed(reason) => {
+                    return Err(KitError::Failed {
+                        run_id: run.run_id(),
+                        reason,
+                    })
+                }
+                GraphOutcome::Done(state) => return Ok(team_outcome(run, state, input)),
+            }
+        }
+        Err(KitError::Failed {
+            run_id: run.run_id(),
+            reason: format!("did not finish within {cap} steps"),
+        })
+    }
+}
+
+fn team_outcome(run: &GraphRun, mut state: Map<String, Value>, input: &str) -> RunOutcome {
+    let output = state.remove("output").unwrap_or(Value::Null);
+    assert!(!state.contains_key("output"));
+    let text = match &output {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let messages = vec![
+        Message::text(Role::User, input),
+        Message::text(Role::Assistant, text.clone()),
+    ];
+    RunOutcome::team(text, output, run.usage(), run.run_id(), messages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Agent, Storage};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use troupekit_agent::Limits;
+    use troupekit_core::event::Usage;
+    use troupekit_core::message::ContentPart;
+    use troupekit_graph::testing::{text_reply, FnModel};
+    use troupekit_providers::{CompletionResponse, Model, StopReason};
+
+    fn echo(count: Arc<AtomicUsize>) -> Arc<dyn Model> {
+        Arc::new(FnModel::new("fake/m", move |req| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let asked = req
+                .messages
+                .last()
+                .map(|m| m.text_content())
+                .unwrap_or_default();
+            text_reply(&format!("Hello! You said: {asked}"), 10)
+        }))
+    }
+
+    fn agent(name: &str, model: Arc<dyn Model>) -> Agent {
+        Agent::new(name)
+            .instructions("Do the work.")
+            .model("fake/m")
+            .model_client(model)
+    }
+
+    fn delegate_then_answer() -> Arc<dyn Model> {
+        Arc::new(FnModel::new("fake/m", |req| {
+            let result = req
+                .messages
+                .iter()
+                .flat_map(|m| &m.parts)
+                .find_map(|p| match p {
+                    ContentPart::ToolResult { content, .. } => Some(content.clone()),
+                    _ => None,
+                });
+            match result {
+                Some(content) => text_reply(&format!("Manager got: {content}"), 10),
+                None => Ok(CompletionResponse {
+                    message: Message::new(
+                        Role::Assistant,
+                        vec![ContentPart::ToolCall {
+                            id: "c1".into(),
+                            name: "delegate_work".into(),
+                            arguments: json!({"coworker": "tech", "task": "check the cable"}),
+                        }],
+                    )
+                    .unwrap(),
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cost_usd_micros: 0,
+                    },
+                    stop: StopReason::ToolUse,
+                }),
+            }
+        }))
+    }
+
+    fn config(err: KitError) -> String {
+        match err {
+            KitError::Config { message, .. } => message,
+            other => panic!("expected a config error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn members_route_in_one_line() {
+        let (billing, tech) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let router = Arc::new(FnModel::new("fake/m", |_req| {
+            text_reply("{\"next\":\"tech\"}", 10)
+        }));
+        let built = agent("desk", router)
+            .members(
+                [
+                    agent("billing", echo(billing.clone())),
+                    agent("tech", echo(tech.clone())),
+                ],
+                TeamMode::Route,
+            )
+            .build()
+            .await
+            .unwrap();
+        assert!(built.is_team());
+        let out = built.run_with("My laptop broke").await.unwrap();
+        assert!(
+            out.text().starts_with("Hello! You said: "),
+            "{}",
+            out.text()
+        );
+        assert!(out.text().contains("My laptop broke"), "{}", out.text());
+        assert_eq!(tech.load(Ordering::SeqCst), 1);
+        assert_eq!(billing.load(Ordering::SeqCst), 0);
+        assert_eq!(out.model_calls(), 0);
+        assert_eq!(out.messages().len(), 2);
+        assert!(out.member_runs().is_empty());
+        let plain = agent("desk", echo(Arc::new(AtomicUsize::new(0))))
+            .build()
+            .await
+            .unwrap();
+        assert!(!plain.is_team());
+    }
+
+    #[tokio::test]
+    async fn manages_runs_hierarchical_crew() {
+        let tech = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(InMemCheckpoints::with_history());
+        let built = agent("manager", delegate_then_answer())
+            .checkpoints(Storage::custom(store.clone()))
+            .manages([agent("tech", echo(tech.clone()))])
+            .build()
+            .await
+            .unwrap();
+        let out = built.run_with("Fix my network").await.unwrap();
+        assert!(out.text().starts_with("Manager got: "), "{}", out.text());
+        assert!(
+            out.text().contains("Hello! You said: check the cable"),
+            "{}",
+            out.text()
+        );
+        assert_eq!(tech.load(Ordering::SeqCst), 1);
+        assert_eq!(built.resume(out.run_id()).await.unwrap(), out.text());
+        let history = built.history(out.run_id()).await.unwrap_err();
+        assert!(config(history).contains("team agent"));
+        let two = vec![
+            Message::text(Role::User, "a"),
+            Message::text(Role::User, "b"),
+        ];
+        let err = built.run_with(two).await.unwrap_err();
+        assert!(config(err).contains("one user text"));
+    }
+
+    #[tokio::test]
+    async fn team_build_refusals() {
+        let echo0 = || echo(Arc::new(AtomicUsize::new(0)));
+        let tasks = agent("lead", echo0()).members([agent("a", echo0())], TeamMode::Tasks);
+        assert!(config(tasks.build().await.unwrap_err()).contains("tasks is not built yet"));
+        let none = agent("lead", echo0()).members(Vec::<Agent>::new(), TeamMode::Route);
+        assert!(config(none.build().await.unwrap_err()).contains("1 to 32 members"));
+        let limited = agent("a", echo0()).limits(Limits {
+            run: Some(5),
+            ..Limits::default()
+        });
+        let own = agent("lead", echo0()).members([limited], TeamMode::Broadcast);
+        let message = config(own.build().await.unwrap_err());
+        assert!(
+            message.contains("member `a` sets its own limits"),
+            "{message}"
+        );
+        assert!(message.contains("on the leader"), "{message}");
+        let team = agent("inner", echo0()).members([agent("a", echo0())], TeamMode::Route);
+        let outer = agent("lead", echo0()).agent_tool(team.clone());
+        let message = config(outer.build().await.unwrap_err());
+        assert!(message.contains("leads a team"), "{message}");
+        let built = team.build().await.unwrap();
+        let ctx = ToolContext::for_call(RunId::new(), 1, 0);
+        let refused = built.call(json!({"task": "x"}), &ctx).await.unwrap_err();
+        assert!(refused.to_string().contains("leads a team"), "{refused}");
     }
 }

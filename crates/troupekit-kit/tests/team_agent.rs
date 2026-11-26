@@ -155,7 +155,7 @@ async fn graph_refuses_agent_with_members() {
         .await
         .unwrap_err();
     let message = format!("{err}");
-    assert!(message.contains("agent tools or delegates"), "{message}");
+    assert!(message.contains("agent tools, delegates or members"), "{message}");
 }
 
 #[tokio::test]

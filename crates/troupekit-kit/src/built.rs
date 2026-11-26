@@ -99,7 +99,8 @@ impl RunOutcome {
 
     /// Returns how many model calls the run made.
     /// Retried calls count once per attempt that reached the model.
-    /// At least one for a finished run.
+    /// At least one for a finished single-agent run; 0 for a team run,
+    /// whose calls happen inside its flow nodes.
     pub fn model_calls(&self) -> u32 {
         self.model_calls
     }
@@ -139,6 +140,7 @@ struct Inner {
     io: Arc<SimpleIo>,
     tool: Arc<AgentTool>,
     member_tools: Vec<String>,
+    team: Option<crate::team_agent::TeamFlow>,
     limits: Limits,
     store: Option<Arc<dyn CheckpointStore>>,
     retries: u32,
@@ -173,6 +175,7 @@ impl BuiltAgent {
                 io,
                 tool: Arc::new(tool),
                 member_tools: Vec::new(),
+                team: None,
                 limits,
                 store,
                 retries,
@@ -218,6 +221,9 @@ impl BuiltAgent {
     /// The run id in the outcome works with `resume`.
     pub async fn run_with(&self, input: impl Into<Input>) -> Result<RunOutcome, KitError> {
         let inner = &self.inner;
+        if let Some(team) = &inner.team {
+            return team.run(self, input.into()).await;
+        }
         let messages = self.messages(input.into()).await?;
         let mut run = AgentRun::new(
             &inner.persona,
@@ -250,6 +256,9 @@ impl BuiltAgent {
                 format!("no checkpoint for run {run_id}"),
             ));
         };
+        if let Some(team) = &self.inner.team {
+            return team.resume(self, store.as_ref(), run_id).await;
+        }
         let mut run = AgentRun::from_checkpoint(&checkpoint)?;
         Ok(self.finish(&mut run, store.as_ref()).await?.text)
     }
@@ -282,6 +291,17 @@ impl BuiltAgent {
 
     pub(crate) fn limits(&self) -> &Limits {
         &self.inner.limits
+    }
+
+    pub(crate) fn with_team(mut self, team: crate::team_agent::TeamFlow) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("a fresh BuiltAgent is not shared");
+        assert!(inner.team.is_none(), "a team is set once");
+        inner.team = Some(team);
+        self
+    }
+
+    pub(crate) fn is_team(&self) -> bool {
+        self.inner.team.is_some()
     }
 
     pub(crate) fn with_member_tools(mut self, names: Vec<String>) -> Self {
@@ -374,6 +394,31 @@ impl fmt::Debug for BuiltAgent {
             .field("durable", &inner.store.is_some())
             .field("laws", &inner.laws)
             .finish_non_exhaustive()
+    }
+}
+
+impl RunOutcome {
+    pub(crate) fn team(
+        text: String,
+        output: Value,
+        usage: Usage,
+        run_id: RunId,
+        messages: Vec<Message>,
+    ) -> RunOutcome {
+        assert_eq!(
+            messages.len(),
+            2,
+            "a team outcome holds the input and the answer"
+        );
+        RunOutcome {
+            text,
+            output,
+            usage,
+            model_calls: 0,
+            run_id,
+            messages,
+            member_runs: Vec::new(),
+        }
     }
 }
 
