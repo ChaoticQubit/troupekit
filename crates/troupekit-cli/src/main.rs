@@ -56,7 +56,7 @@ fn main() -> ExitCode {
 /// count in a fixed order so scripts and tests can match it.
 fn summary(call: &IngestArgs, r: &IngestReport) -> String {
     format!(
-        "ingested {} into {} index {}: {} added, {} replaced, {} unchanged, {} failed, {} chunks, {} unsupported, {} symlinks skipped",
+        "ingested {} into {} index {}: {} added, {} replaced, {} unchanged, {} failed, {} chunks, {} unsupported, {} symlinks skipped, {} removed",
         call.dir.display(),
         call.db.display(),
         call.index,
@@ -66,7 +66,8 @@ fn summary(call: &IngestArgs, r: &IngestReport) -> String {
         r.failed.len(),
         r.chunks,
         r.unsupported,
-        r.symlinks
+        r.symlinks,
+        r.removed
     )
 }
 
@@ -109,7 +110,10 @@ async fn run(call: &IngestArgs) -> Result<IngestReport, String> {
         Quant::F16 => Quantization::F16,
         Quant::I8 => Quantization::I8,
     };
-    let mut ingest = IngestSettings::default().with_scope(call.scope.clone());
+    let mut ingest = IngestSettings::default().with_scope(call.scope.clone()).with_allow_remove_all(call.allow_remove_all);
+    if let Some(percent) = call.max_remove_share {
+        ingest = ingest.with_max_remove_share(percent);
+    }
     if call.chunk_tokens.is_some() || call.overlap_tokens.is_some() {
         let base = ingest.chunk();
         let chunk = ChunkConfig { max_tokens: call.chunk_tokens.unwrap_or(base.max_tokens), overlap_tokens: call.overlap_tokens.unwrap_or(base.overlap_tokens) };

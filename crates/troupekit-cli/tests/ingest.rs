@@ -165,3 +165,29 @@ fn hnsw_i8_run_then_reopen_skips_unchanged() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(text(&out.stdout).contains(&format!("{n} unchanged, 0 failed")), "{}", text(&out.stdout));
 }
+
+#[test]
+fn removal_overrides_reach_the_ingest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, n) = corpus_copy(tmp.path());
+    let db = tmp.path().join("kb.db");
+    assert_eq!(ingest(&dir, &db).status.code(), Some(0));
+    let mut names: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    names.sort();
+    for path in &names[1..] {
+        std::fs::remove_file(path).unwrap();
+    }
+    let refused = ingest(&dir, &db);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stdout));
+    assert!(text(&refused.stderr).contains("max_remove_share"), "{}", text(&refused.stderr));
+    let (d, b) = (dir.to_str().unwrap(), db.to_str().unwrap());
+    let share = troupekit(&["ingest", d, "--db", b, "--embedder", "hashing:256", "--max-remove-share", "100"]);
+    assert_eq!(share.status.code(), Some(0), "{}", text(&share.stderr));
+    assert!(text(&share.stdout).contains(&format!("{} removed", n - 1)), "{}", text(&share.stdout));
+    std::fs::remove_file(&names[0]).unwrap();
+    let refused = ingest(&dir, &db);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stdout));
+    let all = troupekit(&["ingest", d, "--db", b, "--embedder", "hashing:256", "--allow-remove-all"]);
+    assert_eq!(all.status.code(), Some(0), "{}", text(&all.stderr));
+    assert!(text(&all.stdout).contains("1 removed"), "{}", text(&all.stdout));
+}
