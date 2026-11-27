@@ -168,6 +168,11 @@ fn url_for_trace_drops_query_and_userinfo() {
         ("https://a@b@example.com/p", "https://example.com/p"),
         ("/relative/path?token=1", "/relative/path"),
         ("user@host/path?q", "host/path"),
+        ("https:///alice:pw@example.com/v1", "https://example.com/v1"),
+        ("https:////alice:pw@example.com", "https://example.com"),
+        ("https:/alice:pw@example.com/v1", "https://example.com/v1"),
+        ("https:\\\\alice:pw@example.com\\v1", "https://example.com\\v1"),
+        ("HTTPS://alice@example.com/p", "HTTPS://example.com/p"),
         ("", ""),
     ];
     for (input, expected) in cases {

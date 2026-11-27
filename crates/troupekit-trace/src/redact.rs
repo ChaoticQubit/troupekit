@@ -130,24 +130,43 @@ pub(crate) fn value(name: &str, value: Value, policy: &Policy<'_>) -> (Clean, bo
 }
 
 /// Returns `url` with only scheme, host, port and path: user info, query
-/// and fragment are dropped. Use it for every URL written to a trace.
-/// Input: any URL text. Output: the reduced URL.
+/// and fragment are dropped. Like URL parsers, any run of `/` or `\\`
+/// after `scheme:` leads to the authority, which ends at `/` or `\\`.
+/// Use it for every URL written to a trace. Output: the reduced URL.
 pub fn url_for_trace(url: &str) -> String {
     let end = url.find(['?', '#']).unwrap_or(url.len());
     let url = &url[..end];
-    let (scheme, rest) = match url.find("://") {
-        Some(at) => url.split_at(at + 3),
+    let (scheme, rest) = match split_scheme(url) {
+        Some((scheme, rest)) => (scheme, rest.trim_start_matches(['/', '\\'])),
         None => ("", url),
     };
-    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '\\']).unwrap_or(rest.len());
     let (authority, path) = rest.split_at(authority_end);
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
-    let out = format!("{scheme}{host}{path}");
-    assert!(out.len() <= url.len());
+    let out = match scheme {
+        "" => format!("{host}{path}"),
+        scheme => format!("{scheme}//{host}{path}"),
+    };
+    assert!(!host.contains('@'));
     assert!(!out.contains(['?', '#']));
     out
+}
+
+/// Splits `url` into `scheme:` and the rest when it starts with a scheme
+/// (a letter, then letters, digits, `+`, `-` or `.`) followed by `:` and
+/// a `/` or `\\`. Output: the two parts, or `None` for any other text.
+fn split_scheme(url: &str) -> Option<(&str, &str)> {
+    let colon = url.find(':')?;
+    let name = &url[..colon];
+    let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    let rest = &url[colon + 1..];
+    let slashed = rest.starts_with(['/', '\\']);
+    (valid && slashed).then(|| url.split_at(colon + 1))
 }
 
 #[cfg(test)]
