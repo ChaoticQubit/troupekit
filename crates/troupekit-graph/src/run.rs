@@ -333,6 +333,7 @@ impl FlowDone {
 #[derive(Debug, Clone, PartialEq)]
 struct Marks {
     step: u64,
+    origins: Vec<u64>,
     done: BTreeMap<usize, (String, Finished)>,
 }
 
@@ -368,6 +369,8 @@ pub struct GraphRun {
     split: Option<BudgetSplit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<(RunId, u64)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    recovered: Vec<u64>,
     #[serde(skip)]
     marks: Option<Marks>,
     #[serde(skip)]
@@ -467,6 +470,7 @@ impl GraphRun {
             scratch: Map::new(),
             split: None,
             parent: None,
+            recovered: Vec::new(),
         })
     }
 
@@ -598,11 +602,8 @@ impl GraphRun {
     /// Continues a stopped or retryably failed run where it stopped, with
     /// active time back at zero and `time_limit_ms` as its new limit, and
     /// queues it. A failed tool call re-runs with its first idempotency key.
-    /// Returns `Resume` when it is not `retryable` or has recovered results pending.
+    /// Returns `Resume` when the run is not `retryable`.
     pub fn retry(&mut self, time_limit_ms: Option<u64>) -> Result<(), GraphError> {
-        if self.stopped.is_none() {
-            self.no_pending_marks()?;
-        }
         if !self.retryable() {
             return Err(GraphError::Resume(
                 "only a stopped run or one failed on a transient error can be retried".into(),
@@ -749,6 +750,7 @@ impl GraphRun {
         self.steps = 0;
         self.seq = 0;
         self.parent = None;
+        self.recovered.clear();
         self.marks = None;
         self.reserve = None;
         for (i, b) in self.branches.iter_mut().enumerate() {
@@ -807,8 +809,8 @@ impl GraphRun {
     }
 
     /// Writes `value` to `key` between steps as node `as_node` would (its
-    /// reducer applies): steps + 1, status queued. Refuses a finished run or
-    /// one with recovered results pending, a bad key or node, and a key an
+    /// reducer applies): steps + 1, status queued; recovered branch results
+    /// stay pending. Refuses a finished run, a bad key or node, and a key an
     /// answered approval saw or depends on. Returns `Resume` on a refusal.
     pub fn update_state(
         &mut self,
@@ -817,7 +819,6 @@ impl GraphRun {
         as_node: Option<&str>,
     ) -> Result<(), GraphError> {
         let bad = |m: String| Err(GraphError::Resume(m));
-        self.no_pending_marks()?;
         assert_ne!(self.status, GraphStatus::Running, "state is edited between steps");
         if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
             return bad("the run is finished".into());
@@ -977,10 +978,8 @@ impl GraphRun {
 
     /// Answers human node `node` with `answer`, checked against the node's
     /// `writes` type, and queues the run; the branch moves on at the next
-    /// step. Returns `Resume` when no branch waits there, it does not fit,
-    /// or recovered results of the next step are pending.
+    /// step. Returns `Resume` when no branch waits there or it does not fit.
     pub fn resume(&mut self, node: &str, answer: Value) -> Result<(), GraphError> {
-        self.no_pending_marks()?;
         let bad = |m: String| GraphError::Resume(m);
         if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
             return Err(bad("the run is finished".into()));
@@ -1010,10 +1009,8 @@ impl GraphRun {
 
     /// Replaces the graph limits with `limits` and resumes every branch
     /// paused on its budget with the new remaining run budget, then queues
-    /// the run. Returns `Resume` when the run is finished or recovered
-    /// results of the next step are pending.
+    /// the run. Returns `Resume` when the run is finished.
     pub fn raise_budget(&mut self, limits: Limits) -> Result<(), GraphError> {
-        self.no_pending_marks()?;
         if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
             return Err(GraphError::Resume("the run is finished".into()));
         }
@@ -1170,10 +1167,10 @@ impl GraphRun {
     }
 
     /// Restores run `run_id` from the latest checkpoint and the branch writes
-    /// of the step after it, which the next `step_durable` applies. With a
-    /// store that keeps branch writes, event `seq` jumps past every earlier
-    /// attempt's range (gaps, never repeats); with one that keeps whole steps
-    /// only, or with plain `step`, numbering is 0.1's and a re-run step may repeat.
+    /// of the step after it and of the earlier steps it still carries, which
+    /// the next `step_durable` applies. Event `seq` jumps past every earlier
+    /// attempt's range; with a store that keeps whole steps only, or with
+    /// plain `step`, numbering is 0.1's and a re-run step may repeat.
     pub async fn restore(store: &dyn CheckpointStore, run_id: RunId) -> Result<GraphRun, GraphError> {
         let cp = store
             .latest(run_id)
@@ -1181,20 +1178,33 @@ impl GraphRun {
             .ok_or_else(|| GraphError::Resume(format!("run {run_id} has no checkpoint")))?;
         let mut run = GraphRun::from_checkpoint(&cp)?;
         let step = cp.step + 1;
+        let mut sources = std::mem::take(&mut run.recovered);
+        if sources.len() >= MAX_SEQ_RANGES || sources.windows(2).any(|w| w[0] >= w[1]) || sources.last().is_some_and(|s| *s >= step) {
+            return Err(GraphError::Checkpoint(format!("recovered steps {sources:?} do not precede step {step}")));
+        }
+        sources.push(step);
         let mut done = BTreeMap::new();
+        let mut origins = Vec::new();
         let mut ranges: Vec<u64> = Vec::new();
-        for w in store.branch_writes(run_id, step).await? {
-            let bad = |m: String| GraphError::Checkpoint(format!("branch write {} of step {step}: {m}", w.branch()));
-            let index = usize::try_from(w.branch()).map_err(|e| bad(e.to_string()))?;
-            if w.node() == SEQ_NODE {
-                let range: SeqRange = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
-                ranges.push(range.from);
-                continue;
+        for source in sources {
+            let mut kept = BTreeMap::new();
+            for w in store.branch_writes(run_id, source).await? {
+                let bad = |m: String| GraphError::Checkpoint(format!("branch write {} of step {source}: {m}", w.branch()));
+                let index = usize::try_from(w.branch()).map_err(|e| bad(e.to_string()))?;
+                if w.node() == SEQ_NODE {
+                    let range: SeqRange = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
+                    ranges.push(range.from);
+                    continue;
+                }
+                let finished: Finished = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
+                if kept.insert(index, (w.node().to_string(), finished)).is_some() {
+                    return Err(bad("the branch has two writes".into()));
+                }
             }
-            let finished: Finished = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
-            if done.insert(index, (w.node().to_string(), finished)).is_some() {
-                return Err(bad("the branch has two writes".into()));
+            if !kept.is_empty() {
+                origins.push(source);
             }
+            done.extend(kept);
         }
         if ranges.len() >= MAX_SEQ_RANGES {
             return Err(GraphError::Checkpoint(format!("step {step} was restored {} times", ranges.len())));
@@ -1213,7 +1223,7 @@ impl GraphRun {
             base,
         });
         if !done.is_empty() {
-            run.marks = Some(Marks { step, done });
+            run.marks = Some(Marks { step, origins, done });
         }
         Ok(run)
     }
@@ -1234,6 +1244,7 @@ impl GraphRun {
         }
         let marks = self.marks.take();
         let reserve = self.reserve.take();
+        self.recovered.clear();
         match (reserve, store) {
             (Some(r), Some(store)) if r.step == self.steps + 1 => {
                 assert_eq!(self.seq, r.range.from, "a reserved attempt emits from its range");
@@ -1304,19 +1315,11 @@ impl GraphRun {
         Ok(outcome)
     }
 
-    fn no_pending_marks(&self) -> Result<(), GraphError> {
-        if self.marks.as_ref().is_some_and(|m| m.step == self.steps + 1 && !m.done.is_empty()) {
-            return Err(GraphError::Resume(
-                "recovered branch results of the next step are pending; step the run once first".into(),
-            ));
-        }
-        Ok(())
-    }
-
     fn carry_recovered(&mut self) {
         let next = self.steps + 1;
         if let Some(m) = self.marks.as_mut().filter(|m| m.step == next) {
             m.step += 1;
+            self.recovered.clone_from(&m.origins);
         }
         if let Some(r) = self.reserve.as_mut().filter(|r| r.step == next) {
             r.step += 1;

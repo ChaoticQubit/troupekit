@@ -451,26 +451,6 @@ async fn second_write_for_the_same_branch_conflicts() {
 }
 
 #[tokio::test]
-async fn kept_writes_survive_a_saved_stop_and_retry() {
-    let (store, gates) = (Store::default(), GatedTool::new());
-    let io = io(&gates, model());
-    let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
-    let mut run = GraphRun::restore(&store, id).await.unwrap();
-    run.stop(Stop::Cancelled).unwrap();
-    store.save(run.checkpoint()).await.unwrap();
-    run.retry(None).unwrap();
-    store.save(run.checkpoint()).await.unwrap();
-    gates.open("b");
-    let state = done(drive(&mut run, &io, &store).await);
-    assert_eq!(
-        gates.calls("a").len(),
-        1,
-        "the kept write of step 2 carries over the stop and applies at step 4"
-    );
-    assert_eq!(state["x"], json!("a1"));
-}
-
-#[tokio::test]
 async fn plain_step_drops_kept_writes() {
     let (store, gates) = (Store::default(), GatedTool::new());
     let io = io(&gates, model());
@@ -721,43 +701,68 @@ async fn child_progress_in_a_durable_step_is_kept_across_a_crash() {
     assert_eq!(state["x"], json!("a1"));
 }
 
-#[tokio::test]
-async fn edit_state_waits_for_recovered_branch_results() {
+async fn restart(store: &Store, run: &GraphRun) -> GraphRun {
+    store.save(run.checkpoint()).await.unwrap();
+    GraphRun::restore(store, run.run_id()).await.unwrap()
+}
+
+async fn kept_once(change: impl FnOnce(&mut GraphRun)) {
     let (store, gates) = (Store::default(), GatedTool::new());
     let io = io(&gates, model());
     let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
     let mut run = GraphRun::restore(&store, id).await.unwrap();
-    let err = run.update_state("seed", json!("edited"), None).unwrap_err();
+    change(&mut run);
+    let mut run = restart(&store, &run).await;
+    if run.stopped().is_some() {
+        assert!(matches!(
+            run.step_durable(&io, &store).await.unwrap(),
+            GraphOutcome::Failed(_)
+        ));
+        run.retry(None).unwrap();
+        run = restart(&store, &run).await;
+    }
+    gates.open("b");
+    let state = done(drive(&mut run, &io, &store).await);
+    assert_eq!(
+        gates.calls("a").len(),
+        1,
+        "a's kept result is applied, not re-run"
+    );
+    assert_eq!(state["x"], json!("a1"));
+}
+
+#[tokio::test]
+async fn kept_write_survives_edit_save_and_restart() {
+    kept_once(|run| run.update_state("seed", json!("edited"), None).unwrap()).await;
+}
+
+#[tokio::test]
+async fn kept_write_survives_budget_raise_save_and_restart() {
+    kept_once(|run| run.raise_budget(Limits::default()).unwrap()).await;
+}
+
+#[tokio::test]
+async fn kept_write_survives_stop_save_restart_and_retry() {
+    kept_once(|run| run.stop(Stop::Cancelled).unwrap()).await;
+}
+
+const HUMAN_FAN: &str = "name = 'ask'\nstart = 's'\n[state]\nseed = 'string'\nx = 'string'\ny = 'string?'\n[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 's'\nwrites = 'seed'\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 'a'\nwrites = 'x'\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'question'\nwrites = 'y'\n[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 's'\nto = 'a'\n[[edges]]\nfrom = 's'\nto = 'h'\n[[edges]]\nfrom = 'a'\nto = 'j'\n[[edges]]\nfrom = 'h'\nto = 'j'\n[[edges]]\nfrom = 'j'\nto = 'e'\n";
+
+#[tokio::test]
+async fn kept_write_survives_human_answer_save_and_restart() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let io = io(&gates, model());
+    let mut run = started(HUMAN_FAN, &io, &store, &gates).await;
+    let id = run.run_id();
+    gates.open("a");
+    run.step_durable(&io, &store).await.unwrap();
     assert!(
-        matches!(&err, GraphError::Resume(m) if m.contains("recovered")),
-        "{err}"
+        store.has(id, 2, 0),
+        "a's result is kept; the step's checkpoint is never saved"
     );
-    gates.open("b");
-    let state = done(drive(&mut run, &io, &store).await);
-    assert_eq!(
-        gates.calls("a").len(),
-        1,
-        "a's kept result is applied, not re-run"
-    );
-    assert_eq!(state["x"], json!("a1"));
-}
-
-#[tokio::test]
-async fn raise_resume_and_retry_wait_for_recovered_branch_results() {
-    let (store, gates) = (Store::default(), GatedTool::new());
-    let io = io(&gates, model());
-    let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
     let mut run = GraphRun::restore(&store, id).await.unwrap();
-    let pending = |r: Result<(), GraphError>| {
-        assert!(
-            matches!(&r, Err(GraphError::Resume(m)) if m.contains("recovered")),
-            "{r:?}"
-        );
-    };
-    pending(run.raise_budget(Limits::default()));
-    pending(run.resume("a", json!("answer")));
-    pending(run.retry(None));
-    gates.open("b");
+    run.resume("h", json!("yes")).unwrap();
+    let mut run = restart(&store, &run).await;
     let state = done(drive(&mut run, &io, &store).await);
     assert_eq!(
         gates.calls("a").len(),
@@ -765,26 +770,5 @@ async fn raise_resume_and_retry_wait_for_recovered_branch_results() {
         "a's kept result is applied, not re-run"
     );
     assert_eq!(state["x"], json!("a1"));
-}
-
-#[tokio::test]
-async fn stop_then_retry_keeps_recovered_branch_results() {
-    let (store, gates) = (Store::default(), GatedTool::new());
-    let io = io(&gates, model());
-    let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
-    let mut run = GraphRun::restore(&store, id).await.unwrap();
-    run.stop(Stop::Cancelled).unwrap();
-    assert!(matches!(
-        run.step_durable(&io, &store).await.unwrap(),
-        GraphOutcome::Failed(_)
-    ));
-    run.retry(None).unwrap();
-    gates.open("b");
-    let state = done(drive(&mut run, &io, &store).await);
-    assert_eq!(
-        gates.calls("a").len(),
-        1,
-        "a's kept result is applied, not re-run"
-    );
-    assert_eq!(state["x"], json!("a1"));
+    assert_eq!(state["y"], json!("yes"));
 }
