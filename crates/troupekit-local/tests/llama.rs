@@ -320,3 +320,28 @@ fn fixed_length_overflow_is_refused_before_any_token() {
         .expect("one token still fits");
     assert_eq!(one.tokens(), 1);
 }
+
+#[test]
+fn model_call_from_its_own_token_callback_is_refused_not_deadlocked() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let model = load();
+        let p = prompt(&model, "Count to ten.");
+        let mut nested = None;
+        model
+            .generate(&p, &greedy(4), &mut |_| {
+                nested = Some(model.score(&p[..2]));
+                Flow::Stop
+            })
+            .expect("generates");
+        let after = model.score(&p[..2]);
+        tx.send((nested, after.is_ok())).expect("send");
+    });
+    let (nested, after) = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("a nested call must not deadlock");
+    let err = nested.expect("callback ran").expect_err("nested call refused");
+    assert!(matches!(err, LocalError::Unsupported(_)), "{err:?}");
+    assert!(err.to_string().contains("token callback"), "{err}");
+    assert!(after, "the model works again once generate returns");
+}

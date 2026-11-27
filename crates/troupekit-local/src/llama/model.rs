@@ -135,6 +135,54 @@ struct State {
     cached: Vec<i32>,
 }
 
+thread_local! {
+    static HELD: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The locked state of one model, recorded as held by this thread until
+/// dropped, so a call on the same model from inside a token callback is
+/// refused instead of waiting on its own lock. Derefs to the `State`.
+struct Held<'a> {
+    guard: MutexGuard<'a, State>,
+    key: usize,
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = State;
+
+    /// Returns the locked state. Output: a shared reference.
+    /// Valid while the lock is held.
+    /// Never blocks.
+    fn deref(&self) -> &State {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for Held<'_> {
+    /// Returns the locked state. Output: a mutable reference.
+    /// Valid while the lock is held.
+    /// Never blocks.
+    fn deref_mut(&mut self) -> &mut State {
+        &mut self.guard
+    }
+}
+
+impl Drop for Held<'_> {
+    /// Removes this model from the thread's held list before the lock is
+    /// released. Output: none.
+    /// The entry must be there: `lock` pushed it.
+    fn drop(&mut self) {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            let at = held
+                .iter()
+                .rposition(|k| *k == self.key)
+                .expect("a held model is on this thread's list");
+            held.remove(at);
+        });
+    }
+}
+
 /// A GGUF model run in-process by llama.cpp, checked before every C call.
 /// Send and Sync: the model pointer is read-only after load and the
 /// tokenizer API is thread safe (`llama.h:1265`); the one context is
@@ -257,7 +305,13 @@ impl LlamaModel {
         })
     }
 
-    fn lock(&self) -> MutexGuard<'_, State> {
+    fn lock(&self) -> Result<Held<'_>, LocalError> {
+        let key = self as *const LlamaModel as usize;
+        if HELD.with(|held| held.borrow().contains(&key)) {
+            return Err(LocalError::Unsupported(
+                "a call on the same model from inside its own token callback",
+            ));
+        }
         let mut guard = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -269,7 +323,8 @@ impl LlamaModel {
         if self.reset_pending.swap(false, Ordering::SeqCst) {
             clear(&mut guard);
         }
-        guard
+        HELD.with(|held| held.borrow_mut().push(key));
+        Ok(Held { guard, key })
     }
 
     fn check_tokens(&self, tokens: &[u32]) -> Result<Vec<i32>, LocalError> {
@@ -586,7 +641,7 @@ impl LocalModel for LlamaModel {
             .map(|t| self.tokenize(t, false))
             .collect::<Result<Vec<_>, _>>()?;
         let dims = unsafe { ffi::tk_model_n_embd_out(self.model.as_ptr()) } as usize;
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         let ctx = state.ctx;
         unsafe { ffi::tk_set_embeddings(ctx.as_ptr(), 1) };
         let result = token_lists
@@ -637,7 +692,7 @@ impl LlamaModel {
             });
         }
         let mut sampler = Sampler::new(self.model, params)?;
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         let ctx = state.ctx;
         let reused = self.reuse_prefix(&mut state, &prompt);
         unsafe { ffi::tk_perf_reset(ctx.as_ptr()) };
@@ -722,7 +777,7 @@ impl LlamaModel {
                 limit: self.n_ctx,
             });
         }
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         let ctx = state.ctx;
         unsafe { ffi::tk_kv_clear(ctx.as_ptr()) };
         state.cached.clear();
