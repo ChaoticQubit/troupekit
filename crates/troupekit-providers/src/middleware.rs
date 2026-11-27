@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use troupekit_core::error::ProviderError;
+use troupekit_trace::{trace, Trace};
 
 /// Waits between retries. `TokioSleep` is the real clock; tests inject a
 /// recorder so no test sleeps.
@@ -103,6 +104,17 @@ impl RetryModel {
         self.sleep = sleep;
         self
     }
+
+    fn trace_retry(&self, failures: u32, wait_ms: u64, err: &ProviderError) {
+        trace!(
+            Trace::Models,
+            "model.retry",
+            model = self.inner.id(),
+            failures = failures,
+            wait_ms = wait_ms,
+            kind = format!("{:?}", err.kind),
+        );
+    }
 }
 
 #[async_trait]
@@ -120,7 +132,10 @@ impl Model for RetryModel {
             };
             failures += 1;
             match self.policy.next_delay_ms(failures, &err) {
-                Some(ms) => self.sleep.sleep(ms).await,
+                Some(ms) => {
+                    self.trace_retry(failures, ms, &err);
+                    self.sleep.sleep(ms).await
+                }
                 None => return Err(err),
             }
         }
@@ -148,7 +163,10 @@ impl Model for RetryModel {
             };
             failures += 1;
             match self.policy.next_delay_ms(failures, &err) {
-                Some(ms) => self.sleep.sleep(ms).await,
+                Some(ms) => {
+                    self.trace_retry(failures, ms, &err);
+                    self.sleep.sleep(ms).await
+                }
                 None => return Err(err),
             }
         }
