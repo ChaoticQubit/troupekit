@@ -770,7 +770,7 @@ fn tasks_compiles_to_bounded_leader_loop() {
     );
     assert_eq!(strs(&lead["reads"]), ["input", "tasks", "results"]);
     assert_eq!(table["reducers"]["results"].as_str(), Some("extend"));
-    assert_eq!(lead["sets"]["results"].as_str(), Some("results"));
+    assert_eq!(lead["sets"]["finished"].as_str(), Some("results"));
     let three = compile(FILE, &format!("{text}max_iterations = 3\n")).unwrap();
     assert_eq!(three["max_steps"].as_integer(), Some(64));
     for (table, passes) in [(&table, 5), (&three, 3)] {

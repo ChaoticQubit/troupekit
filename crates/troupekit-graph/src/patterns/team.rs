@@ -13,9 +13,9 @@ const SYNTHESIZE_PROMPT: &str = "Combine your team's answers into one final answ
 const COORDINATE_PROMPT: &str =
     "Hand parts of the request to your coworkers as needed, then give the final answer.";
 const TASKS_PROMPT: &str = "Work through the request with your coworkers. `results` holds \
-    what earlier passes finished. Put what this pass finished in `results` and the tasks still \
-    open in `tasks`. Set `done` to true and give the final answer in `answer` once nothing is \
-    left.";
+    what earlier passes finished. Put only what this pass finished in `finished` and the tasks \
+    still open in `tasks`. Set `done` to true and give the final answer in `answer` once \
+    nothing is left.";
 const STEPS_PER_ITERATION: i64 = 16;
 
 #[derive(Deserialize)]
@@ -320,10 +320,9 @@ fn coordinate(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     Ok(t.finish())
 }
 
-/// Compiles `tasks` as `max_iterations` leader passes in a row with no
-/// edge back, so the pass count is bounded by the flow itself. Each pass
-/// delegates to the members, reads the open `tasks` and every earlier
-/// `results`, and sets `done`, `tasks`, `results` (extended) and `output`.
+/// Compiles `tasks` as `max_iterations` leader passes with no edge back.
+/// Each pass delegates, reads `tasks` and every earlier `results`, and sets
+/// `done`, `tasks`, `results` (extended by its `finished`) and `output`.
 /// A switch on `done` ends the run or enters the next pass; the last pass
 /// ends it, leaving `done` false when the leader is not done.
 fn tasks(file: &str, team: &Team) -> Result<Table, WorkflowError> {
@@ -340,12 +339,12 @@ fn tasks(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     let mut fields = Table::new();
     fields.insert("done".into(), Value::String("bool".into()));
     fields.insert("tasks".into(), Value::String("list<string>".into()));
-    fields.insert("results".into(), Value::String("list<string>".into()));
+    fields.insert("finished".into(), Value::String("list<string>".into()));
     fields.insert("answer".into(), Value::String("string".into()));
     let mut sets = Table::new();
     sets.insert("done".into(), Value::String("done".into()));
     sets.insert("tasks".into(), Value::String("tasks".into()));
-    sets.insert("results".into(), Value::String("results".into()));
+    sets.insert("finished".into(), Value::String("results".into()));
     sets.insert("answer".into(), Value::String("output".into()));
     let passes = usize::try_from(team.max_iterations).expect("max_iterations is in range");
     let ids: Vec<String> = (1..=passes)

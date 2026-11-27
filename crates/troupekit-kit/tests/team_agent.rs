@@ -461,14 +461,14 @@ async fn members_tasks_loops_until_done() {
     let leader = Arc::new(FnModel::new("fake/m", move |req| {
         if count.fetch_add(1, Ordering::SeqCst) == 0 {
             text_reply(
-                r#"{"done":false,"tasks":["check the tax"],"results":["the bill is 40 dollars"],"answer":""}"#,
+                r#"{"done":false,"tasks":["check the tax"],"finished":["the bill is 40 dollars"],"answer":""}"#,
                 10,
             )
         } else {
             let asked: String = req.messages.iter().map(|m| m.text_content()).collect();
             *saw.lock().unwrap() = asked;
             text_reply(
-                r#"{"done":true,"tasks":[],"results":["the tax is 4 dollars"],"answer":"All settled."}"#,
+                r#"{"done":true,"tasks":[],"finished":["the tax is 4 dollars"],"answer":"All settled."}"#,
                 10,
             )
         }
@@ -494,7 +494,7 @@ async fn members_tasks_loops_until_done() {
     let stuck = Arc::new(FnModel::new("fake/m", move |_req| {
         stuck_count.fetch_add(1, Ordering::SeqCst);
         text_reply(
-            r#"{"done":false,"tasks":["more"],"results":[],"answer":""}"#,
+            r#"{"done":false,"tasks":["more"],"finished":[],"answer":""}"#,
             10,
         )
     }));
