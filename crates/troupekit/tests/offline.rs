@@ -20,6 +20,12 @@ const CANARY: &str = "sk-TROUPEKIT-CANARY-0123456789";
 const DIMS: usize = 256;
 const ANSWER: &str = "Returns are open for 30 days; 2 + 3 = 5.";
 
+/// Adds two integers a and b.
+#[tool]
+async fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
 fn docs() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/support/docs")
 }
@@ -100,11 +106,6 @@ async fn fixture_a(dir: &Path, out: Out, content: bool) -> String {
         "name = \"office\"\n[[target]]\nid = \"cloud\"\n",
     )
     .unwrap();
-    let add = tool(
-        "add",
-        "Adds two integers a and b.",
-        |args: Value| async move { args["a"].as_i64().unwrap_or(0) + args["b"].as_i64().unwrap_or(0) },
-    );
     let node = Agent::new("helper")
         .instructions("Answer with the tools.")
         .model("openai/gpt-6-luna")
