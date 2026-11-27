@@ -6,8 +6,9 @@ use troupekit_core::error::ProviderErrorKind;
 use troupekit_core::message::{ContentPart, Message, Role};
 use troupekit_core::tool::ToolSpec;
 use troupekit_local::{
-    ChatMessage, ChatRole, Flow, GenParams, GenStop, Generation, LocalChat, LocalChatSettings,
-    LocalError, LocalInfo, LocalMetrics, LocalModel, ToolMode,
+    output_grammar, tool_grammar, ChatMessage, ChatRole, Flow, GenParams, GenStop, Generation,
+    Grammar, LocalChat, LocalChatSettings, LocalError, LocalInfo, LocalMetrics, LocalModel,
+    ToolMode,
 };
 use troupekit_providers::request::{CompletionRequest, Delta, StopReason};
 use troupekit_providers::Model;
@@ -22,6 +23,7 @@ struct Scripted {
     block_until_cancel: bool,
     saw_messages: Mutex<Vec<ChatMessage>>,
     saw_max_tokens: Mutex<Option<usize>>,
+    saw_grammar: Mutex<Option<Grammar>>,
     generate_calls: Mutex<usize>,
     saw_cancel: AtomicBool,
 }
@@ -35,6 +37,7 @@ impl Scripted {
             block_until_cancel: false,
             saw_messages: Mutex::new(Vec::new()),
             saw_max_tokens: Mutex::new(None),
+            saw_grammar: Mutex::new(None),
             generate_calls: Mutex::new(0),
             saw_cancel: AtomicBool::new(false),
         }
@@ -78,6 +81,7 @@ impl LocalModel for Scripted {
     ) -> Result<Generation, LocalError> {
         *self.generate_calls.lock().expect("lock") += 1;
         *self.saw_max_tokens.lock().expect("lock") = Some(params.max_tokens());
+        *self.saw_grammar.lock().expect("lock") = params.grammar().cloned();
         if self.block_until_cancel {
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(5) {
@@ -485,4 +489,138 @@ async fn required_tool_mode_refuses_a_text_reply() {
         auto.complete(&req).await.expect("text").stop,
         StopReason::EndTurn
     );
+}
+
+fn score_schema() -> serde_json::Value {
+    json!({"type":"object","properties":{"score":{"type":"integer"}},"required":["score"]})
+}
+
+fn seen_grammar(model: &Scripted) -> Option<Grammar> {
+    model.saw_grammar.lock().expect("lock").clone()
+}
+
+fn root_branch_count(grammar: &Grammar) -> usize {
+    let first = grammar.gbnf().lines().next().expect("a root line");
+    first.split(" | ").count()
+}
+
+#[tokio::test]
+async fn tools_select_tool_grammar() {
+    let model = Arc::new(Scripted::new("Sunny."));
+    let chat = chat(model.clone());
+    let mut req = CompletionRequest::user("weather?", 64);
+    req.tools = vec![weather()];
+    chat.complete(&req).await.expect("complete");
+    let expected = tool_grammar(&[weather()], ToolMode::Auto).expect("grammar");
+    assert_eq!(seen_grammar(&model), Some(expected));
+    let call = Arc::new(Scripted::new(
+        r#"{"tool":"get_weather","arguments":{"city":"Lisbon"}}"#,
+    ));
+    let required_call = LocalChat::new(call.clone(), "local/test")
+        .with_settings(LocalChatSettings::default().with_tool_mode(ToolMode::Required));
+    required_call.complete(&req).await.expect("required call");
+    let expected = tool_grammar(&[weather()], ToolMode::Required).expect("grammar");
+    assert_eq!(seen_grammar(&call), Some(expected));
+}
+
+#[tokio::test]
+async fn output_schema_selects_output_grammar() {
+    let model = Arc::new(Scripted::new(r#"{"score":3}"#));
+    let chat = chat(model.clone());
+    let mut req = CompletionRequest::user("rate it", 64);
+    req.output_schema = Some(score_schema());
+    let (response, _) = both(&chat, &req).await;
+    let expected = output_grammar(&score_schema()).expect("grammar");
+    assert_eq!(seen_grammar(&model), Some(expected));
+    assert!(matches!(
+        &response.message.parts[..],
+        [ContentPart::Text { text }] if text == r#"{"score":3}"#
+    ));
+    chat.complete(&CompletionRequest::user("hi", 64))
+        .await
+        .expect("plain");
+    assert_eq!(seen_grammar(&model), None);
+}
+
+#[tokio::test]
+async fn tools_and_output_schema_share_one_grammar() {
+    let model = Arc::new(Scripted::new(r#"{"score":3}"#));
+    let chat = chat(model.clone());
+    let mut req = CompletionRequest::user("rate it", 64);
+    req.tools = vec![weather()];
+    req.output_schema = Some(score_schema());
+    let (response, _) = both(&chat, &req).await;
+    let grammar = seen_grammar(&model).expect("a grammar");
+    assert_eq!(root_branch_count(&grammar), 2, "{}", grammar.gbnf());
+    assert!(!grammar.gbnf().contains("[^{"), "{}", grammar.gbnf());
+    assert!(
+        grammar.gbnf().contains(r#""\"score\"""#),
+        "{}",
+        grammar.gbnf()
+    );
+    assert!(matches!(
+        &response.message.parts[..],
+        [ContentPart::Text { .. }]
+    ));
+}
+
+#[tokio::test]
+async fn output_schema_with_a_tool_key_clashes_with_tools() {
+    let clashing = [
+        json!({"type":"object","properties":{"tool":{"type":"string"}}}),
+        json!({"const":{"tool":"get_weather","arguments":{}}}),
+        json!({"enum":[1,{"tool":"x"}]}),
+        json!({"anyOf":[{"type":"integer"}]}),
+        json!({"oneOf":[{"type":"integer"}]}),
+        json!({"$ref":"#/$defs/a","$defs":{"a":{"type":"integer"}}}),
+    ];
+    for schema in clashing {
+        let model = Arc::new(Scripted::new("x"));
+        let chat = chat(model.clone());
+        let mut req = CompletionRequest::user("rate it", 64);
+        req.tools = vec![weather()];
+        req.output_schema = Some(schema.clone());
+        let err = chat.complete(&req).await.expect_err("clash");
+        assert_eq!(err.kind, ProviderErrorKind::Server, "{schema}: {err:?}");
+        assert!(err.message.contains("tool"), "{schema}: {}", err.message);
+        assert_eq!(*model.generate_calls.lock().expect("lock"), 0);
+        req.tools.clear();
+        chat.complete(&req).await.expect("no tools, no clash");
+    }
+}
+
+#[tokio::test]
+async fn tool_prompt_matches_the_combined_grammar() {
+    let model = Arc::new(Scripted::new(r#"{"score":3}"#));
+    let chat = chat(model.clone());
+    let mut req = CompletionRequest::user("rate it", 64);
+    req.tools = vec![weather()];
+    chat.complete(&req).await.expect("tools only");
+    let plain = model.saw_messages.lock().expect("lock")[0]
+        .content()
+        .to_string();
+    assert!(plain.contains("plain text"), "{plain}");
+    req.output_schema = Some(score_schema());
+    chat.complete(&req).await.expect("tools and schema");
+    let structured = model.saw_messages.lock().expect("lock")[0]
+        .content()
+        .to_string();
+    assert!(!structured.contains("plain text"), "{structured}");
+    assert!(structured.contains("JSON"), "{structured}");
+    assert!(structured.contains(r#""score""#), "{structured}");
+}
+
+#[tokio::test]
+async fn unexpressible_tool_schema_fails_before_decoding() {
+    let model = Arc::new(Scripted::new("x"));
+    let chat = chat(model.clone());
+    let mut req = CompletionRequest::user("weather?", 64);
+    let mut tool = weather();
+    tool.schema =
+        json!({"type":"object","properties":{"city":{"type":"string","pattern":"^[A-Z]"}}});
+    req.tools = vec![tool];
+    let err = chat.complete(&req).await.expect_err("pattern");
+    assert_eq!(err.kind, ProviderErrorKind::Server, "{err:?}");
+    assert!(err.message.contains("pattern"), "{}", err.message);
+    assert_eq!(*model.generate_calls.lock().expect("lock"), 0);
 }
