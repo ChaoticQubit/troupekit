@@ -261,6 +261,21 @@ jobs:
             fi
           done
 
+  bindings-msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: binding crates build on their rust-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          for crate in troupekit-ffi troupekit-ffi-core troupekit-py; do
+            grep -qx 'rust-version = "1.89"' "crates/$crate/Cargo.toml"
+          done
+          rustup toolchain install 1.89 --profile minimal
+          cargo +1.89 check --locked --all-targets -p troupekit-ffi -p troupekit-ffi-core -p troupekit-py
+          cargo +1.89 check --locked --all-targets -p troupekit-ffi --features bindgen
+
   bindings-drift:
     runs-on: ubuntu-latest
     steps:
