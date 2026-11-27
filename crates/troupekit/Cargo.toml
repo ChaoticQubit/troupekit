@@ -33,6 +33,18 @@ name = "kill_resume"
 required-features = ["sqlite"]
 
 [[example]]
+name = "crew_report"
+required-features = ["sqlite"]
+
+[[example]]
+name = "team_triage"
+required-features = ["sqlite"]
+
+[[example]]
+name = "parallel_kill"
+required-features = ["sqlite"]
+
+[[example]]
 name = "support_agent"
 required-features = ["knowledge"]
 

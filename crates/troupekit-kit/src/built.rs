@@ -4,14 +4,16 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+use troupekit_agent::delegate::{AgentTool, DelegateSettings};
 use troupekit_agent::{
     drive, AgentIo, AgentRun, EventSink, Limits, Persona, RunState, SimpleIo, StepOutcome,
 };
 use troupekit_core::event::{Event, Usage};
 use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
-use troupekit_core::message::{Message, Role};
+use troupekit_core::message::{ContentPart, Message, Role};
 use troupekit_core::store::CheckpointStore;
+use troupekit_tools::Tool;
 
 const BASE_RETRY_MS: u64 = 500;
 const MAX_RETRY_MS: u64 = 30_000;
@@ -27,6 +29,12 @@ impl EventSink for Discard {
 /// An empty conversation fails when the run starts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input(Vec<Message>);
+
+impl Input {
+    pub(crate) fn into_messages(self) -> Vec<Message> {
+        self.0
+    }
+}
 
 impl From<&str> for Input {
     fn from(text: &str) -> Self {
@@ -64,6 +72,7 @@ pub struct RunOutcome {
     model_calls: u32,
     run_id: RunId,
     messages: Vec<Message>,
+    pub(crate) member_runs: Vec<RunId>,
 }
 
 impl RunOutcome {
@@ -90,7 +99,8 @@ impl RunOutcome {
 
     /// Returns how many model calls the run made.
     /// Retried calls count once per attempt that reached the model.
-    /// At least one for a finished run.
+    /// At least one for a finished single-agent run; 0 for a team run,
+    /// whose calls happen inside its flow nodes.
     pub fn model_calls(&self) -> u32 {
         self.model_calls
     }
@@ -108,6 +118,13 @@ impl RunOutcome {
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
+
+    /// Returns the run ids of the member agents this run called, through
+    /// `agent_tool` or `delegates`, in call order. Empty for an agent
+    /// without members. Each id opens the member's own checkpoints.
+    pub fn member_runs(&self) -> &[RunId] {
+        &self.member_runs
+    }
 }
 
 /// An agent that passed every `build` check, ready to run many times.
@@ -120,7 +137,10 @@ pub struct BuiltAgent {
 
 struct Inner {
     persona: Persona,
-    io: SimpleIo,
+    io: Arc<SimpleIo>,
+    tool: Arc<AgentTool>,
+    member_tools: Vec<String>,
+    team: Option<crate::team_agent::TeamFlow>,
     limits: Limits,
     store: Option<Arc<dyn CheckpointStore>>,
     retries: u32,
@@ -138,10 +158,24 @@ impl BuiltAgent {
         retries: u32,
         laws: Laws,
     ) -> Self {
+        let io = Arc::new(io);
+        let settings = member_settings(&limits, store.as_ref());
+        let tool = AgentTool::new(
+            &persona.name,
+            &describe(&persona),
+            persona.clone(),
+            io.clone(),
+            settings,
+        )
+        .expect("a built persona is a valid agent tool");
+        assert_eq!(tool.spec().name, persona.name);
         BuiltAgent {
             inner: Arc::new(Inner {
                 persona,
                 io,
+                tool: Arc::new(tool),
+                member_tools: Vec::new(),
+                team: None,
                 limits,
                 store,
                 retries,
@@ -187,9 +221,17 @@ impl BuiltAgent {
     /// The run id in the outcome works with `resume`.
     pub async fn run_with(&self, input: impl Into<Input>) -> Result<RunOutcome, KitError> {
         let inner = &self.inner;
+        if let Some(team) = &inner.team {
+            return team.run(self, input.into()).await;
+        }
         let messages = self.messages(input.into()).await?;
-        let mut run =
-            AgentRun::new(&inner.persona, messages, inner.limits.clone(), &inner.io).await?;
+        let mut run = AgentRun::new(
+            &inner.persona,
+            messages,
+            inner.limits.clone(),
+            inner.io.as_ref(),
+        )
+        .await?;
         let store: Arc<dyn CheckpointStore> = match &inner.store {
             Some(store) => store.clone(),
             None => Arc::new(InMemCheckpoints::default()),
@@ -214,6 +256,9 @@ impl BuiltAgent {
                 format!("no checkpoint for run {run_id}"),
             ));
         };
+        if let Some(team) = &self.inner.team {
+            return team.resume(self, store.as_ref(), run_id).await;
+        }
         let mut run = AgentRun::from_checkpoint(&checkpoint)?;
         Ok(self.finish(&mut run, store.as_ref()).await?.text)
     }
@@ -232,14 +277,57 @@ impl BuiltAgent {
         &self.inner.laws
     }
 
-    async fn finish(
+    pub(crate) fn agent_tool(&self) -> &Arc<AgentTool> {
+        &self.inner.tool
+    }
+
+    pub(crate) fn store(&self) -> Option<&Arc<dyn CheckpointStore>> {
+        self.inner.store.as_ref()
+    }
+
+    pub(crate) fn io(&self) -> Arc<SimpleIo> {
+        self.inner.io.clone()
+    }
+
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.inner.limits
+    }
+
+    pub(crate) fn with_team(mut self, team: crate::team_agent::TeamFlow) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("a fresh BuiltAgent is not shared");
+        assert!(inner.team.is_none(), "a team is set once");
+        inner.team = Some(team);
+        self
+    }
+
+    pub(crate) fn is_team(&self) -> bool {
+        self.inner.team.is_some()
+    }
+
+    pub(crate) fn with_member_tools(mut self, names: Vec<String>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("a fresh BuiltAgent is not shared");
+        inner.member_tools = names;
+        self
+    }
+
+    #[cfg(feature = "knowledge")]
+    pub(crate) fn has_preamble(&self) -> bool {
+        self.inner.preamble.is_some()
+    }
+
+    #[cfg(not(feature = "knowledge"))]
+    pub(crate) fn has_preamble(&self) -> bool {
+        false
+    }
+
+    pub(crate) async fn finish(
         &self,
         run: &mut AgentRun,
         store: &dyn CheckpointStore,
     ) -> Result<RunOutcome, KitError> {
-        let io: &dyn AgentIo = &self.inner.io;
+        let io: &dyn AgentIo = self.inner.io.as_ref();
         match run.state().clone() {
-            RunState::Done { output } => return Ok(outcome(run, output)),
+            RunState::Done { output } => return Ok(outcome(run, output, &self.inner.member_tools)),
             RunState::Failed { error } => {
                 return Err(KitError::Failed {
                     run_id: run.run_id(),
@@ -257,7 +345,9 @@ impl BuiltAgent {
         let mut attempts = 0u32;
         loop {
             match drive(run, io, store).await? {
-                StepOutcome::Done(output) => return Ok(outcome(run, output)),
+                StepOutcome::Done(output) => {
+                    return Ok(outcome(run, output, &self.inner.member_tools))
+                }
                 StepOutcome::Retry {
                     error,
                     retry_after_ms,
@@ -307,7 +397,32 @@ impl fmt::Debug for BuiltAgent {
     }
 }
 
-fn outcome(run: &AgentRun, output: Value) -> RunOutcome {
+impl RunOutcome {
+    pub(crate) fn team(
+        text: String,
+        output: Value,
+        usage: Usage,
+        run_id: RunId,
+        messages: Vec<Message>,
+    ) -> RunOutcome {
+        assert_eq!(
+            messages.len(),
+            2,
+            "a team outcome holds the input and the answer"
+        );
+        RunOutcome {
+            text,
+            output,
+            usage,
+            model_calls: 0,
+            run_id,
+            messages,
+            member_runs: Vec::new(),
+        }
+    }
+}
+
+fn outcome(run: &AgentRun, output: Value, member_tools: &[String]) -> RunOutcome {
     let text = match &output {
         Value::String(text) => text.clone(),
         other => other.to_string(),
@@ -319,7 +434,98 @@ fn outcome(run: &AgentRun, output: Value) -> RunOutcome {
         model_calls: run.model_calls(),
         run_id: run.run_id(),
         messages: run.messages().to_vec(),
+        member_runs: member_runs(run.messages(), member_tools),
     }
+}
+
+/// Returns the member run ids named in the replies to calls of
+/// `member_tools`, in call order. A result counts only for a call of the
+/// assistant message right before it, each call once; a call id repeated
+/// within one message, or a reply without an id, is skipped.
+fn member_runs(messages: &[Message], member_tools: &[String]) -> Vec<RunId> {
+    if member_tools.is_empty() {
+        return Vec::new();
+    }
+    let mut ids = Vec::new();
+    let mut pending: Vec<&str> = Vec::new();
+    let mut member_calls = 0usize;
+    for message in messages {
+        match message.role {
+            Role::Assistant => {
+                pending = turn_member_calls(message, member_tools);
+                member_calls += pending.len();
+            }
+            Role::Tool => {
+                for part in &message.parts {
+                    let ContentPart::ToolResult {
+                        call_id, content, ..
+                    } = part
+                    else {
+                        continue;
+                    };
+                    let Some(at) = pending.iter().position(|c| c == call_id) else {
+                        continue;
+                    };
+                    pending.swap_remove(at);
+                    if let Some(id) = reply_run_id(content) {
+                        ids.push(id);
+                    }
+                }
+            }
+            _ => pending.clear(),
+        }
+    }
+    assert!(ids.len() <= member_calls, "each member call is used once");
+    ids
+}
+
+/// Returns the ids of the member calls in one assistant message whose id
+/// no other call in that message shares. Returns an empty list for a
+/// message without member calls.
+fn turn_member_calls<'a>(message: &'a Message, member_tools: &[String]) -> Vec<&'a str> {
+    let calls: Vec<(&str, &str)> = message
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::ToolCall { id, name, .. } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+    let unique = |id: &str| calls.iter().filter(|(c, _)| *c == id).count() == 1;
+    let members: Vec<&str> = calls
+        .iter()
+        .filter(|(id, name)| member_tools.iter().any(|t| t == name) && unique(id))
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(members.len() <= calls.len());
+    members
+}
+
+fn reply_run_id(content: &str) -> Option<RunId> {
+    let reply: Value = serde_json::from_str(content).ok()?;
+    serde_json::from_value(reply.get("member_run_id")?.clone()).ok()
+}
+
+/// Returns the delegate settings a member run of this agent uses: its own
+/// limits as the base, and its store, so a member run resumes from its
+/// checkpoints after a crash. The depth cap stays at its default.
+pub(crate) fn member_settings(
+    limits: &Limits,
+    store: Option<&Arc<dyn CheckpointStore>>,
+) -> DelegateSettings {
+    let settings = DelegateSettings::default().with_limits(limits.clone());
+    match store {
+        Some(store) => settings.with_store(store.clone()),
+        None => settings,
+    }
+}
+
+/// Returns the tool description of an agent: its role and its goal.
+/// Never empty, since `Persona::parse` requires both.
+pub(crate) fn describe(persona: &Persona) -> String {
+    let text = format!("{} Goal: {}", persona.role.trim(), persona.goal.trim());
+    assert!(!text.trim().is_empty());
+    text
 }
 
 fn retry_delay(attempt: u32, retry_after_ms: Option<u64>) -> Duration {
@@ -330,6 +536,53 @@ fn retry_delay(attempt: u32, retry_after_ms: Option<u64>) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn call(id: &str, name: &str) -> ContentPart {
+        ContentPart::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: json!({}),
+        }
+    }
+
+    fn result(id: &str, run: RunId) -> ContentPart {
+        ContentPart::ToolResult {
+            call_id: id.into(),
+            content: json!({"member_run_id": run.to_string(), "answer": "x"}).to_string(),
+            is_error: false,
+        }
+    }
+
+    fn msg(role: Role, parts: Vec<ContentPart>) -> Message {
+        Message::new(role, parts).unwrap()
+    }
+
+    #[test]
+    fn member_runs_pairs_results_with_calls_of_the_same_turn() {
+        let (member, other, again) = (RunId::new(), RunId::new(), RunId::new());
+        let tools = vec!["researcher".to_string()];
+        let messages = vec![
+            Message::text(Role::User, "Go"),
+            msg(Role::Assistant, vec![call("call_0", "researcher")]),
+            msg(Role::Tool, vec![result("call_0", member)]),
+            msg(Role::Assistant, vec![call("call_0", "other")]),
+            msg(Role::Tool, vec![result("call_0", other)]),
+            msg(Role::Assistant, vec![call("call_0", "researcher")]),
+            msg(
+                Role::Tool,
+                vec![result("call_0", again), result("call_0", other)],
+            ),
+            msg(
+                Role::Assistant,
+                vec![call("c1", "researcher"), call("c1", "other")],
+            ),
+            msg(Role::Tool, vec![result("c1", other), result("c1", other)]),
+            Message::text(Role::Assistant, "Done."),
+        ];
+        assert_eq!(member_runs(&messages, &tools), [member, again]);
+        assert!(member_runs(&messages, &[]).is_empty());
+    }
 
     #[test]
     fn retry_delay_backs_off_and_caps() {

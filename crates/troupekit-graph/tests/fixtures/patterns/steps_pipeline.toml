@@ -1,0 +1,97 @@
+name = "pipeline"
+start = "draft"
+
+[state]
+draft = "string?"
+input = "string"
+ok = "enum(no, yes)"
+output = "string"
+review_facts = "string?"
+review_grammar = "string?"
+
+[[nodes]]
+id = "draft"
+kind = "agent"
+persona = "writer"
+reads = ["input"]
+writes = "draft"
+
+[[nodes]]
+id = "review_grammar"
+kind = "agent"
+persona = "grammar"
+reads = ["input", "draft"]
+writes = "review_grammar"
+
+[[nodes]]
+id = "review_facts"
+kind = "agent"
+persona = "facts"
+reads = ["input", "draft"]
+writes = "review_facts"
+
+[[nodes]]
+id = "review"
+kind = "join"
+
+[[nodes]]
+id = "ok"
+kind = "human"
+ask = "question"
+prompt = "Publish?"
+reads = ["input", "review_grammar", "review_facts"]
+writes = "ok"
+
+[[nodes]]
+id = "route_ok"
+kind = "switch"
+on = "ok"
+
+[[nodes]]
+id = "publish"
+kind = "agent"
+persona = "publisher"
+reads = ["input", "ok"]
+writes = "output"
+
+[[nodes]]
+id = "end"
+kind = "end"
+
+[[edges]]
+from = "draft"
+to = "review_grammar"
+
+[[edges]]
+from = "review_grammar"
+to = "review"
+
+[[edges]]
+from = "draft"
+to = "review_facts"
+
+[[edges]]
+from = "review_facts"
+to = "review"
+
+[[edges]]
+from = "review"
+to = "ok"
+
+[[edges]]
+from = "ok"
+to = "route_ok"
+
+[[edges]]
+from = "route_ok"
+to = "draft"
+when = "no"
+
+[[edges]]
+from = "route_ok"
+to = "publish"
+when = "yes"
+
+[[edges]]
+from = "publish"
+to = "end"

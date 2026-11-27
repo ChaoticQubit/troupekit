@@ -1,2 +1,10 @@
+mod fork;
+mod flow;
+mod golden;
+mod parallel;
+mod patterns;
+mod pending;
+mod routing;
 mod run;
+mod subflow;
 mod workflow;

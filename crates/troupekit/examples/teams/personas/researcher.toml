@@ -1,0 +1,6 @@
+name = "researcher"
+display_name = "Researcher"
+role = "Researcher."
+goal = "Accurate facts about the topic."
+instructions = "List the facts you know about the topic, one per line, without opinions."
+model = "anthropic/claude-haiku-5-5"

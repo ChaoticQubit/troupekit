@@ -1,7 +1,10 @@
 mod agent;
+mod agent_history;
 mod built;
 mod error;
+mod flow;
 mod graph;
+mod history;
 #[cfg(feature = "knowledge")]
 pub mod knowledge;
 mod laws;
@@ -9,7 +12,9 @@ mod laws;
 mod memory;
 mod model;
 mod output;
+mod patterns;
 mod storage;
+mod team_agent;
 mod tool;
 
 #[doc(hidden)]
@@ -26,6 +31,7 @@ pub use laws::Laws;
 pub use memory::AgentMemory;
 pub use output::{IntoToolOutput, Json};
 pub use storage::Storage;
+pub use team_agent::TeamMode;
 pub use tool::{tool, AsTool};
 pub use troupekit_macros::{agent, tool};
 pub use troupekit_tools::{Tool, ToolContext, ToolOutput};

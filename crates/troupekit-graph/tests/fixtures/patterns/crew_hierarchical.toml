@@ -1,0 +1,24 @@
+name = "report"
+start = "manager"
+
+[state]
+input = "string"
+output = "string"
+
+[[nodes]]
+id = "manager"
+kind = "agent"
+persona = "crew-manager"
+prompt = "Run these tasks with your coworkers, in order, then answer:\n1. research [researcher]: Collect facts about {input}.\n\nExpected output: A list of facts.\n2. fact_check [checker]: Check the facts. Uses the results of: research.\n3. write [writer]: Write the report."
+reads = ["input"]
+writes = "output"
+delegates = ["researcher", "checker", "writer"]
+model = "openai/gpt-6-luna"
+
+[[nodes]]
+id = "end"
+kind = "end"
+
+[[edges]]
+from = "manager"
+to = "end"

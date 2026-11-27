@@ -1,0 +1,6 @@
+name = "writer"
+display_name = "Writer"
+role = "Report writer."
+goal = "A short, clear report."
+instructions = "Write a short report from the facts. Leave out every fact marked unconfirmed."
+model = "anthropic/claude-haiku-5-5"

@@ -1,0 +1,89 @@
+name = "report"
+start = "research"
+
+[state]
+fact_check = "string?"
+input = "string"
+needs_report = "bool"
+output = "string"
+research = "string?"
+write_feedback = "string"
+
+[[nodes]]
+id = "research"
+kind = "agent"
+persona = "researcher"
+prompt = "Collect facts about {input}.\n\nExpected output: A list of facts."
+reads = ["input"]
+writes = "research"
+
+[[nodes]]
+id = "fact_check"
+kind = "agent"
+persona = "checker"
+prompt = "Check the facts."
+reads = ["input", "research"]
+writes = "fact_check"
+
+[[nodes]]
+id = "join_fact_check"
+kind = "join"
+
+[[nodes]]
+id = "when_write"
+kind = "switch"
+on = "needs_report"
+
+[[nodes]]
+id = "write"
+kind = "agent"
+persona = "writer"
+prompt = "Write the report."
+reads = ["input", "research", "fact_check"]
+writes = "output"
+
+[[nodes]]
+id = "review_write"
+kind = "human"
+ask = "question"
+prompt = "Review the result of task `write`."
+reads = ["output"]
+writes = "write_feedback"
+
+[[nodes]]
+id = "end"
+kind = "end"
+
+[[edges]]
+from = "research"
+to = "fact_check"
+
+[[edges]]
+from = "fact_check"
+to = "join_fact_check"
+
+[[edges]]
+from = "research"
+to = "join_fact_check"
+
+[[edges]]
+from = "when_write"
+to = "write"
+when = "true"
+
+[[edges]]
+from = "write"
+to = "review_write"
+
+[[edges]]
+from = "join_fact_check"
+to = "when_write"
+
+[[edges]]
+from = "when_write"
+to = "end"
+when = "false"
+
+[[edges]]
+from = "review_write"
+to = "end"

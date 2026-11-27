@@ -1,0 +1,7 @@
+name = "triage"
+
+[team]
+mode = "route"
+leader = "triage-lead"
+members = ["billing", "tech"]
+approve = ["billing"]

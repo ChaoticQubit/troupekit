@@ -93,7 +93,8 @@ impl PersonaSource for MemorySource {
 }
 
 /// The personas shipped with this crate, labelled `builtin`:
-/// `assistant` (no tools) and `researcher` (`web_search`, `web_fetch`).
+/// `assistant` (no tools), `researcher` (`web_search`, `web_fetch`) and
+/// `crew-manager` (no tools; crews give it delegates).
 /// Put it last in a loader so every other source can override it.
 pub fn builtin() -> MemorySource {
     MemorySource::new(
@@ -106,6 +107,10 @@ pub fn builtin() -> MemorySource {
             (
                 "researcher.toml".to_string(),
                 include_str!("../personas/researcher.toml").to_string(),
+            ),
+            (
+                "crew-manager.toml".to_string(),
+                include_str!("../personas/crew-manager.toml").to_string(),
             ),
         ],
     )
@@ -270,5 +275,27 @@ mod tests {
         let researcher = loader.load("researcher").await.unwrap();
         assert_eq!(researcher.tools, ["web_search", "web_fetch"]);
         assert!(researcher.output.is_some());
+    }
+
+    #[tokio::test]
+    async fn builtin_loader_lists_crew_manager_last() {
+        let source = builtin();
+        let text = source.read("crew-manager.toml").await.unwrap().unwrap();
+        assert!(text.contains("name = \"crew-manager\""));
+        let user = Arc::new(MemorySource::new(
+            "user",
+            [(
+                "crew-manager.toml".to_string(),
+                "name = 'crew-manager'\ndisplay_name = 'Mine'\nrole = 'mine'\ngoal = 'g'\n\
+                 instructions = 'i'\nmodel = 'm'\n"
+                    .to_string(),
+            )],
+        ));
+        let builtin_only = PersonaLoader::new(vec![Arc::new(builtin())]);
+        let manager = builtin_only.load("crew-manager").await.unwrap();
+        assert!(manager.tools.is_empty());
+        assert_eq!(manager.model, "default");
+        let layered = PersonaLoader::new(vec![user, Arc::new(builtin())]);
+        assert_eq!(layered.load("crew-manager").await.unwrap().role, "mine");
     }
 }

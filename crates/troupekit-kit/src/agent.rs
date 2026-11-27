@@ -67,6 +67,7 @@ pub struct Agent {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    pub(crate) members: crate::team_agent::Members,
 }
 
 impl Agent {
@@ -104,6 +105,7 @@ impl Agent {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            members: crate::team_agent::Members::default(),
         }
     }
 
@@ -362,6 +364,13 @@ impl Agent {
                 ),
             ));
         }
+        if self.members.has_tools() {
+            let flat = self.attach_members().await?;
+            return Box::pin(flat.build()).await;
+        }
+        if self.members.is_team() {
+            return self.build_team().await;
+        }
         #[cfg(feature = "knowledge")]
         let (this, preamble) = {
             self.prepare(None)?;
@@ -384,6 +393,7 @@ impl Agent {
         let probe = vec![Message::text(Role::User, "build check")];
         AgentRun::new(&prepared.persona, probe, this.limits.clone(), &io).await?;
         let store = this.storage.open().await?;
+        let member_tools = this.members.tool_names().to_vec();
         let built = BuiltAgent::new(
             prepared.persona,
             io,
@@ -391,14 +401,17 @@ impl Agent {
             store,
             this.retries,
             prepared.laws,
-        );
+        )
+        .with_member_tools(member_tools);
         #[cfg(feature = "knowledge")]
         let built = built.with_preamble(preamble);
         Ok(built)
     }
 
     pub(crate) fn graph_conflict(&self) -> Option<&'static str> {
-        if self.limits != Limits::default() {
+        if !self.members.is_empty() {
+            Some("agent tools, delegates, members or handoffs; graphs do not take them yet")
+        } else if self.limits != Limits::default() {
             Some("limits; set them on the graph")
         } else if !self.law_paths.is_empty() || !self.inline_laws.is_empty() {
             Some("laws; set them on the graph")

@@ -6,7 +6,7 @@ use crate::tokens::{Delim, Error, Piece, SpanId, Tok};
 use crate::tool::crate_path;
 
 const WHAT: &str = "#[agent]";
-const KEYS: [&str; 18] = [
+const KEYS: [&str; 24] = [
     "model",
     "tools",
     "evals",
@@ -23,19 +23,49 @@ const KEYS: [&str; 18] = [
     "auto_laws",
     "memory",
     "knowledge",
+    "agents",
+    "delegates",
+    "handoffs",
+    "manages",
+    "members",
+    "team",
     "name",
     "crate",
 ];
 const DEFAULT_CRATE: &str = "::troupekit";
 
-/// One builder call the `#[agent]` expansion makes: the method name and
-/// the original value tokens passed to it, re-emitted with their spans.
-/// Calls run in attribute order, after `new` and `instructions`.
+/// One builder call the `#[agent]` expansion makes: the method name, the
+/// original value tokens passed to it, re-emitted with their spans, and
+/// the shape they take. Calls run in attribute order, after `new` and
+/// `instructions`.
 #[derive(Clone, Debug)]
 pub struct Call {
     pub method: &'static str,
     pub value: Vec<SpanId>,
+    pub shape: Shape,
 }
+
+/// How a call passes its value: `Plain` as written, `Invoke` as the call
+/// `path()`, `InvokeList` as the one-element array `[path()]`.
+/// `Members(mode)` as `[path()]` followed by the `TeamMode` variant.
+/// `agents`, `delegates`, `handoffs`, `manages` and `members` name fns
+/// that return an Agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Plain,
+    Invoke,
+    InvokeList,
+    Members(&'static str),
+}
+
+const TEAM_MODES: [(&str, &str); 5] = [
+    ("route", "Route"),
+    ("coordinate", "Coordinate"),
+    ("collaborate", "Collaborate"),
+    ("broadcast", "Broadcast"),
+    ("tasks", "Tasks"),
+];
+const TEAM_MESSAGE: &str = "team = takes one of route, coordinate, collaborate, broadcast, tasks";
 
 /// A validated `#[agent]` fn, ready for code generation.
 /// `name` is the persona name, `instructions` the doc comment unless an
@@ -105,6 +135,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
     let mut krate = DEFAULT_CRATE.to_string();
     let mut name_set = false;
     let mut calls = Vec::new();
+    let mut team: Option<(&'static str, SpanId)> = None;
     for arg in &args {
         let spans = || arg.value.iter().map(Tok::span).collect::<Vec<_>>();
         match arg.key.as_str() {
@@ -119,6 +150,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                 calls.push(Call {
                     method: method(&arg.key),
                     value: spans(),
+                    shape: Shape::Plain,
                 });
             }
             "tools" => {
@@ -132,6 +164,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     calls.push(Call {
                         method: "tool",
                         value: path.iter().map(Tok::span).collect(),
+                        shape: Shape::Plain,
                     });
                 }
             }
@@ -145,6 +178,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     calls.push(Call {
                         method: "eval",
                         value: vec![entry[0].span()],
+                        shape: Shape::Plain,
                     });
                 }
             }
@@ -163,6 +197,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     calls.push(Call {
                         method: "laws",
                         value: one.value.iter().map(Tok::span).collect(),
+                        shape: Shape::Plain,
                     });
                 }
             }
@@ -177,14 +212,44 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                 calls.push(Call {
                     method: "auto_laws",
                     value: spans(),
+                    shape: Shape::Plain,
                 });
+            }
+            "members" => {
+                let message = "members = takes a list like [billing, tech]";
+                let paths = list(arg, message)?;
+                if paths.is_empty() {
+                    return Err(Error::new(arg.value_span(), message));
+                }
+                for path in paths {
+                    if !is_path(&path) {
+                        return Err(Error::new(path[0].span(), message));
+                    }
+                    calls.push(Call {
+                        method: "members",
+                        value: path.iter().map(Tok::span).collect(),
+                        shape: Shape::Members("Coordinate"),
+                    });
+                }
+            }
+            "team" => team = Some((team_mode(arg)?, arg.key_span)),
+            "agents" | "delegates" | "handoffs" | "manages" => {
+                let (method, shape) = match arg.key.as_str() {
+                    "agents" => ("agent_tool", Shape::Invoke),
+                    "delegates" => ("delegates", Shape::InvokeList),
+                    "handoffs" => ("handoffs", Shape::InvokeList),
+                    _ => ("manages", Shape::InvokeList),
+                };
+                calls.extend(agent_paths(arg, method, shape)?);
             }
             _ => calls.push(Call {
                 method: method(&arg.key),
                 value: spans(),
+                shape: Shape::Plain,
             }),
         }
     }
+    set_team_mode(&mut calls, team)?;
     if !name_set && !valid_ident {
         return Err(Error::new(
             f.ident_span,
@@ -237,13 +302,94 @@ pub fn expand_agent(a: &AgentFn) -> Vec<Piece> {
     ))];
     for call in &a.calls {
         body.push(Piece::Code(format!(".{}", call.method)));
-        body.push(Piece::Group(
-            Delim::Paren,
-            call.value.iter().map(|s| Piece::Orig(*s)).collect(),
-        ));
+        let mut value: Vec<Piece> = call.value.iter().map(|s| Piece::Orig(*s)).collect();
+        if call.shape != Shape::Plain {
+            value.push(Piece::Code("()".into()));
+        }
+        if matches!(call.shape, Shape::InvokeList | Shape::Members(_)) {
+            value = vec![Piece::Group(Delim::Bracket, value)];
+        }
+        if let Shape::Members(mode) = call.shape {
+            value.push(Piece::Code(format!(", {p}::TeamMode::{mode}")));
+        }
+        body.push(Piece::Group(Delim::Paren, value));
     }
     out.push(Piece::Group(Delim::Brace, body));
     out
+}
+
+/// Parses an `agents`, `delegates`, `handoffs` or `manages` list of fn
+/// paths into one `method` call per path, in list order. Returns an error
+/// on a value that is not a list of paths, or on an empty list other than
+/// `agents`.
+fn agent_paths(arg: &Arg, method: &'static str, shape: Shape) -> Result<Vec<Call>, Error> {
+    let message = format!(
+        "{} = takes a list like [researcher, team::checker]",
+        arg.key
+    );
+    let paths = list(arg, &message)?;
+    if paths.is_empty() && arg.key != "agents" {
+        return Err(Error::new(arg.value_span(), message));
+    }
+    let mut calls = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !is_path(&path) {
+            return Err(Error::new(path[0].span(), message));
+        }
+        calls.push(Call {
+            method,
+            value: path.iter().map(Tok::span).collect(),
+            shape,
+        });
+    }
+    assert!(calls
+        .iter()
+        .all(|c| !c.value.is_empty() && c.shape != Shape::Plain));
+    Ok(calls)
+}
+
+/// Reads the `team` value, a string literal naming one team mode, and
+/// returns its `TeamMode` variant name. Returns the team error for any
+/// other value.
+fn team_mode(arg: &Arg) -> Result<&'static str, Error> {
+    let text = match arg.value.as_slice() {
+        [Tok::Lit(l, _)] if l.starts_with('"') && l.ends_with('"') && l.len() >= 2 => {
+            &l[1..l.len() - 1]
+        }
+        _ => return Err(Error::new(arg.value_span(), TEAM_MESSAGE)),
+    };
+    let Some((_, variant)) = TEAM_MODES.iter().find(|(name, _)| *name == text) else {
+        return Err(Error::new(arg.value_span(), TEAM_MESSAGE));
+    };
+    assert!(variant
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase()));
+    Ok(variant)
+}
+
+/// Gives every `members` call the mode of the `team` key, or keeps the
+/// default `Coordinate`. Returns an error for `team` without `members`.
+/// Calls of other keys are left as they are.
+fn set_team_mode(calls: &mut [Call], team: Option<(&'static str, SpanId)>) -> Result<(), Error> {
+    let has_members = calls.iter().any(|c| matches!(c.shape, Shape::Members(_)));
+    let Some((mode, span)) = team else {
+        return Ok(());
+    };
+    if !has_members {
+        return Err(Error::new(
+            span,
+            format!("{WHAT} key `team` needs members = [..]"),
+        ));
+    }
+    for call in calls
+        .iter_mut()
+        .filter(|c| matches!(c.shape, Shape::Members(_)))
+    {
+        call.shape = Shape::Members(mode);
+    }
+    assert!(calls.iter().any(|c| c.shape == Shape::Members(mode)));
+    Ok(())
 }
 
 fn method(key: &str) -> &'static str {
@@ -354,6 +500,124 @@ mod tests {
             ]
         );
         assert_eq!(a.calls[3].value.len(), 5);
+    }
+
+    #[test]
+    fn agents_and_delegates_call_each_path() {
+        let a = parse(
+            "agents = [researcher, team::checker], delegates = [writer, ::x::editor]",
+            &format!("{DOC}fn lead() {{}}"),
+        )
+        .unwrap();
+        assert_eq!(
+            methods(&a),
+            ["agent_tool", "agent_tool", "delegates", "delegates"]
+        );
+        let shapes: Vec<Shape> = a.calls.iter().map(|c| c.shape).collect();
+        assert_eq!(
+            shapes,
+            [
+                Shape::Invoke,
+                Shape::Invoke,
+                Shape::InvokeList,
+                Shape::InvokeList
+            ]
+        );
+        let lens: Vec<usize> = a.calls.iter().map(|c| c.value.len()).collect();
+        assert_eq!(lens, [1, 4, 1, 6]);
+        let item = lex(&format!("{DOC}fn lead() {{}}"));
+        let a = parse_agent(&lex("agents = [researcher], delegates = [writer]"), &item).unwrap();
+        let pieces = expand_agent(&a);
+        let Some(Piece::Group(Delim::Brace, body)) = pieces.last() else {
+            panic!("the body is the last piece");
+        };
+        let invoke = |p: &Piece| match p {
+            Piece::Group(Delim::Paren, inner) => {
+                matches!(inner.as_slice(), [Piece::Orig(_), Piece::Code(c)] if c == "()")
+            }
+            _ => false,
+        };
+        assert!(matches!(&body[1], Piece::Code(c) if c == ".agent_tool"));
+        assert!(invoke(&body[2]));
+        assert!(matches!(&body[3], Piece::Code(c) if c == ".delegates"));
+        let Piece::Group(Delim::Paren, outer) = &body[4] else {
+            panic!("delegates takes one argument");
+        };
+        let [Piece::Group(Delim::Bracket, list)] = outer.as_slice() else {
+            panic!("delegates takes an array");
+        };
+        assert!(invoke(&Piece::Group(Delim::Paren, list.clone())));
+    }
+
+    #[test]
+    fn handoffs_call_once_with_every_path() {
+        let item = format!("{DOC}fn desk() {{}}");
+        let a = parse_agent(&lex("handoffs = [billing, ::x::tech]"), &lex(&item)).unwrap();
+        assert_eq!(methods(&a), ["handoffs", "handoffs"]);
+        assert!(a.calls.iter().all(|c| c.shape == Shape::InvokeList));
+        assert_eq!(a.calls[1].value.len(), 6);
+        let message = "handoffs = takes a list like [researcher, team::checker]";
+        rejects("handoffs = []", &item, message);
+        rejects("handoffs = billing", &item, message);
+    }
+
+    #[test]
+    fn manages_calls_once_with_every_path() {
+        let item = lex(&format!("{DOC}fn boss() {{}}"));
+        let a = parse_agent(&lex("manages = [researcher, ::x::editor]"), &item).unwrap();
+        assert_eq!(methods(&a), ["manages", "manages"]);
+        assert!(a.calls.iter().all(|c| c.shape == Shape::InvokeList));
+        let message = "manages = takes a list like [researcher, team::checker]";
+        rejects("manages = []", &format!("{DOC}fn boss() {{}}"), message);
+        rejects("manages = boss", &format!("{DOC}fn boss() {{}}"), message);
+    }
+
+    #[test]
+    fn members_take_the_team_mode() {
+        let item = format!("{DOC}fn desk() {{}}");
+        let a = parse("members = [billing, ::x::tech], team = \"route\"", &item).unwrap();
+        assert_eq!(methods(&a), ["members", "members"]);
+        assert!(a.calls.iter().all(|c| c.shape == Shape::Members("Route")));
+        let a = parse("team = \"broadcast\", members = [billing]", &item).unwrap();
+        assert_eq!(a.calls[0].shape, Shape::Members("Broadcast"));
+        let a = parse("members = [billing]", &item).unwrap();
+        assert_eq!(a.calls[0].shape, Shape::Members("Coordinate"));
+        let pieces = expand_agent(&a);
+        let Some(Piece::Group(Delim::Brace, body)) = pieces.last() else {
+            panic!("the body is the last piece");
+        };
+        let Piece::Group(Delim::Paren, args) = &body[2] else {
+            panic!("members takes arguments");
+        };
+        assert!(matches!(&args[0], Piece::Group(Delim::Bracket, _)));
+        assert!(
+            matches!(&args[1], Piece::Code(c) if c == ", ::troupekit::__private::TeamMode::Coordinate")
+        );
+        let mode = "team = takes one of route, coordinate, collaborate, broadcast, tasks";
+        rejects("members = [a], team = \"solo\"", &item, mode);
+        rejects("members = [a], team = route", &item, mode);
+        rejects(
+            "team = \"route\"",
+            &item,
+            "#[agent] key `team` needs members = [..]",
+        );
+        let list = "members = takes a list like [billing, tech]";
+        rejects("members = billing", &item, list);
+        rejects("members = []", &item, list);
+        rejects("members = [\"billing\"]", &item, list);
+    }
+
+    #[test]
+    fn agents_and_delegates_take_paths() {
+        let item = format!("{DOC}fn lead() {{}}");
+        let agents = "agents = takes a list like [researcher, team::checker]";
+        let delegates = "delegates = takes a list like [researcher, team::checker]";
+        rejects("agents = researcher", &item, agents);
+        rejects("agents = [researcher()]", &item, agents);
+        rejects("delegates = writer", &item, delegates);
+        rejects("delegates = [\"writer\"]", &item, delegates);
+        rejects("delegates = []", &item, delegates);
+        assert!(parse("agents = []", &item).unwrap().calls.is_empty());
     }
 
     #[test]
@@ -506,7 +770,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_key() {
-        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, name, crate");
+        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, agents, delegates, handoffs, manages, members, team, name, crate");
     }
 
     #[test]
