@@ -14,6 +14,7 @@ import troupekit
 TOOL_OUTPUT = "noop-ok"
 ITERATIONS_MAX = 1_000_000
 TERMINAL = {"run_finished", "run_failed", "run_paused"}
+PASSES = {"quiet", "loaded"}
 
 
 class BenchModel(troupekit.HostModel):
@@ -131,12 +132,26 @@ class Ender(troupekit.EventListener):
             self.ended.release()
 
 
-def benchmark(name, count, label, body):
-    """Times `body` for `count` runs and prints one result line.
+def warmup_of(count):
+    """Untimed runs before each bench's samples: a tenth, at least one.
 
-    Input: the bench name, count, label and body. Output: the line, also
-    appended to `TROUPEKIT_BENCH_OUT` when set.
+    Input: the sample count. Output: the warm-up count; same rule as
+    `warmup_of` in `troupekit-ffi/examples/overhead.rs`.
     """
+    require(count > 0, "count must be positive")
+    warmup = max(count // 10, 1)
+    require(warmup <= count, "warm-up above the count")
+    return warmup
+
+
+def benchmark(name, count, label, first, body):
+    """Runs `body` untimed `warmup_of(count)` times, then times it.
+
+    Input: the bench name, count, label, first pass and body. Output: the
+    line, also appended to `TROUPEKIT_BENCH_OUT` when set.
+    """
+    for _ in range(warmup_of(count)):
+        body()
     samples = []
     for _ in range(count):
         start = time.perf_counter_ns()
@@ -149,7 +164,7 @@ def benchmark(name, count, label, body):
     p99 = samples[min(count * 99 // 100, count - 1)]
     line = (
         f"overhead lang=python bench={name} n={count}"
-        f" p50_ns={p50} p99_ns={p99} label={label}"
+        f" p50_ns={p50} p99_ns={p99} label={label} first={first}"
     )
     print(line, flush=True)
     path = os.environ.get("TROUPEKIT_BENCH_OUT")
@@ -182,11 +197,14 @@ def require(condition, message):
 def main():
     """Runs the four benches.
 
-    Input: `TROUPEKIT_BENCH_N`, `TROUPEKIT_BENCH_LABEL`. Output: one line each.
+    Input: `TROUPEKIT_BENCH_N`, `_LABEL`, `_FIRST`. Output: one line each.
     """
     count = int(os.environ.get("TROUPEKIT_BENCH_N", "10000"))
     require(0 < count <= ITERATIONS_MAX, "TROUPEKIT_BENCH_N out of bounds")
     label = os.environ.get("TROUPEKIT_BENCH_LABEL", "quiet")
+    first = os.environ.get("TROUPEKIT_BENCH_FIRST", "quiet")
+    require(first in PASSES, f"TROUPEKIT_BENCH_FIRST is {first}")
+    runs = count + warmup_of(count)
     counts = {"version": 0, "pull": 0, "listen": 0}
 
     def call_version():
@@ -197,8 +215,8 @@ def main():
         require(troupekit.version(), "empty version")
         counts["version"] += 1
 
-    benchmark("version", count, label, call_version)
-    require(counts["version"] == count, "version count")
+    benchmark("version", count, label, first, call_version)
+    require(counts["version"] == runs, "version count")
 
     tool = NoopTool()
     tooled = agent(BenchModel(), [tool])
@@ -210,8 +228,8 @@ def main():
         """
         require(tooled.run("go") == "done", "answer")
 
-    benchmark("tool_round_trip", count, label, run_tool)
-    require(tool.calls == count, f"tool ran {tool.calls} of {count}")
+    benchmark("tool_round_trip", count, label, first, run_tool)
+    require(tool.calls == runs, f"tool ran {tool.calls} of {runs}")
 
     plain = agent(PlainModel())
 
@@ -224,8 +242,8 @@ def main():
             pass
         counts["pull"] += 1
 
-    benchmark("event_pull", count, label, pull)
-    require(counts["pull"] == count, "pull count")
+    benchmark("event_pull", count, label, first, pull)
+    require(counts["pull"] == runs, "pull count")
 
     ender = Ender()
 
@@ -240,8 +258,8 @@ def main():
         require(ender.ended.acquire(timeout=30), "no terminal event in 30 s")
         counts["listen"] += 1
 
-    benchmark("event_listener", count, label, listen)
-    require(counts["listen"] == count, "listen count")
+    benchmark("event_listener", count, label, first, listen)
+    require(counts["listen"] == runs, "listen count")
 
 
 if __name__ == "__main__":

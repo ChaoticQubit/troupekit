@@ -163,10 +163,23 @@ impl Ender {
     }
 }
 
-/// Times `body` for `iterations` runs and prints one result line.
-/// Input: the bench name, the count and the body. Output: none; panics
-/// when the body did not run exactly `iterations` times.
+/// Untimed runs before each bench's samples: a tenth of the count, at
+/// least one. Input: the sample count. Output: the warm-up count.
+/// Every runner uses the same rule, so the passes compare.
+fn warmup_of(count: usize) -> usize {
+    assert!(count > 0);
+    let warmup = (count / 10).max(1);
+    assert!(warmup <= count);
+    warmup
+}
+
+/// Runs `body` untimed `warmup_of(iterations)` times, then times it for
+/// `iterations` runs and prints one result line. Input: the bench name,
+/// count, label and body. Output: none; panics on a wrong sample count.
 fn bench(name: &str, iterations: usize, label: &str, mut body: impl FnMut()) {
+    for _ in 0..warmup_of(iterations) {
+        body();
+    }
     let mut samples = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let start = Instant::now();
@@ -177,8 +190,10 @@ fn bench(name: &str, iterations: usize, label: &str, mut body: impl FnMut()) {
     samples.sort_unstable();
     let p50 = samples[iterations / 2];
     let p99 = samples[(iterations * 99 / 100).min(iterations - 1)];
+    let first = first_pass();
     println!(
-        "overhead lang=rust bench={name} n={iterations} p50_ns={p50} p99_ns={p99} label={label}"
+        "overhead lang=rust bench={name} n={iterations} p50_ns={p50} p99_ns={p99} \
+         label={label} first={first}"
     );
 }
 
@@ -213,8 +228,21 @@ fn iterations() -> usize {
     count
 }
 
+/// Reads `TROUPEKIT_BENCH_FIRST`, the label of the pass CI ran first.
+/// Input: the environment. Output: `quiet` or `loaded`; panics on any
+/// other value, so a result line always names its pass order.
+fn first_pass() -> String {
+    let first = std::env::var("TROUPEKIT_BENCH_FIRST").unwrap_or_else(|_| "quiet".to_owned());
+    assert!(
+        first == "quiet" || first == "loaded",
+        "TROUPEKIT_BENCH_FIRST is {first}"
+    );
+    first
+}
+
 fn main() {
     let count = iterations();
+    let runs = count + warmup_of(count);
     let label = std::env::var("TROUPEKIT_BENCH_LABEL").unwrap_or_else(|_| "quiet".to_owned());
     troupekit_ffi_core::init(RuntimeSettings::default()).expect("runtime init");
 
@@ -223,7 +251,7 @@ fn main() {
         assert!(!troupekit_ffi_core::version().is_empty());
         versions += 1;
     });
-    assert_eq!(versions, count);
+    assert_eq!(versions, runs);
 
     let tool = Arc::new(NoopTool {
         calls: AtomicUsize::new(0),
@@ -233,7 +261,7 @@ fn main() {
         let answer = block_on(agent.run("go".to_owned())).expect("tool run");
         assert_eq!(answer, "done");
     });
-    assert_eq!(tool.calls.load(Ordering::Relaxed), count);
+    assert_eq!(tool.calls.load(Ordering::Relaxed), runs);
 
     let plain = handle(Arc::new(PlainModel), Vec::new());
     let mut pulled = 0usize;
@@ -242,7 +270,7 @@ fn main() {
         while block_on(stream.next()).expect("next event").is_some() {}
         pulled += 1;
     });
-    assert_eq!(pulled, count);
+    assert_eq!(pulled, runs);
 
     let ender = Arc::new(Ender {
         done: Mutex::new(false),
@@ -256,5 +284,5 @@ fn main() {
         ender.wait();
         listened += 1;
     });
-    assert_eq!(listened, count);
+    assert_eq!(listened, runs);
 }

@@ -5,6 +5,16 @@ import XCTest
 let benchToolOutput = "noop-ok"
 let benchIterationsMax = 1_000_000
 
+/// Untimed runs before each bench's samples: a tenth of the count, at
+/// least one. Input: the sample count. Output: the warm-up count.
+/// Same rule as `warmup_of` in `troupekit-ffi/examples/overhead.rs`.
+func warmupOf(_ count: Int) -> Int {
+    precondition(count > 0)
+    let warmup = max(count / 10, 1)
+    precondition(warmup <= count)
+    return warmup
+}
+
 /// A host model that calls the no-op tool once per run, then answers.
 /// Input: none. Output: emulated tool calls (K8); stateless across runs,
 /// the same workload as `BenchModel` in `troupekit-ffi/examples/overhead.rs`.
@@ -86,12 +96,17 @@ final class Ender: EventListener, @unchecked Sendable {
     }
 }
 
-/// Times `body` for `count` runs and records one result line.
-/// Input: the bench name, count, label and body. Output: the line, also
-/// appended to `TROUPEKIT_BENCH_OUT` when set; fails unless `count` ran.
-func benchmark(_ name: String, _ count: Int, _ label: String, _ body: () async throws -> Void)
-    async throws -> String
-{
+/// Runs `body` untimed `warmupOf(count)` times, then times it for
+/// `count` runs and records one result line. Input: the bench name,
+/// count, label, first pass and body. Output: the line, also appended to
+/// `TROUPEKIT_BENCH_OUT` when set; fails unless `count` samples ran.
+func benchmark(
+    _ name: String, _ count: Int, _ label: String, _ first: String,
+    _ body: () async throws -> Void
+) async throws -> String {
+    for _ in 0..<warmupOf(count) {
+        try await body()
+    }
     var samples: [UInt64] = []
     samples.reserveCapacity(count)
     for _ in 0..<count {
@@ -104,7 +119,7 @@ func benchmark(_ name: String, _ count: Int, _ label: String, _ body: () async t
     let p50 = samples[count / 2]
     let p99 = samples[min(count * 99 / 100, count - 1)]
     let line = "overhead lang=swift bench=\(name) n=\(count)"
-        + " p50_ns=\(p50) p99_ns=\(p99) label=\(label)"
+        + " p50_ns=\(p50) p99_ns=\(p99) label=\(label) first=\(first)"
     print(line)
     if let path = ProcessInfo.processInfo.environment["TROUPEKIT_BENCH_OUT"] {
         let handle = FileHandle(forWritingAtPath: path) ?? {
@@ -127,42 +142,45 @@ final class OverheadTests: XCTestCase {
         let count = Int(environment["TROUPEKIT_BENCH_N"] ?? "10000") ?? 0
         XCTAssertTrue(count > 0 && count <= benchIterationsMax)
         let label = environment["TROUPEKIT_BENCH_LABEL"] ?? "quiet"
+        let first = environment["TROUPEKIT_BENCH_FIRST"] ?? "quiet"
+        XCTAssertTrue(["quiet", "loaded"].contains(first))
+        let runs = count + warmupOf(count)
 
         var versions = 0
-        _ = try await benchmark("version", count, label) {
+        _ = try await benchmark("version", count, label, first) {
             XCTAssertFalse(Troupekit.version().isEmpty)
             versions += 1
         }
-        XCTAssertEqual(versions, count)
+        XCTAssertEqual(versions, runs)
 
         let tool = NoopTool()
         let agent = try await AgentBuilder(name: "bench").instructions(text: "Benchmark.")
             .hostModel(model: BenchModel()).tool(tool: tool).build()
-        _ = try await benchmark("tool_round_trip", count, label) {
+        _ = try await benchmark("tool_round_trip", count, label, first) {
             let answer = try await agent.run(input: "go")
             XCTAssertEqual(answer, "done")
         }
-        XCTAssertEqual(tool.calls, count)
+        XCTAssertEqual(tool.calls, runs)
 
         let plain = try await AgentBuilder(name: "bench").instructions(text: "Benchmark.")
             .hostModel(model: PlainModel()).build()
         var pulled = 0
-        _ = try await benchmark("event_pull", count, label) {
+        _ = try await benchmark("event_pull", count, label, first) {
             let stream = try await plain.stream(input: "go")
             while try await stream.next() != nil {}
             pulled += 1
         }
-        XCTAssertEqual(pulled, count)
+        XCTAssertEqual(pulled, runs)
 
         let ender = Ender()
         var listened = 0
-        _ = try await benchmark("event_listener", count, label) {
+        _ = try await benchmark("event_listener", count, label, first) {
             let stream = try await plain.stream(input: "go")
             try stream.setListener(listener: ender)
             _ = try await stream.result()
             XCTAssertEqual(ender.ended.wait(timeout: .now() + 30), .success)
             listened += 1
         }
-        XCTAssertEqual(listened, count)
+        XCTAssertEqual(listened, runs)
     }
 }

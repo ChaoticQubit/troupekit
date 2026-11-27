@@ -27,6 +27,18 @@ const val ANSWER_REPLY = """{"answer": "done"}"""
 const val TOOL_CALL_REPLY = """{"tool": "noop", "arguments": {}}"""
 
 /**
+ * Untimed runs before each bench's samples: a tenth of the count, at
+ * least one. Input: the sample count. Output: the warm-up count.
+ * Same rule as `warmup_of` in `troupekit-ffi/examples/overhead.rs`.
+ */
+fun warmupOf(count: Int): Int {
+    check(count > 0)
+    val warmup = maxOf(count / 10, 1)
+    check(warmup <= count)
+    return warmup
+}
+
+/**
  * A host model that calls the no-op tool once per run, then answers.
  * Input: none. Output: emulated tool calls (K8); stateless across runs,
  * the same workload as `BenchModel` in `troupekit-ffi/examples/overhead.rs`.
@@ -100,11 +112,19 @@ class Ender : EventListener {
 }
 
 /**
- * Times `body` for `count` runs and records one result line.
- * Input: the bench name, count, label and body. Output: the line, also
- * appended to `TROUPEKIT_BENCH_OUT` when set; fails unless `count` ran.
+ * Runs `body` untimed `warmupOf(count)` times, then times it for `count`
+ * runs and records one result line. Input: the bench name, count, label,
+ * first pass and body. Output: the line, also appended to
+ * `TROUPEKIT_BENCH_OUT` when set.
  */
-suspend fun benchmark(name: String, count: Int, label: String, body: suspend () -> Unit): String {
+suspend fun benchmark(
+    name: String,
+    count: Int,
+    label: String,
+    first: String,
+    body: suspend () -> Unit,
+): String {
+    repeat(warmupOf(count)) { body() }
     val samples = LongArray(count)
     for (index in 0 until count) {
         val start = System.nanoTime()
@@ -114,7 +134,8 @@ suspend fun benchmark(name: String, count: Int, label: String, body: suspend () 
     samples.sort()
     val p50 = samples[count / 2]
     val p99 = samples[minOf(count * 99 / 100, count - 1)]
-    val line = "overhead lang=kotlin bench=$name n=$count p50_ns=$p50 p99_ns=$p99 label=$label"
+    val line = "overhead lang=kotlin bench=$name n=$count p50_ns=$p50 p99_ns=$p99 " +
+        "label=$label first=$first"
     println(line)
     System.getenv("TROUPEKIT_BENCH_OUT")?.let { File(it).appendText(line + "\n") }
     return line
@@ -132,41 +153,44 @@ class OverheadTest {
         val count = (System.getenv("TROUPEKIT_BENCH_N") ?: "10000").toInt()
         assertTrue(count in 1..BENCH_ITERATIONS_MAX)
         val label = System.getenv("TROUPEKIT_BENCH_LABEL") ?: "quiet"
+        val first = System.getenv("TROUPEKIT_BENCH_FIRST") ?: "quiet"
+        assertTrue(first in setOf("quiet", "loaded"))
+        val runs = count + warmupOf(count)
 
         var versions = 0
-        benchmark("version", count, label) {
+        benchmark("version", count, label, first) {
             assertTrue(version().isNotEmpty())
             versions += 1
         }
-        assertEquals(count, versions)
+        assertEquals(runs, versions)
 
         val tool = NoopTool()
         val agent = AgentBuilder("bench").instructions("Benchmark.").hostModel(BenchModel())
             .tool(tool).build()
-        benchmark("tool_round_trip", count, label) { assertEquals("done", agent.run("go")) }
-        assertEquals(count, tool.calls.get())
+        benchmark("tool_round_trip", count, label, first) { assertEquals("done", agent.run("go")) }
+        assertEquals(runs, tool.calls.get())
 
         val plain = AgentBuilder("bench").instructions("Benchmark.").hostModel(PlainModel())
             .build()
         var pulled = 0
-        benchmark("event_pull", count, label) {
+        benchmark("event_pull", count, label, first) {
             val stream = plain.stream("go")
             while (stream.next() != null) {
                 continue
             }
             pulled += 1
         }
-        assertEquals(count, pulled)
+        assertEquals(runs, pulled)
 
         val ender = Ender()
         var listened = 0
-        benchmark("event_listener", count, label) {
+        benchmark("event_listener", count, label, first) {
             val stream = plain.stream("go")
             stream.setListener(ender)
             stream.result()
             assertTrue(ender.ended.tryAcquire(30, TimeUnit.SECONDS))
             listened += 1
         }
-        assertEquals(count, listened)
+        assertEquals(runs, listened)
     }
 }
