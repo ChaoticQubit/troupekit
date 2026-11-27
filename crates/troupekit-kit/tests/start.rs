@@ -249,3 +249,48 @@ async fn exhausted_checkpoint_is_refused_before_another_step() {
     );
     assert_eq!(model.calls(), 2);
 }
+
+#[derive(Default)]
+struct FailingSaves {
+    seen: Mutex<Vec<RunId>>,
+}
+
+#[async_trait]
+impl CheckpointStore for FailingSaves {
+    async fn save(&self, cp: Checkpoint) -> Result<(), CoreError> {
+        self.seen.lock().unwrap().push(cp.run_id);
+        Err(CoreError::InvalidMessage("disk full".into()))
+    }
+
+    async fn latest(&self, _run_id: RunId) -> Result<Option<Checkpoint>, CoreError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn save_failure_during_run_keeps_the_run_id() {
+    let store = Arc::new(FailingSaves::default());
+    let built = Agent::new("saver")
+        .instructions("Answer.")
+        .model("fake/m")
+        .model_client(counting_model())
+        .checkpoints(Storage::custom(store.clone()))
+        .build()
+        .await
+        .unwrap();
+    let err = built.run("hello").await.unwrap_err();
+    assert_in_run(err, &store);
+    let err = built.run_with("hello").await.unwrap_err();
+    assert_in_run(err, &store);
+}
+
+fn assert_in_run(err: KitError, store: &FailingSaves) {
+    let seen = *store.seen.lock().unwrap().last().unwrap();
+    match err {
+        KitError::InRun { run_id, source } => {
+            assert_eq!(run_id, seen);
+            assert!(!matches!(*source, KitError::InRun { .. }), "{source:?}");
+        }
+        other => panic!("expected InRun, got {other:?}"),
+    }
+}

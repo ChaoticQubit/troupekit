@@ -138,3 +138,32 @@ async fn stream_input_over_cap_is_refused() {
     let err = handle.stream("x".repeat(cap + 1)).await.unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
 }
+
+#[tokio::test]
+async fn explicit_laws_are_unsupported_until_enforced() {
+    let err = calc().law("never refund".into()).build().await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    let err = calc()
+        .laws("laws/LAWS.bend".into())
+        .build()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    assert!(!err.message.contains(".."), "{err}");
+}
+
+#[tokio::test]
+async fn law_input_checks_run_before_unsupported() {
+    let cap = RuntimeSettings::default().max_input_bytes;
+    let err = calc().law("x".repeat(cap + 1)).build().await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    let err = calc().laws("x".repeat(cap + 1)).build().await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    let err = calc()
+        .laws("../laws/LAWS.bend".into())
+        .build()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Config);
+    assert!(err.message.contains(".."), "{err}");
+}

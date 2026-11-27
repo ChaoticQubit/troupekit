@@ -1,4 +1,4 @@
-use crate::agent::{parse_run_id, AgentBuilder};
+use crate::agent::{parse_run_id, refuse_law, AgentBuilder};
 use crate::error::{ErrorCode, FfiError};
 use crate::host::{guarded, host_tool, HostTool};
 use crate::records::{GraphResult, Progress};
@@ -110,24 +110,20 @@ impl GraphBuilder {
         self.update(|graph| Ok(graph.retries(retries)))
     }
 
-    /// Adds the law file at `path`, a `.bend` file checked at build.
-    /// The path must not contain `..`.
+    /// Refuses a law file: no run enforces explicit laws yet, so `build`
+    /// returns `Unsupported`. An over-cap path is `InvalidArgument` and a
+    /// path with `..` is `Config`, both checked first.
     /// Output: the same builder, for chaining.
     pub fn laws(self: &Arc<Self>, path: String) -> Arc<Self> {
-        self.update(|graph| {
-            check_input("laws", &path)?;
-            Ok(graph.laws(path))
-        })
+        self.update(|_| Err(refuse_law("laws", &path, true)))
     }
 
-    /// Adds one law as text, checked at build.
-    /// Laws guard every node.
+    /// Refuses a law given as text: no run enforces explicit laws yet,
+    /// so `build` returns `Unsupported`. Over-cap text is
+    /// `InvalidArgument`, checked first.
     /// Output: the same builder, for chaining.
     pub fn law(self: &Arc<Self>, text: String) -> Arc<Self> {
-        self.update(|graph| {
-            check_input("law", &text)?;
-            Ok(graph.law(text))
-        })
+        self.update(|_| Err(refuse_law("law", &text, false)))
     }
 
     /// Turns the built-in laws on or off.

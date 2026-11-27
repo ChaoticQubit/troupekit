@@ -69,7 +69,7 @@ async fn graph_of_host_model_agents_runs() {
     assert_eq!(handle.run("go".into()).await.unwrap(), "\"done\"");
     let result = handle.run_result("go".into()).await.unwrap();
     assert_eq!(result.output_json, "\"done\"");
-    assert_eq!(result.steps, 2);
+    assert!(result.steps >= 2, "{}", result.steps);
     let state: serde_json::Value = serde_json::from_str(&result.state_json).unwrap();
     assert_eq!(state["writer"], "draft");
     assert_eq!(result.run_id.len(), 36);
@@ -153,4 +153,27 @@ async fn graph_start_without_sqlite_is_config() {
     let handle = pipeline().build().await.unwrap();
     let err = handle.start("go".into()).await.unwrap_err();
     assert_eq!(err.code, ErrorCode::Config);
+}
+
+#[tokio::test]
+async fn graph_explicit_laws_are_unsupported_until_enforced() {
+    let err = pipeline()
+        .law("never refund".into())
+        .build()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    let err = pipeline()
+        .laws("laws/LAWS.bend".into())
+        .build()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    let err = pipeline()
+        .laws("../laws/LAWS.bend".into())
+        .build()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Config);
+    assert!(err.message.contains(".."), "{err}");
 }

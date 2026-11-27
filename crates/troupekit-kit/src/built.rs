@@ -282,7 +282,10 @@ impl BuiltAgent {
         }
         self.refuse_exhausted(run)?;
         loop {
-            match drive(run, io, store).await? {
+            let step = drive(run, io, store)
+                .await
+                .map_err(|e| KitError::in_run(run.run_id(), e.into()))?;
+            match step {
                 StepOutcome::Done(output) => return Ok(outcome(run, output)),
                 StepOutcome::Retry {
                     error,
