@@ -130,28 +130,47 @@ pub(crate) fn value(name: &str, value: Value, policy: &Policy<'_>) -> (Clean, bo
 }
 
 /// Returns `url` with only scheme, host, port and path: user info, query
-/// and fragment are dropped. Like URL parsers, any run of `/` or `\\`
-/// after `scheme:` leads to the authority, which ends at `/` or `\\`.
-/// Use it for every URL written to a trace. Output: the reduced URL.
+/// and fragment are dropped. The text is first cleaned as URL parsers do
+/// (C0 controls and spaces trimmed at both ends, tab, LF and CR removed),
+/// then reduced until a further pass changes nothing, so no reading of
+/// the result holds userinfo. Use it for every URL written to a trace.
 pub fn url_for_trace(url: &str) -> String {
+    let mut out: String = url
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    loop {
+        let next = reduce_once(&out);
+        assert!(next.len() <= out.len() + 1);
+        if next == out {
+            break;
+        }
+        out = next;
+    }
+    assert_eq!(reduce_once(&out), out);
+    assert!(!out.contains(['?', '#', '\t', '\n', '\r']));
+    out
+}
+
+/// One reduction step of `url_for_trace` on cleaned text: drops query and
+/// fragment, skips any run of `/` or `\\` before the authority, ends it at
+/// `/` or `\\` and drops it through its last `@`. Output: the new text.
+fn reduce_once(url: &str) -> String {
     let end = url.find(['?', '#']).unwrap_or(url.len());
     let url = &url[..end];
-    let (scheme, rest) = match split_scheme(url) {
-        Some((scheme, rest)) => (scheme, rest.trim_start_matches(['/', '\\'])),
-        None => ("", url),
+    let (scheme, rest) = split_scheme(url).unwrap_or(("", url));
+    let after = rest.trim_start_matches(['/', '\\']);
+    let lead = match scheme {
+        "" => &rest[..rest.len() - after.len()],
+        _ => "//",
     };
-    let authority_end = rest.find(['/', '\\']).unwrap_or(rest.len());
-    let (authority, path) = rest.split_at(authority_end);
+    let authority_end = after.find(['/', '\\']).unwrap_or(after.len());
+    let (authority, path) = after.split_at(authority_end);
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
-    let out = match scheme {
-        "" => format!("{host}{path}"),
-        scheme => format!("{scheme}//{host}{path}"),
-    };
-    assert!(!host.contains('@'));
-    assert!(!out.contains(['?', '#']));
-    out
+    format!("{scheme}{lead}{host}{path}")
 }
 
 /// Splits `url` into `scheme:` and the rest when it starts with a scheme
