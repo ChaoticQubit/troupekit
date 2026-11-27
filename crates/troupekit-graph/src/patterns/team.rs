@@ -12,9 +12,10 @@ const BRIEF_PROMPT: &str = "Write a short brief of the request for your team.";
 const SYNTHESIZE_PROMPT: &str = "Combine your team's answers into one final answer.";
 const COORDINATE_PROMPT: &str =
     "Hand parts of the request to your coworkers as needed, then give the final answer.";
-const TASKS_PROMPT: &str = "Work through the request with your coworkers. List the tasks \
-    still open in `tasks`. Set `done` to true and give the final answer in `answer` once \
-    nothing is left.";
+const TASKS_PROMPT: &str = "Work through the request with your coworkers. `results` holds \
+    what earlier passes finished. Put what this pass finished in `results` and the tasks still \
+    open in `tasks`. Set `done` to true and give the final answer in `answer` once nothing is \
+    left.";
 const STEPS_PER_ITERATION: i64 = 16;
 
 #[derive(Deserialize)]
@@ -320,9 +321,10 @@ fn coordinate(file: &str, team: &Team) -> Result<Table, WorkflowError> {
 }
 
 /// Compiles `tasks`: the leader delegates to the members and replies with
-/// `done`, the open `tasks` and its `answer`, set to the state keys `done`,
-/// `tasks` and `output`. A switch on `done` ends the run or loops back to
-/// the leader, which reads the open tasks; `max_iterations` sets max_steps.
+/// `done`, the open `tasks`, this pass's `results` and its `answer`, set to
+/// `done`, `tasks`, `results` (extended pass by pass) and `output`. A switch
+/// on `done` ends the run or loops back to the leader, which reads the open
+/// tasks and every earlier result; `max_iterations` sets max_steps.
 fn tasks(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     let lead = node_id(&team.leader);
     let (mut t, mut reads) = start(file, team, &lead)?;
@@ -330,17 +332,22 @@ fn tasks(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     t.max_steps((team.max_iterations + 1) * STEPS_PER_ITERATION);
     t.state("team.mode", "done", Value::String("bool".into()))?;
     t.state("team.mode", "tasks", Value::String("list?".into()))?;
+    t.state("team.mode", "results", Value::String("list?".into()))?;
+    t.reducer("results", "extend");
     reads.insert(1, "tasks".to_string());
+    reads.insert(2, "results".to_string());
     let mut leader = agent(&lead, &team.leader, Some(TASKS_PROMPT), &reads, None);
     leader.insert("delegates".into(), strings(&team.members));
     let mut fields = Table::new();
     fields.insert("done".into(), Value::String("bool".into()));
     fields.insert("tasks".into(), Value::String("list<string>".into()));
+    fields.insert("results".into(), Value::String("list<string>".into()));
     fields.insert("answer".into(), Value::String("string".into()));
     leader.insert("fields".into(), Value::Table(fields));
     let mut sets = Table::new();
     sets.insert("done".into(), Value::String("done".into()));
     sets.insert("tasks".into(), Value::String("tasks".into()));
+    sets.insert("results".into(), Value::String("results".into()));
     sets.insert("answer".into(), Value::String("output".into()));
     leader.insert("sets".into(), Value::Table(sets));
     t.node("team.leader", leader)?;
@@ -354,6 +361,7 @@ fn tasks(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     t.routed("check_done", &lead, "false");
     t.end("team")?;
     assert_eq!(reads[1], "tasks", "the leader reads the open tasks");
+    assert_eq!(reads[2], "results", "the leader reads earlier results");
     Ok(t.finish())
 }
 

@@ -456,14 +456,21 @@ async fn manages_runs_hierarchical_crew() {
 async fn members_tasks_loops_until_done() {
     let passes = Arc::new(AtomicUsize::new(0));
     let count = passes.clone();
-    let leader = Arc::new(FnModel::new("fake/m", move |_req| {
+    let seen = Arc::new(std::sync::Mutex::new(String::new()));
+    let saw = seen.clone();
+    let leader = Arc::new(FnModel::new("fake/m", move |req| {
         if count.fetch_add(1, Ordering::SeqCst) == 0 {
             text_reply(
-                r#"{"done":false,"tasks":["check the bill"],"answer":""}"#,
+                r#"{"done":false,"tasks":["check the tax"],"results":["the bill is 40 dollars"],"answer":""}"#,
                 10,
             )
         } else {
-            text_reply(r#"{"done":true,"tasks":[],"answer":"All settled."}"#, 10)
+            let asked: String = req.messages.iter().map(|m| m.text_content()).collect();
+            *saw.lock().unwrap() = asked;
+            text_reply(
+                r#"{"done":true,"tasks":[],"results":["the tax is 4 dollars"],"answer":"All settled."}"#,
+                10,
+            )
         }
     }));
     let member = Arc::new(AtomicUsize::new(0));
@@ -479,8 +486,14 @@ async fn members_tasks_loops_until_done() {
     assert_eq!(out.text(), "All settled.");
     assert_eq!(passes.load(Ordering::SeqCst), 2);
     assert_eq!(member.load(Ordering::SeqCst), 0);
+    let second = seen.lock().unwrap().clone();
+    assert!(second.contains("the bill is 40 dollars"), "{second}");
+    assert!(second.contains("check the tax"), "{second}");
     let stuck = Arc::new(FnModel::new("fake/m", |_req| {
-        text_reply(r#"{"done":false,"tasks":["more"],"answer":""}"#, 10)
+        text_reply(
+            r#"{"done":false,"tasks":["more"],"results":[],"answer":""}"#,
+            10,
+        )
     }));
     let looping = team_agent("lead", stuck)
         .members(

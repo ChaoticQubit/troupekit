@@ -7,16 +7,20 @@ input = "string"
 output = "string"
 done = "bool"
 tasks = "list?"
+results = "list?"
+
+[reducers]
+results = "extend"
 
 [[nodes]]
 id = "lead"
 kind = "agent"
 persona = "lead"
-prompt = "Work through the request with your coworkers. List the tasks still open in `tasks`. Set `done` to true and give the final answer in `answer` once nothing is left."
-reads = ["input", "tasks"]
+prompt = "Work through the request with your coworkers. `results` holds what earlier passes finished. Put what this pass finished in `results` and the tasks still open in `tasks`. Set `done` to true and give the final answer in `answer` once nothing is left."
+reads = ["input", "tasks", "results"]
 delegates = ["billing", "tech"]
-fields = { done = "bool", tasks = "list<string>", answer = "string" }
-sets = { done = "done", tasks = "tasks", answer = "output" }
+fields = { done = "bool", tasks = "list<string>", results = "list<string>", answer = "string" }
+sets = { done = "done", tasks = "tasks", results = "results", answer = "output" }
 
 [[nodes]]
 id = "check_done"
