@@ -91,8 +91,9 @@ pub trait HostEmbedder: Send + Sync {
 }
 
 /// An HTTP client in the host language, used only for model and
-/// embedding calls to the resolved vendor. The host reports the
-/// response through `HttpSink`: `head` once, then `chunk` per part.
+/// embedding calls to the resolved vendor. The host must turn off
+/// redirect following and report a 3xx as received; troupekit refuses
+/// it. The response goes through `HttpSink`: `head`, then `chunk`s.
 pub trait HostTransport: Send + Sync {
     /// Sends `request` and reports the response to `sink` before it
     /// returns. Output: `Ok` once the body is done, or a `HostError`
@@ -204,9 +205,9 @@ impl HttpSink {
         state.chunks = None;
     }
 
-    /// Reports the response head: `status`, the final `url` after any
-    /// redirect, and the `headers`. Call it once, before any chunk;
-    /// a second call is ignored. Output: none.
+    /// Reports the response head: `status`, the `url` it came from (the
+    /// request URL, since redirects are never followed), and `headers`.
+    /// Call it once, before any chunk; a second is ignored. Output: none.
     pub fn head(&self, status: u16, url: String, headers: Vec<HostHeader>) {
         let sender = self
             .state

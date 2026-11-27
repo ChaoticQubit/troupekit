@@ -207,3 +207,21 @@ async fn transport_ends_body_when_host_keeps_the_sink() {
     assert_eq!(body.unwrap(), b"only".to_vec());
     assert!(kept.lock().unwrap().is_some());
 }
+
+#[tokio::test]
+async fn transport_refuses_a_reported_redirect() {
+    for status in [301u16, 302, 303, 307, 308] {
+        let host = host(Box::new(move |request, sink| {
+            sink.head(
+                status,
+                request.url,
+                vec![HostHeader::new("location", "https://evil.test/steal")],
+            );
+            Ok(())
+        }));
+        let transport = wrap_transport(host.clone(), BASE, false, 1024);
+        let err = body_of(&*transport, &format!("{BASE}/chat/completions")).await;
+        assert_eq!(err.unwrap_err(), HttpErrorKind::Rejected, "{status}");
+        assert_eq!(host.calls.lock().unwrap().len(), 1);
+    }
+}

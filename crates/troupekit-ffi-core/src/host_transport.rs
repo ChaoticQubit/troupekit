@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use troupekit_core::http::{Body, HttpError, HttpErrorKind, HttpRequest, HttpResponse, Transport};
 
 pub(crate) const CHUNK_QUEUE: usize = 64;
+const REDIRECTS: [u16; 5] = [301, 302, 303, 307, 308];
 
 type Sent = Result<Result<(), HostError>, Box<dyn Any + Send>>;
 
@@ -22,8 +23,8 @@ pub(crate) struct Head {
 
 /// Wraps host transport `host` as a core transport for one vendor: it
 /// sends only to URLs under `base`, plain `http` only when `plain_ok`,
-/// refuses a final URL on another origin and ends a body past `cap`
-/// bytes with `Rejected`. Output: the transport.
+/// refuses a reported redirect and a final URL on another origin, and
+/// ends a body past `cap` bytes with `Rejected`. Output: the transport.
 pub(crate) fn wrap_transport(
     host: Arc<dyn HostTransport>,
     base: &str,
@@ -100,6 +101,16 @@ impl Transport for HostTransportAdapter {
             sink.close();
             return Err(HttpError::new(HttpErrorKind::Network, no_head(finished)));
         };
+        if REDIRECTS.contains(&head.status) {
+            sink.close();
+            return Err(HttpError::new(
+                HttpErrorKind::Rejected,
+                format!(
+                    "host transport reported redirect {}; troupekit never follows one",
+                    head.status
+                ),
+            ));
+        }
         if origin(&head.url) != asked {
             sink.close();
             return Err(HttpError::new(
