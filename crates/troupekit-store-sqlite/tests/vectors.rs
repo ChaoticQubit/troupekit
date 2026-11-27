@@ -738,3 +738,26 @@ async fn query_term_and_length_caps() {
     store_error(vectors.search_text("one", 1, &filter(&[("a", "1"), ("b", "2")])).await, "max_meta_pairs");
     store_error(store.vectors("docs", VectorSettings::new(DIMS).with_max_query_terms(0)).await, "max_query_terms");
 }
+
+#[tokio::test]
+async fn secure_delete_off_cannot_lower_a_file_that_has_it_on() {
+    let t = temp();
+    let on = SqliteStore::open(&t.path).await.unwrap();
+    on.vectors("docs", VectorSettings::new(DIMS)).await.unwrap();
+    let off = SqliteStore::builder(&t.path).secure_delete(false).open().await.unwrap();
+    let err = off.vectors("docs", VectorSettings::new(DIMS)).await.unwrap_err();
+    assert!(matches!(&err, CoreError::Store(m) if m.contains("secure-delete")), "{err:?}");
+    on.vectors("docs", VectorSettings::new(DIMS)).await.unwrap();
+}
+
+#[tokio::test]
+async fn secure_delete_on_may_raise_a_file_opened_with_it_off() {
+    let t = temp();
+    let off = SqliteStore::builder(&t.path).secure_delete(false).open().await.unwrap();
+    off.vectors("docs", VectorSettings::new(DIMS)).await.unwrap();
+    off.vectors("docs", VectorSettings::new(DIMS)).await.unwrap();
+    let on = SqliteStore::open(&t.path).await.unwrap();
+    on.vectors("docs", VectorSettings::new(DIMS)).await.unwrap();
+    let err = off.vectors("docs", VectorSettings::new(DIMS)).await.unwrap_err();
+    assert!(matches!(&err, CoreError::Store(m) if m.contains("secure-delete")), "{err:?}");
+}

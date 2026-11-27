@@ -129,7 +129,9 @@ impl SqliteStoreBuilder {
     /// the connection and FTS5 `secure-delete` on the keyword index, so a
     /// removed chunk's text and vector leave the file. Cost: every delete
     /// writes zeros over freed space, more disk writes and slower deletes.
-    /// Input: on or off. Output: the builder. Default on.
+    /// The FTS5 option lives in the file: off is refused at `vectors` once
+    /// any handle turned it on. Input: on or off. Output: the builder.
+    /// Default on.
     pub fn secure_delete(mut self, on: bool) -> Self {
         self.secure_delete = on;
         self
