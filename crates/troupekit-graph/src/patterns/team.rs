@@ -323,8 +323,8 @@ fn coordinate(file: &str, team: &Team) -> Result<Table, WorkflowError> {
 /// Compiles `tasks` as `max_iterations` leader passes with no edge back.
 /// Each pass delegates, reads `tasks` and every earlier `results`, and sets
 /// `done`, `tasks`, `results` (extended by its `finished`) and `output`.
-/// A switch on `done` ends the run or enters the next pass; the last pass
-/// ends it, leaving `done` false when the leader is not done.
+/// A switch on `done` ends the run or enters the next pass. The last pass
+/// ends the run as done; `done` false then means the pass cap was reached.
 fn tasks(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     let lead = node_id(&team.leader);
     let (mut t, mut reads) = start(file, team, &lead)?;
