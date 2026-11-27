@@ -169,7 +169,7 @@ jobs:
           echo "TROUPEKIT_TEST_EMBED_GGUF=$path" >> "$GITHUB_ENV"
       - name: embed test
         if: steps.gate.outputs.run == 'true'
-        run: cargo test -p troupekit-local --features llama,embed --locked --test llama -- --exact pooled_embedding_gguf_gives_meaningful_vectors
+        run: cargo test -p troupekit-local --features llama,embed --locked --test main -- --exact llama::pooled_embedding_gguf_gives_meaningful_vectors
 
   cipher:
     name: cipher ${{ matrix.feature }}
