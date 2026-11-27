@@ -368,3 +368,20 @@ async fn graph_stream_with_checks_capacity() {
     let err = built.stream_with("hi", bad).await.unwrap_err();
     assert!(err.to_string().contains("capacity"), "{err}");
 }
+
+#[tokio::test]
+async fn dropped_finish_future_aborts_the_run() {
+    let built = chunky(1, Duration::from_secs(600)).build().await.unwrap();
+    let mut stream = built.stream("hi").await.unwrap();
+    let waited = tokio::time::timeout(Duration::from_millis(50), stream.finish()).await;
+    assert!(waited.is_err(), "slow run finished");
+    let events = tokio::time::timeout(Duration::from_secs(10), drain(&mut stream))
+        .await
+        .expect("run kept going after its finish future was dropped");
+    assert!(events.len() < 10);
+    let err = stream.finish().await.unwrap_err();
+    assert!(
+        matches!(err, troupekit::KitError::Cancelled { .. }),
+        "{err:?}"
+    );
+}
