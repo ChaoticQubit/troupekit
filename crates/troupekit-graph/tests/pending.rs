@@ -741,3 +741,28 @@ async fn edit_state_waits_for_recovered_branch_results() {
     );
     assert_eq!(state["x"], json!("a1"));
 }
+
+#[tokio::test]
+async fn raise_resume_and_retry_wait_for_recovered_branch_results() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let io = io(&gates, model());
+    let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    let pending = |r: Result<(), GraphError>| {
+        assert!(
+            matches!(&r, Err(GraphError::Resume(m)) if m.contains("recovered")),
+            "{r:?}"
+        );
+    };
+    pending(run.raise_budget(Limits::default()));
+    pending(run.resume("a", json!("answer")));
+    pending(run.retry(None));
+    gates.open("b");
+    let state = done(drive(&mut run, &io, &store).await);
+    assert_eq!(
+        gates.calls("a").len(),
+        1,
+        "a's kept result is applied, not re-run"
+    );
+    assert_eq!(state["x"], json!("a1"));
+}

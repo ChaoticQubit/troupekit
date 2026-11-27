@@ -596,8 +596,9 @@ impl GraphRun {
     /// Continues a stopped or retryably failed run where it stopped, with
     /// active time back at zero and `time_limit_ms` as its new limit, and
     /// queues it. A failed tool call re-runs with its first idempotency key.
-    /// Returns `Resume` when the run is not `retryable`.
+    /// Returns `Resume` when it is not `retryable` or has recovered results pending.
     pub fn retry(&mut self, time_limit_ms: Option<u64>) -> Result<(), GraphError> {
+        self.no_pending_marks()?;
         if !self.retryable() {
             return Err(GraphError::Resume(
                 "only a stopped run or one failed on a transient error can be retried".into(),
@@ -812,9 +813,7 @@ impl GraphRun {
         as_node: Option<&str>,
     ) -> Result<(), GraphError> {
         let bad = |m: String| Err(GraphError::Resume(m));
-        if self.marks.as_ref().is_some_and(|m| m.step == self.steps + 1 && !m.done.is_empty()) {
-            return bad("recovered branch results of the next step are pending; step the run once before editing".into());
-        }
+        self.no_pending_marks()?;
         assert_ne!(self.status, GraphStatus::Running, "state is edited between steps");
         if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
             return bad("the run is finished".into());
@@ -974,8 +973,10 @@ impl GraphRun {
 
     /// Answers human node `node` with `answer`, checked against the node's
     /// `writes` type, and queues the run; the branch moves on at the next
-    /// step. Returns `Resume` when no branch waits there or it does not fit.
+    /// step. Returns `Resume` when no branch waits there, it does not fit,
+    /// or recovered results of the next step are pending.
     pub fn resume(&mut self, node: &str, answer: Value) -> Result<(), GraphError> {
+        self.no_pending_marks()?;
         let bad = |m: String| GraphError::Resume(m);
         if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
             return Err(bad("the run is finished".into()));
@@ -1005,8 +1006,10 @@ impl GraphRun {
 
     /// Replaces the graph limits with `limits` and resumes every branch
     /// paused on its budget with the new remaining run budget, then queues
-    /// the run. Returns `Resume` when the run is finished.
+    /// the run. Returns `Resume` when the run is finished or recovered
+    /// results of the next step are pending.
     pub fn raise_budget(&mut self, limits: Limits) -> Result<(), GraphError> {
+        self.no_pending_marks()?;
         if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
             return Err(GraphError::Resume("the run is finished".into()));
         }
@@ -1295,6 +1298,15 @@ impl GraphRun {
         self.seq = seq.load(Ordering::SeqCst);
         check_seq_range(first_seq, self.seq);
         Ok(outcome)
+    }
+
+    fn no_pending_marks(&self) -> Result<(), GraphError> {
+        if self.marks.as_ref().is_some_and(|m| m.step == self.steps + 1 && !m.done.is_empty()) {
+            return Err(GraphError::Resume(
+                "recovered branch results of the next step are pending; step the run once first".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn queue(&mut self) {
