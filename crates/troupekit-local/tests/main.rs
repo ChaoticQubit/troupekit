@@ -13,3 +13,6 @@ mod llama;
 mod model;
 mod sha256;
 mod tools;
+mod width;
+#[path = "../src/llama/width.rs"]
+mod width_src;

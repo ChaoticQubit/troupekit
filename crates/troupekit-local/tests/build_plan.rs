@@ -237,3 +237,28 @@ fn linux_cross_build_uses_the_target_toolchain() {
         .iter()
         .any(|a| a.starts_with("-DCMAKE_SYSTEM_NAME")));
 }
+
+#[test]
+fn every_unix_target_links_a_cpp_runtime() {
+    for (os, runtime) in [
+        ("linux", "stdc++"),
+        ("freebsd", "c++"),
+        ("openbsd", "c++"),
+        ("netbsd", "stdc++"),
+    ] {
+        let mut p = probe();
+        p.target_os = os.into();
+        p.target_arch = "x86_64".into();
+        match decide(&p).expect("plan") {
+            Plan::Build { link, .. } => {
+                assert!(
+                    link.system_libs.contains(&runtime.to_string()),
+                    "{os}: {:?}",
+                    link.system_libs
+                );
+                assert!(link.system_libs.contains(&"pthread".to_string()), "{os}");
+            }
+            other => panic!("{os}: expected a build, got {other:?}"),
+        }
+    }
+}

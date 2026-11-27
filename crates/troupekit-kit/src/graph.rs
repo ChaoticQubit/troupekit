@@ -23,9 +23,9 @@ use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::secret::Secret;
 use troupekit_core::store::CheckpointStore;
-use troupekit_trace::Trace;
 use troupekit_graph::{GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSpec};
+use troupekit_trace::Trace;
 
 const MAX_NODES: usize = 64;
 const MAX_GRAPH_RETRIES: u32 = 50;
@@ -125,9 +125,10 @@ impl Graph {
         self
     }
 
-    /// Sets the usage ledger that period limits (`scope`, `user`) count in.
-    /// Defaults to a fresh in-memory ledger per build; pass a durable one
-    /// so period caps survive rebuilds and restarts.
+    /// Sets the usage ledger that period limits (`scope`, `user`) and the
+    /// agent nodes' route daily cloud spend count in. Defaults to a fresh
+    /// in-memory ledger per build; pass a durable one so caps survive
+    /// rebuilds and restarts.
     pub fn ledger(mut self, ledger: Arc<dyn UsageLedger>) -> Self {
         self.ledger = Some(ledger);
         self
@@ -233,6 +234,10 @@ impl Graph {
         let mut files: HashMap<String, String> = HashMap::new();
         let mut keys: HashMap<String, (String, &Agent)> = HashMap::new();
         let mut evals: HashMap<String, EvalFn> = HashMap::new();
+        let ledger: Arc<dyn UsageLedger> = self
+            .ledger
+            .clone()
+            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
         for (i, id) in order.iter().enumerate() {
             let feeder = feeder(&order, i);
             match self.node(id) {
@@ -254,7 +259,7 @@ impl Graph {
                             key
                         }
                     };
-                    let prepared = agent.prepare(Some(&key))?;
+                    let prepared = agent.prepare(Some(&key), &ledger)?;
                     for tool in &prepared.tools {
                         share(&mut registry, tool.clone()).map_err(fail)?;
                     }
@@ -306,10 +311,7 @@ impl Graph {
         }
         agent_io.tools = registry;
         agent_io.events = Arc::new(Discard);
-        agent_io.ledger = self
-            .ledger
-            .clone()
-            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
+        agent_io.ledger = ledger;
         let agent_io: Arc<dyn AgentIo> = Arc::new(agent_io);
         let loader = PersonaLoader::new(vec![Arc::new(MemorySource::new("graph", files))]);
         let io = SimpleGraphIo::new(agent_io, loader);
@@ -582,7 +584,16 @@ impl BuiltGraph {
     ) -> Result<T, KitError> {
         let owner = self.inner.workflow.name.as_str();
         let traced = self.inner.trace.as_ref();
-        root_span(traced, Trace::Graphs, "graph.run", owner, run_id, work, id_of).await
+        root_span(
+            traced,
+            Trace::Graphs,
+            "graph.run",
+            owner,
+            run_id,
+            work,
+            id_of,
+        )
+        .await
     }
 
     /// Runs the graph once on `input` and returns the last node's output.

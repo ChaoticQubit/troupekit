@@ -231,6 +231,8 @@ fn link_for(p: &Probe, metal: bool) -> Link {
     match p.target_os.as_str() {
         "linux" => system_libs.extend(["stdc++", "m", "pthread", "dl"].map(String::from)),
         "android" => system_libs.extend(["c++_static", "c++abi", "log", "m"].map(String::from)),
+        "freebsd" | "openbsd" => system_libs.extend(["c++", "m", "pthread"].map(String::from)),
+        "netbsd" => system_libs.extend(["stdc++", "m", "pthread"].map(String::from)),
         _ => {}
     }
     Link {

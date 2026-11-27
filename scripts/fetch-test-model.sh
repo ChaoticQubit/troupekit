@@ -14,7 +14,7 @@ else
   echo "fetch-test-model: set TROUPEKIT_MODEL_DIR or HOME" >&2
   exit 1
 fi
-dest="$dir/$ID.gguf"
+dest="$dir/$ID-$SHA256.gguf"
 
 sha_of() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -31,8 +31,9 @@ fi
 
 umask 077
 mkdir -p "$dir"
-part="$dest.part"
-trap 'rm -f "$part"' EXIT INT TERM
+part=$(mktemp "$dest.XXXXXX")
+trap 'rm -f "$part"' EXIT
+trap 'exit 1' INT TERM
 curl --proto '=https' --tlsv1.2 -fsSL --max-filesize "$BYTES" -o "$part" "$URL"
 
 got=$(sha_of "$part")

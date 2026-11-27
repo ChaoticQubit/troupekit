@@ -264,6 +264,12 @@ impl LlamaModel {
                 "model reports context {train}, vocabulary {vocab}, embedding {embd}"
             )));
         }
+        if settings.embeddings {
+            let n_embd = unsafe { ffi::tk_model_n_embd(model.as_ptr()) };
+            if let Err(m) = super::width::embedding_width(n_embd, embd) {
+                return Err(free_model(m));
+            }
+        }
         let n_ctx = settings.context.min(train as usize);
         let n_batch = if settings.embeddings {
             n_ctx
@@ -645,6 +651,11 @@ impl LocalModel for LlamaModel {
             .map(|t| self.tokenize(t, false))
             .collect::<Result<Vec<_>, _>>()?;
         let dims = unsafe { ffi::tk_model_n_embd_out(self.model.as_ptr()) } as usize;
+        assert_eq!(
+            dims,
+            self.info.embedding_dims(),
+            "rows are read at the width checked at load"
+        );
         let mut state = self.lock()?;
         let ctx = state.ctx;
         unsafe { ffi::tk_set_embeddings(ctx.as_ptr(), 1) };

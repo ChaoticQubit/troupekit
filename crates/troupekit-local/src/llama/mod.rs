@@ -7,6 +7,7 @@ pub(crate) mod ffi;
 mod metrics;
 mod model;
 mod sampler;
+mod width;
 
 pub use model::{LlamaModel, LlamaSettings};
 

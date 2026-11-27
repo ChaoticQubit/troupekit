@@ -15,6 +15,28 @@ fn spec_for(body: &[u8]) -> LocalSpec {
     .expect("row")
 }
 
+fn file_name(spec: &LocalSpec) -> String {
+    format!("tiny-{}.gguf", spec.sha256())
+}
+
+#[tokio::test]
+async fn a_row_with_another_digest_is_not_a_cache_hit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = ModelCache::new(dir.path());
+    let (first, second) = (spec_for(b"AAAA"), spec_for(b"BBBB"));
+    assert_eq!((first.id(), first.bytes()), (second.id(), second.bytes()));
+    let a = ScriptedTransport::new(vec![Scripted::chunked("AAAA", 2)]);
+    let pa = cache.fetch(&first, &a).await.expect("first fetches");
+    assert!(cache.path(&second).is_none(), "another digest misses");
+    let b = ScriptedTransport::new(vec![Scripted::chunked("BBBB", 2)]);
+    let pb = cache.fetch(&second, &b).await.expect("second fetches");
+    assert_eq!(b.sent().len(), 1, "the second row downloads");
+    assert_ne!(pa, pb);
+    assert_eq!(std::fs::read(&pa).expect("read"), b"AAAA");
+    assert_eq!(std::fs::read(&pb).expect("read"), b"BBBB");
+    assert_eq!(cache.path(&first), Some(pa));
+}
+
 #[tokio::test]
 async fn fetch_writes_the_file_and_path_finds_it() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -84,9 +106,14 @@ fn path_is_none_for_partial_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cache = ModelCache::new(dir.path());
     let spec = spec_for(BODY);
-    std::fs::write(dir.path().join("tiny.gguf"), &BODY[..10]).expect("write");
+    std::fs::write(dir.path().join(file_name(&spec)), &BODY[..10]).expect("write");
     assert!(cache.path(&spec).is_none());
     std::fs::write(dir.path().join("tiny.gguf"), BODY).expect("write");
+    assert!(
+        cache.path(&spec).is_none(),
+        "a file without the digest is not used"
+    );
+    std::fs::write(dir.path().join(file_name(&spec)), BODY).expect("write");
     assert!(cache.path(&spec).is_some());
 }
 
@@ -142,7 +169,7 @@ async fn fetch_leaves_another_fetchs_part_file_alone() {
         .expect("list")
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n != "tiny.gguf" && n != "tiny.gguf.part")
+        .filter(|n| *n != file_name(&spec) && n != "tiny.gguf.part")
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }

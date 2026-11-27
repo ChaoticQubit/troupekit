@@ -91,17 +91,24 @@ pub(crate) struct Fetch<'a> {
     pub transport: Option<Arc<dyn Transport>>,
 }
 
-/// Loads `choice` for agent `fetch.owner`, reusing a model in `loads`.
-/// A catalog row is read from the model cache, downloaded only when
-/// `fetch.download` is set. Output: the model, or `KitError`.
+/// Loads `choice` for agent `fetch.owner`, reusing a model in `loads`;
+/// a file or catalog row loads with embeddings on when `embeddings` is
+/// set. A catalog row is downloaded only when `fetch.download` is set.
+/// Output: the model, or `KitError`.
 pub(crate) async fn load(
     choice: &LocalChoice,
     fetch: &Fetch<'_>,
     loads: &mut Loads,
+    embeddings: bool,
 ) -> Result<Arc<dyn LocalModel>, KitError> {
     let key = match (choice, choice.key()) {
         (LocalChoice::Model(model), _) => return Ok(model.clone()),
         (_, key) => key.expect("file and catalog choices have a key"),
+    };
+    let key = if embeddings {
+        format!("{key}:embed")
+    } else {
+        key
     };
     if let Some(model) = loads.get(&key) {
         return Ok(model.clone());
@@ -111,7 +118,7 @@ pub(crate) async fn load(
         LocalChoice::Catalog(id) => cached(id, fetch).await?,
         LocalChoice::Model(_) => unreachable!("a loaded model returns above"),
     };
-    let model = load_file(fetch.owner, &path)?;
+    let model = load_file(fetch.owner, &path, embeddings)?;
     loads.insert(key, model.clone());
     assert!(!loads.is_empty());
     Ok(model)
@@ -151,15 +158,20 @@ async fn cached(id: &str, fetch: &Fetch<'_>) -> Result<PathBuf, KitError> {
 }
 
 #[cfg(feature = "llama")]
-fn load_file(owner: &str, path: &Path) -> Result<Arc<dyn LocalModel>, KitError> {
+fn load_file(owner: &str, path: &Path, embeddings: bool) -> Result<Arc<dyn LocalModel>, KitError> {
     use troupekit_local::llama::{LlamaModel, LlamaSettings};
     assert!(!owner.is_empty());
-    let model = LlamaModel::load(path, LlamaSettings::default())?;
+    let settings = LlamaSettings::default().with_embeddings(embeddings);
+    let model = LlamaModel::load(path, settings)?;
+    assert!(
+        !embeddings || model.info().embedding_dims() > 0,
+        "an embedding load advertises its dimensions"
+    );
     Ok(Arc::new(model))
 }
 
 #[cfg(not(feature = "llama"))]
-fn load_file(owner: &str, path: &Path) -> Result<Arc<dyn LocalModel>, KitError> {
+fn load_file(owner: &str, path: &Path, _embeddings: bool) -> Result<Arc<dyn LocalModel>, KitError> {
     Err(KitError::config(
         owner,
         format!(
@@ -219,7 +231,7 @@ impl Agent {
         };
         let local_only =
             !self.has_client() && (self.selector().is_none() || from_selector.is_some());
-        let model = load(&choice, &self.fetch(), loads).await?;
+        let model = load(&choice, &self.fetch(), loads, false).await?;
         if self.selector().is_none() {
             self.set_selector(choice.chat_id());
         }
@@ -239,7 +251,7 @@ impl Agent {
         &self,
         choice: &LocalChoice,
     ) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
-        let model = load(choice, &self.fetch(), &mut Loads::new()).await?;
+        let model = load(choice, &self.fetch(), &mut Loads::new(), true).await?;
         embedder_of(self.name(), &model)
     }
 }

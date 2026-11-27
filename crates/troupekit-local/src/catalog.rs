@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-const BUILTIN: &str = include_str!("../../../catalog/local.toml");
+const BUILTIN: &str = include_str!("../catalog/local.toml");
 
 const ID_MAX_BYTES: usize = 64;
 const URL_MAX_BYTES: usize = 2_048;
