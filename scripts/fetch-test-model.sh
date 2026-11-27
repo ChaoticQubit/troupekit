@@ -31,8 +31,9 @@ fi
 
 umask 077
 mkdir -p "$dir"
-part="$dest.part"
-trap 'rm -f "$part"' EXIT INT TERM
+part=$(mktemp "$dest.XXXXXX")
+trap 'rm -f "$part"' EXIT
+trap 'exit 1' INT TERM
 curl --proto '=https' --tlsv1.2 -fsSL --max-filesize "$BYTES" -o "$part" "$URL"
 
 got=$(sha_of "$part")
