@@ -226,7 +226,6 @@ async fn trace_file_views_in_terminal_and_html() {
 #[cfg(feature = "llama")]
 #[tokio::test]
 async fn private_request_never_reaches_the_network() {
-    use troupekit::context::embed::Embedder as _;
     use troupekit_kit::Knowledge;
     use troupekit_providers::route::NetworkState;
     let gguf = std::env::var_os("TROUPEKIT_TEST_GGUF")
