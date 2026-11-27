@@ -14,7 +14,7 @@ else
   echo "fetch-test-model: set TROUPEKIT_MODEL_DIR or HOME" >&2
   exit 1
 fi
-dest="$dir/$ID.gguf"
+dest="$dir/$ID-$SHA256.gguf"
 
 sha_of() {
   if command -v sha256sum >/dev/null 2>&1; then

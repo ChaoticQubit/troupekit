@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const PART_TRIES: usize = 64;
 use troupekit_core::http::{HttpRequest, Transport};
 
-/// A folder of downloaded model files, one `<id>.gguf` per catalog row.
-/// A file is used only when its size matches the row; `fetch` checks
-/// the SHA-256 before a file gets its final name. No call downloads alone.
+/// A folder of downloaded model files, one `<id>-<sha256>.gguf` per row,
+/// so a row with another digest never reuses a file. A file is used only
+/// when its size matches; `fetch` checks the SHA-256 before a file gets
+/// its final name. No call downloads alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelCache {
     dir: PathBuf,
@@ -157,7 +158,9 @@ impl ModelCache {
     }
 
     fn file_of(&self, spec: &LocalSpec) -> PathBuf {
-        self.dir.join(format!("{}.gguf", spec.id()))
+        assert_eq!(spec.sha256().len(), 64, "a row's digest is checked hex");
+        self.dir
+            .join(format!("{}-{}.gguf", spec.id(), spec.sha256()))
     }
 }
 
