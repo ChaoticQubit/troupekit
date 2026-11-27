@@ -321,9 +321,9 @@ impl Agent {
         self
     }
 
-    /// Records usage in `ledger` for period limits.
-    /// Defaults to an in-memory ledger per built agent.
-    /// Returns the builder.
+    /// Records usage in `ledger` for period limits and a route's daily
+    /// cloud spend. Default: in memory per built agent, lost on restart;
+    /// pass one durable ledger to agents that share a route's cap.
     pub fn ledger(mut self, ledger: Arc<dyn UsageLedger>) -> Self {
         self.ledger = Some(ledger);
         self
@@ -398,12 +398,16 @@ impl Agent {
         let this = self.load_local(&mut crate::local::Loads::new()).await?;
         #[cfg(not(feature = "local"))]
         let this = self;
+        let ledger = this
+            .ledger
+            .clone()
+            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
         #[cfg(feature = "knowledge")]
         let (this, preamble) = {
-            this.prepare(None)?;
+            this.prepare(None, &ledger)?;
             crate::memory::attach(this).await?
         };
-        let prepared = this.prepare(None)?;
+        let prepared = this.prepare(None, &ledger)?;
         let mut io = SimpleIo::new(prepared.registry);
         io.models
             .insert(prepared.persona.model.clone(), prepared.handle);
@@ -411,10 +415,7 @@ impl Agent {
             io.evals.register(eval, f.clone())?;
         }
         io.events = this.events.clone().unwrap_or_else(|| Arc::new(Discard));
-        io.ledger = this
-            .ledger
-            .clone()
-            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
+        io.ledger = ledger;
         let probe = vec![Message::text(Role::User, "build check")];
         AgentRun::new(&prepared.persona, probe, this.limits.clone(), &io).await?;
         let store = this.storage.open().await?;
@@ -457,8 +458,8 @@ impl Agent {
                     && !(k.embedder.is_none() && self.route.local_only) =>
             {
                 Err(KitError::config(
-                &self.name,
-                "a private agent cannot send documents to a cloud embedder: \
+                    &self.name,
+                    "a private agent cannot send documents to a cloud embedder: \
                  use Knowledge::dir(..).on_device_embedder(..)",
                 ))
             }
@@ -563,7 +564,11 @@ impl Agent {
         self.transport.clone()
     }
 
-    pub(crate) fn prepare(&self, model_key: Option<&str>) -> Result<Prepared, KitError> {
+    pub(crate) fn prepare(
+        &self,
+        model_key: Option<&str>,
+        ledger: &Arc<dyn UsageLedger>,
+    ) -> Result<Prepared, KitError> {
         let name = self.name.as_str();
         let Some(instructions) = self.instructions.as_deref() else {
             return Err(KitError::config(
@@ -595,7 +600,7 @@ impl Agent {
         self.route.check_judges(name, &persona)?;
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
-        let handle = self.route.handle(name, || {
+        let handle = self.route.handle(name, ledger, || {
             resolve(ModelChoice {
                 agent: name,
                 selector,

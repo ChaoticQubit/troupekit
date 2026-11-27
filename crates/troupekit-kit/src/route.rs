@@ -4,7 +4,7 @@ use crate::graph::Graph;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use troupekit_agent::{ModelHandle, Persona};
+use troupekit_agent::{ModelHandle, Persona, UsageLedger};
 use troupekit_core::error::{ProviderError, ProviderErrorKind};
 use troupekit_providers::request::{CompletionRequest, CompletionResponse, Delta};
 use troupekit_providers::route::{
@@ -110,13 +110,14 @@ impl RouteConfig {
         Ok(())
     }
 
-    /// Picks the model handle the agent runs on. `cloud` resolves the
-    /// `.model(..)` selector and is called only when the result can use
-    /// it, so a private or local-only agent needs no cloud key.
-    /// Output: the handle, or the first configuration error.
+    /// Picks the model handle the agent runs on; a route keeps its daily
+    /// cloud spend in `ledger`. `cloud` resolves the `.model(..)` selector
+    /// and is called only when the result can use it, so a private or
+    /// local-only agent needs no cloud key. Output: the handle or an error.
     pub(crate) fn handle(
         &self,
         owner: &str,
+        ledger: &Arc<dyn UsageLedger>,
         cloud: impl FnOnce() -> Result<ModelHandle, KitError>,
     ) -> Result<ModelHandle, KitError> {
         let policy = match (&self.policy, &self.file) {
@@ -137,7 +138,7 @@ impl RouteConfig {
             ));
         }
         let has_local = policy.target(LOCAL).is_some();
-        let mut builder = RoutedModel::builder(policy.clone());
+        let mut builder = RoutedModel::builder(policy.clone()).ledger(ledger.clone());
         let mut cloud = Some(cloud);
         for target in policy.targets() {
             builder = match target.id() {

@@ -173,3 +173,39 @@ async fn cloud_key_is_needed_only_when_a_cloud_target_can_run() {
     let err = keyless().build().await.unwrap_err();
     assert!(matches!(err, KitError::MissingKey { .. }), "{err}");
 }
+
+#[tokio::test]
+async fn route_cap_is_shared_through_the_agent_ledger() {
+    use std::sync::Arc;
+    use troupekit_core::store::UsageLedger;
+    let capped = policy(
+        "name = \"office\"\n[budget]\ncloud_usd_per_day = 0.0001\n[[target]]\nid = \"cloud\"\n",
+    );
+    let paid = troupekit_providers::Price {
+        input_usd_micros_per_mtok: 100_000_000,
+        ..troupekit_providers::Price::FREE
+    };
+    let ledger: Arc<dyn UsageLedger> = Arc::new(troupekit_agent::InMemoryLedger::default());
+    let agent = || {
+        echo()
+            .price(paid)
+            .retries(0)
+            .route(capped.clone())
+            .ledger(ledger.clone())
+    };
+    let first = agent().build().await.unwrap();
+    assert_eq!(first.run("hi").await.unwrap(), "Hello! You said: hi");
+    let second = agent().build().await.unwrap();
+    assert!(
+        second.run("hi").await.is_err(),
+        "the shared ledger already holds the day's cap"
+    );
+    let fresh = echo()
+        .price(paid)
+        .retries(0)
+        .route(capped)
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(fresh.run("hi").await.unwrap(), "Hello! You said: hi");
+}
