@@ -772,3 +772,51 @@ async fn kept_write_survives_human_answer_save_and_restart() {
     assert_eq!(state["x"], json!("a1"));
     assert_eq!(state["y"], json!("yes"));
 }
+
+const HUMAN_FIRST: &str = "name = 'first'\nstart = 's'\n[state]\nseed = 'string'\nok = 'bool'\nx = 'string'\ny = 'string'\nc = 'string?'\nd = 'string?'\n[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 's'\nwrites = 'seed'\n[[nodes]]\nid = 'h'\nkind = 'human'\nask = 'approval'\nwrites = 'ok'\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 'a'\nwrites = 'x'\n[[nodes]]\nid = 'b'\nkind = 'tool'\ntool = 'b'\nwrites = 'y'\n[[nodes]]\nid = 'c'\nkind = 'tool'\ntool = 's'\nwrites = 'c'\n[[nodes]]\nid = 'd'\nkind = 'tool'\ntool = 's'\nwrites = 'd'\n[[nodes]]\nid = 'jh'\nkind = 'join'\n[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 's'\nto = 'h'\n[[edges]]\nfrom = 's'\nto = 'a'\n[[edges]]\nfrom = 's'\nto = 'b'\n[[edges]]\nfrom = 'h'\nto = 'c'\n[[edges]]\nfrom = 'h'\nto = 'd'\n[[edges]]\nfrom = 'c'\nto = 'jh'\n[[edges]]\nfrom = 'd'\nto = 'jh'\n[[edges]]\nfrom = 'jh'\nto = 'j'\n[[edges]]\nfrom = 'a'\nto = 'j'\n[[edges]]\nfrom = 'b'\nto = 'j'\n[[edges]]\nfrom = 'j'\nto = 'e'\n";
+
+#[tokio::test]
+async fn kept_write_survives_a_human_fan_out_before_it() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let io = io(&gates, model());
+    let flow = troupekit_graph::Flow::parse("test/first.toml", HUMAN_FIRST).unwrap();
+    let mut run = GraphRun::start(flow, Map::new(), Limits::default(), &io)
+        .await
+        .unwrap();
+    let id = run.run_id();
+    store.save(run.checkpoint()).await.unwrap();
+    gates.open("s");
+    assert_eq!(
+        run.step_durable(&io, &store).await.unwrap(),
+        GraphOutcome::Continue
+    );
+    store.save(run.checkpoint()).await.unwrap();
+    gates.open("a");
+    let kept = async {
+        while !store.has(id, 2, 1) {
+            tokio::task::yield_now().await;
+        }
+    };
+    let report = || format!("a finished: {:?}", gates.finished());
+    bounded("a's durable mark", report, async {
+        tokio::select! {
+            biased;
+            out = run.step_durable(&io, &store) => panic!("the step must not finish while b waits: {out:?}"),
+            () = kept => {}
+        }
+    })
+    .await;
+    drop(run);
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    run.resume("h", json!(true)).unwrap();
+    let mut run = restart(&store, &run).await;
+    gates.open("b");
+    let state = done(drive(&mut run, &io, &store).await);
+    assert_eq!(
+        gates.calls("a").len(),
+        1,
+        "a's kept result is applied, not re-run"
+    );
+    assert_eq!(state["x"], json!("a1"));
+    assert_eq!(state["c"], json!("seeded"));
+}

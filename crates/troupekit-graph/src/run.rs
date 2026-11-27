@@ -334,7 +334,42 @@ impl FlowDone {
 struct Marks {
     step: u64,
     origins: Vec<u64>,
-    done: BTreeMap<usize, (String, Finished)>,
+    done: BTreeMap<Slot, Finished>,
+}
+
+/// Which branch a kept write belongs to, stable across settle, restore and
+/// step bumps: its node, its map item when it is one, and how many earlier
+/// branches share both. Branch indices move when a settled branch fans out.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Slot {
+    node: String,
+    item: Option<(String, usize)>,
+    nth: usize,
+}
+
+fn slots(branches: &[Branch]) -> Vec<Slot> {
+    let mut out: Vec<Slot> = Vec::with_capacity(branches.len());
+    for b in branches {
+        let item = b.item.as_ref().map(|it| (it.map.clone(), it.index));
+        let nth = out.iter().filter(|s| s.node == b.node && s.item == item).count();
+        out.push(Slot { node: b.node.clone(), item, nth });
+    }
+    out
+}
+
+/// A branch write as stored: the finished unit and the branch's slot
+/// beside the node id the store keeps. A plain `Finished` reads as the
+/// first branch at its node, outside any map (a 0.5 pre-slot write).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum KeptWrite {
+    Slotted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<(String, usize)>,
+        nth: usize,
+        finished: Finished,
+    },
+    Plain(Finished),
 }
 
 /// One graph run as plain serializable data: the workflow snapshot, the
@@ -1196,15 +1231,20 @@ impl GraphRun {
                     ranges.push(range.from);
                     continue;
                 }
-                let finished: Finished = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
-                if kept.insert(index, (w.node().to_string(), finished)).is_some() {
+                let write: KeptWrite = serde_json::from_value(w.write().clone()).map_err(|e| bad(e.to_string()))?;
+                let (item, nth, finished) = match write {
+                    KeptWrite::Slotted { item, nth, finished } => (item, nth, finished),
+                    KeptWrite::Plain(finished) => (None, 0, finished),
+                };
+                let slot = Slot { node: w.node().to_string(), item, nth };
+                if kept.insert(index, (slot, finished)).is_some() {
                     return Err(bad("the branch has two writes".into()));
                 }
             }
             if !kept.is_empty() {
                 origins.push(source);
             }
-            done.extend(kept);
+            done.extend(kept.into_values());
         }
         if ranges.len() >= MAX_SEQ_RANGES {
             return Err(GraphError::Checkpoint(format!("step {step} was restored {} times", ranges.len())));
@@ -1367,20 +1407,20 @@ impl GraphRun {
         Ok(self.apply(io, results).await)
     }
 
-    fn check_marks(
-        &self,
-        done: BTreeMap<usize, (String, Finished)>,
-    ) -> Result<BTreeMap<usize, Finished>, GraphError> {
+    fn check_marks(&self, done: BTreeMap<Slot, Finished>) -> Result<BTreeMap<usize, Finished>, GraphError> {
         let mut out = BTreeMap::new();
         let workers = self.workers();
-        for (i, (node, finished)) in done {
-            let bad = |m: String| GraphError::Checkpoint(format!("branch write {i} of step {}: {m}", self.steps));
-            let Some(b) = self.branches.get(i) else {
-                return Err(bad(format!("the step has {} branches", self.branches.len())));
-            };
-            if b.node != node {
-                return Err(bad(format!("it is for node `{node}`, but the branch is at `{}`", b.node)));
+        let live = slots(&self.branches);
+        for (slot, finished) in done {
+            let node = slot.node.clone();
+            let bad = |m: String| GraphError::Checkpoint(format!("kept write for `{node}` at step {}: {m}", self.steps));
+            if self.workflow.node(&node).is_none() {
+                return Err(bad(format!("node `{node}` is not in the workflow")));
             }
+            let Some(i) = live.iter().position(|s| *s == slot) else {
+                continue;
+            };
+            let b = &self.branches[i];
             if !workers[i] {
                 return Err(bad(format!("the branch at `{node}` has no work this step")));
             }
@@ -1904,6 +1944,7 @@ impl GraphRun {
         mut done: BTreeMap<usize, Finished>,
     ) -> (Vec<Work>, Option<CoreError>) {
         let workers = self.workers();
+        let live = slots(&self.branches);
         let merged = (!self.scratch.is_empty()).then(|| {
             let mut m = self.state.clone();
             m.extend(self.scratch.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -1921,6 +1962,7 @@ impl GraphRun {
             .enumerate()
             .map(|(i, (b, works))| {
                 let kept = done.remove(&i);
+                let slot = live[i].clone();
                 async move {
                     if let Some(finished) = kept {
                         return (apply_finished(b, finished), None);
@@ -1964,7 +2006,12 @@ impl GraphRun {
                         return (work, None);
                     };
                     let branch = u32::try_from(i).expect("a step has far fewer than 2^32 branches");
-                    let value = serde_json::to_value(&finished).expect("a finished unit serializes");
+                    let write = KeptWrite::Slotted {
+                        item: slot.item,
+                        nth: slot.nth,
+                        finished,
+                    };
+                    let value = serde_json::to_value(&write).expect("a finished unit serializes");
                     let saved = store.save_branch(run_id, step, BranchWrite::new(branch, &node.id, value)).await;
                     (work, saved.err())
                 }
