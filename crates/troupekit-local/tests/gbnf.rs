@@ -366,3 +366,16 @@ fn integer_endpoints_stay_exact() {
     let float = json!({"type": "integer", "minimum": 1e16});
     assert!(refused(float).contains("`minimum`"));
 }
+
+#[test]
+fn nested_pointer_is_not_a_single_defs_key() {
+    let defs = json!({"a/b": {"type": "null"}, "a~b": {"type": "boolean"}});
+    let nested = json!({"$defs": defs.clone(), "$ref": "#/$defs/a/b"});
+    assert!(refused(nested).contains("not supported"));
+    let escaped = json!({"$defs": defs.clone(), "$ref": "#/$defs/a~1b"});
+    assert!(schema_to_gbnf(&escaped).is_ok());
+    let tilde = json!({"$defs": defs, "$ref": "#/$defs/a~0b"});
+    assert!(schema_to_gbnf(&tilde).is_ok());
+    let empty = json!({"$defs": {"": {"type": "null"}}, "$ref": "#/$defs/"});
+    assert!(refused(empty).contains("not supported"));
+}
