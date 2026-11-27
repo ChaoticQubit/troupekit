@@ -457,22 +457,18 @@ jobs:
             kill "${hogs[@]}"
             hogs=()
           }
-          if [ $((GITHUB_RUN_NUMBER % 2)) = 1 ]; then
-            export TROUPEKIT_BENCH_FIRST=quiet
-            run_all quiet
-            load_on
-            run_all loaded
-            load_off
-          else
-            export TROUPEKIT_BENCH_FIRST=loaded
-            load_on
-            run_all loaded
-            load_off
-            run_all quiet
-          fi
+          export TROUPEKIT_BENCH_FIRST=quiet
+          run_all quiet
+          load_on
+          run_all loaded
+          export TROUPEKIT_BENCH_FIRST=loaded
+          run_all loaded
+          load_off
+          run_all quiet
           cat "$out"
-          test "$(grep -c '^overhead ' "$out")" = 32
-          test "$(grep -c " first=$TROUPEKIT_BENCH_FIRST\$" "$out")" = 32
+          test "$(grep -c '^overhead ' "$out")" = 64
+          test "$(grep -c ' first=quiet$' "$out")" = 32
+          test "$(grep -c ' first=loaded$' "$out")" = 32
           cp "$out" overhead.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
