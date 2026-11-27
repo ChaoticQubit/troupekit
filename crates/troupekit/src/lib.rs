@@ -9,7 +9,9 @@ pub use troupekit_core as core;
 pub use troupekit_graph as graph;
 pub use troupekit_host as host;
 pub use troupekit_providers as providers;
-
+pub use troupekit_trace as trace;
+#[cfg(feature = "local")]
+pub use troupekit_local as local;
 #[cfg(feature = "kit")]
 #[doc(hidden)]
 pub use troupekit_kit::__private;
@@ -166,6 +168,3 @@ impl Troupe {
     }
 }
 
-use troupekit_trace as _;
-#[cfg(feature = "local")]
-use troupekit_local as _;
