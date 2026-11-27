@@ -12,9 +12,9 @@ rust-version.workspace = true
 autotests = false
 
 [dependencies]
-troupekit-trace = { path = "../troupekit-trace", version = "0.2.0" }
+troupekit-trace = { path = "../troupekit-trace", version = "0.3.0" }
 troupekit-core.workspace = true
-troupekit-tools = { path = "../troupekit-tools", version = "0.2.0", default-features = false }
+troupekit-tools = { path = "../troupekit-tools", version = "0.3.0", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -27,7 +27,7 @@ onnx = ["dep:fastembed"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-troupekit-store-sqlite = { path = "../troupekit-store-sqlite", version = "0.2.0" }
+troupekit-store-sqlite = { path = "../troupekit-store-sqlite", version = "0.3.0" }
 tempfile = "3"
 
 [[test]]
