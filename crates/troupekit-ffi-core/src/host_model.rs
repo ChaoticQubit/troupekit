@@ -1,5 +1,5 @@
 use crate::error::{ErrorCode, FfiError};
-use crate::host::{HostModel, TokenSink, MAX_QUEUED_DELTAS};
+use crate::host::{HostModel, TokenSink};
 use crate::records::{HostMessage, HostModelCaps, HostReply, HostRequest};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -130,7 +130,9 @@ impl HostModelAdapter {
         forward: bool,
         on_delta: &mut (dyn for<'d> FnMut(&'d Delta) + Send),
     ) -> Result<HostReply, ProviderError> {
-        let (sink, mut deltas) = TokenSink::channel(forward, MAX_REPLY_BYTES, MAX_QUEUED_DELTAS);
+        let queue = crate::runtime::settings().event_buffer.saturating_add(1);
+        let (sink, mut deltas) = TokenSink::channel(forward, MAX_REPLY_BYTES, queue);
+        let rest = sink.clone();
         let host = self.host.clone();
         let mut job = tokio::task::spawn_blocking(move || {
             catch_unwind(AssertUnwindSafe(|| host.generate(request, sink)))
@@ -142,6 +144,10 @@ impl HostModelAdapter {
             }
         };
         while let Ok(text) = deltas.try_recv() {
+            on_delta(&Delta::TextDelta { text });
+        }
+        let text = rest.take_pending();
+        if !text.is_empty() {
             on_delta(&Delta::TextDelta { text });
         }
         let reply = match joined {

@@ -41,20 +41,28 @@ fn delta_bytes_capped() {
 }
 
 #[test]
-fn empty_deltas_ignored_and_queue_bounded() {
+fn full_queue_joins_deltas_and_loses_none() {
     let (sink, mut deltas) = TokenSink::channel(true, 100, 2);
     sink.delta(String::new());
     sink.delta("a".into());
     sink.delta(String::new());
     sink.delta("b".into());
     sink.delta("c".into());
+    sink.delta("d".into());
     let mut got = Vec::new();
     while let Ok(text) = deltas.try_recv() {
         got.push(text);
     }
     assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
-    sink.delta("d".into());
-    assert_eq!(deltas.try_recv().unwrap(), "d");
+    sink.delta("e".into());
+    assert_eq!(deltas.try_recv().unwrap(), "cde");
+    sink.delta("f".into());
+    sink.delta("g".into());
+    sink.delta("h".into());
+    assert_eq!(sink.take_pending(), "h");
+    assert_eq!(deltas.try_recv().unwrap(), "f");
+    assert_eq!(deltas.try_recv().unwrap(), "g");
+    assert_eq!(sink.take_pending(), "");
 }
 
 #[test]

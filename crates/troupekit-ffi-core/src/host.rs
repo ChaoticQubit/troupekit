@@ -108,19 +108,21 @@ pub trait HostTransport: Send + Sync {
 #[derive(Debug)]
 pub struct TokenSink {
     deltas: Option<tokio::sync::mpsc::Sender<String>>,
-    bytes: Mutex<usize>,
+    state: Mutex<SinkText>,
     cap: usize,
 }
 
-/// Most deltas waiting for the run to take them; later ones are dropped
-/// until it catches up, so a fast host cannot grow memory without bound.
-pub(crate) const MAX_QUEUED_DELTAS: usize = 1024;
+#[derive(Debug, Default)]
+struct SinkText {
+    bytes: usize,
+    pending: String,
+}
 
 impl TokenSink {
     /// Pushes one text delta of the reply in progress. Never blocks.
-    /// Input: the new text only, not the text so far.
-    /// Output: none; empty deltas, deltas past the reply cap and deltas
-    /// while the queue is full are dropped.
+    /// Input: the new text only, not the text so far. Output: none.
+    /// Empty deltas and deltas past the reply cap are dropped; while the
+    /// queue is full, deltas are joined and sent as one once it drains.
     pub fn delta(&self, text: String) {
         let Some(deltas) = &self.deltas else {
             return;
@@ -128,12 +130,27 @@ impl TokenSink {
         if text.is_empty() {
             return;
         }
-        let mut used = self.bytes.lock().unwrap_or_else(PoisonError::into_inner);
-        let total = used.saturating_add(text.len());
-        if total <= self.cap && deltas.try_send(text).is_ok() {
-            *used = total;
-            assert!(*used <= self.cap);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let total = state.bytes.saturating_add(text.len());
+        if total > self.cap {
+            return;
         }
+        state.bytes = total;
+        state.pending.push_str(&text);
+        let joined = std::mem::take(&mut state.pending);
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(back)) = deltas.try_send(joined) {
+            state.pending = back;
+        }
+        assert!(state.bytes <= self.cap);
+        assert!(state.pending.len() <= state.bytes);
+    }
+
+    /// Takes the text still waiting because the queue was full, so the
+    /// run can send it after the host returns. Output: that text, or an
+    /// empty string.
+    pub(crate) fn take_pending(&self) -> String {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut state.pending)
     }
 
     pub(crate) fn channel(
@@ -145,7 +162,7 @@ impl TokenSink {
         let (sender, receiver) = tokio::sync::mpsc::channel(queue);
         let sink = TokenSink {
             deltas: forward.then_some(sender),
-            bytes: Mutex::new(0),
+            state: Mutex::new(SinkText::default()),
             cap,
         };
         (Arc::new(sink), receiver)
