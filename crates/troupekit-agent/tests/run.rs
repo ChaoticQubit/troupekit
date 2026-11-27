@@ -1290,3 +1290,63 @@ async fn set_trace_accepts_an_absolute_file() {
     let restored = AgentRun::from_checkpoint(&run.checkpoint()).unwrap();
     assert_eq!(restored.trace(), Some(spec));
 }
+
+struct FailingLedger;
+
+#[async_trait]
+impl UsageLedger for FailingLedger {
+    async fn period_total(&self, key: &str) -> Result<u64, troupekit_core::error::CoreError> {
+        Err(troupekit_core::error::CoreError::Store(format!(
+            "no row for {key}"
+        )))
+    }
+
+    async fn record(
+        &self,
+        _key: &str,
+        _usage: Usage,
+    ) -> Result<(), troupekit_core::error::CoreError> {
+        Ok(())
+    }
+}
+
+async fn ledger_failure_trace(content: bool) -> Vec<String> {
+    let (tracer, sink) = traced(content);
+    let limits = Limits {
+        user: Some(PeriodLimit {
+            key: "user-sk-PRIVATE-42".into(),
+            max_usd_micros: 1_000,
+        }),
+        ..Limits::default()
+    };
+    let checked = tracer
+        .in_scope(troupekit_agent::budget::check(
+            &limits,
+            &PRICE,
+            0,
+            1,
+            &FailingLedger,
+        ))
+        .await;
+    assert!(checked.is_err());
+    drop(tracer);
+    sink.lines()
+}
+
+#[tokio::test]
+async fn ledger_error_detail_stays_out_of_a_trace_without_content() {
+    let lines = ledger_failure_trace(false).await;
+    assert!(
+        lines.iter().any(|l| l.contains("\"ok\":false")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.contains("sk-PRIVATE-42")),
+        "{lines:?}"
+    );
+    let lines = ledger_failure_trace(true).await;
+    assert!(
+        lines.iter().any(|l| l.contains("sk-PRIVATE-42")),
+        "{lines:?}"
+    );
+}

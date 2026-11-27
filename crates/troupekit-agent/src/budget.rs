@@ -7,7 +7,7 @@ use troupekit_core::error::CoreError;
 use troupekit_core::event::Usage;
 use troupekit_core::tool::WEB_SEARCH;
 use troupekit_providers::{CompletionRequest, Price};
-use troupekit_trace::{trace_span, Trace};
+use troupekit_trace::{content, trace_span, Trace};
 
 /// A spend limit for one period, such as a goal's or a user's month.
 /// `key` names the ledger total (for example `goal:42`); the ledger decides
@@ -140,7 +140,10 @@ pub async fn check(
     let result = span.instrument(crossed(limits, price, run_spent, estimate, ledger)).await;
     match &result {
         Ok(layer) => span.record("crossed", layer.unwrap_or("none")),
-        Err(e) => span.fail(e.to_string()),
+        Err(e) => {
+            span.fail("usage ledger failed");
+            span.record("error", content(e.to_string()));
+        }
     }
     result
 }
