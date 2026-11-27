@@ -70,7 +70,10 @@ impl BuiltGraph {
             let outcome = run.step(&inner.io).await;
             if run.steps() != before {
                 assert_eq!(run.steps(), before + 1);
-                store.save(run.checkpoint()).await?;
+                store
+                    .save(run.checkpoint())
+                    .await
+                    .map_err(|e| KitError::in_run(run_id, e.into()))?;
             }
             steps += 1;
             match outcome {

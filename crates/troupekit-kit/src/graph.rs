@@ -626,8 +626,10 @@ impl BuiltGraph {
         store: &dyn CheckpointStore,
     ) -> Result<GraphReport, KitError> {
         let inner = &self.inner;
-        if store.latest(run.run_id()).await?.is_none() {
-            store.save(run.checkpoint()).await?;
+        let run_id = run.run_id();
+        let in_run = |e: troupekit_core::error::CoreError| KitError::in_run(run_id, e.into());
+        if store.latest(run_id).await.map_err(in_run)?.is_none() {
+            store.save(run.checkpoint()).await.map_err(in_run)?;
         }
         let cap =
             2 * u64::from(inner.workflow.max_steps) + u64::from(inner.workflow.max_retries) + 8;
@@ -635,7 +637,7 @@ impl BuiltGraph {
             let before = run.steps();
             let outcome = run.step(io).await;
             if run.steps() != before {
-                store.save(run.checkpoint()).await?;
+                store.save(run.checkpoint()).await.map_err(in_run)?;
             }
             match outcome {
                 GraphOutcome::Continue => {}
