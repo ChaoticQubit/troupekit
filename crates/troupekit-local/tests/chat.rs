@@ -624,3 +624,39 @@ async fn unexpressible_tool_schema_fails_before_decoding() {
     assert!(err.message.contains("pattern"), "{}", err.message);
     assert_eq!(*model.generate_calls.lock().expect("lock"), 0);
 }
+
+async fn streamed(logprob: Option<f64>, min: Option<f64>) -> (bool, Vec<String>) {
+    let mut double = Scripted::new("plain answer text");
+    double.logprob = logprob;
+    let chat = LocalChat::new(Arc::new(double), "local/test")
+        .with_settings(LocalChatSettings::default().with_min_confidence(min));
+    let mut seen = Vec::new();
+    let result = chat
+        .stream(&CompletionRequest::user("hi", 32), &mut |d| {
+            seen.push(match d {
+                Delta::TextDelta { text } => format!("text:{text}"),
+                Delta::Usage { .. } => "usage".into(),
+                Delta::Stop { .. } => "stop".into(),
+                other => format!("{other:?}"),
+            })
+        })
+        .await;
+    (result.is_ok(), seen)
+}
+
+#[tokio::test]
+async fn low_confidence_stream_emits_nothing_so_the_router_can_fall_back() {
+    let (ok, seen) = streamed(Some(-3.0), Some(0.5)).await;
+    assert!(!ok);
+    assert!(seen.is_empty(), "{seen:?}");
+    let (ok, seen) = streamed(Some(-0.01), Some(0.5)).await;
+    assert!(ok);
+    assert_eq!(
+        seen,
+        vec!["text:plain answer text".to_string(), "usage".into(), "stop".into()]
+    );
+    let (ok, seen) = streamed(None, None).await;
+    assert!(ok);
+    let texts = seen.iter().filter(|s| s.starts_with("text:")).count();
+    assert!(texts > 1, "unset min_confidence still streams pieces: {seen:?}");
+}

@@ -271,3 +271,112 @@ fn reset_from_the_token_callback_does_not_deadlock() {
         .expect("generation finished; reset in the callback must not deadlock");
     assert_eq!(reused, 0, "the reset took effect before the next call");
 }
+
+#[test]
+fn end_of_text_is_left_out_of_the_confidence_mean() {
+    let model = load();
+    let p = prompt(&model, "Say hi.");
+    let ended = model
+        .generate(&p, &greedy(64).with_confidence(true), &mut |_| Flow::Continue)
+        .expect("generates");
+    assert_eq!(ended.stop(), GenStop::EndOfText, "pick a prompt that ends");
+    assert!(ended.tokens() > 0);
+    model.reset();
+    let capped = model
+        .generate(
+            &p,
+            &greedy(ended.tokens()).with_confidence(true),
+            &mut |_| Flow::Continue,
+        )
+        .expect("generates");
+    assert_eq!(capped.stop(), GenStop::MaxTokens);
+    assert_eq!(capped.text(), ended.text());
+    let (a, b) = (ended.mean_logprob().unwrap(), capped.mean_logprob().unwrap());
+    assert!((a - b).abs() < 1e-4, "EOG counted in the mean: {a} vs {b}");
+}
+
+#[test]
+fn fixed_length_overflow_is_refused_before_any_token() {
+    let model = LlamaModel::load(&test_gguf(), LlamaSettings::default().with_context(64))
+        .expect("test GGUF loads");
+    let limit = model.info().context_length();
+    let text = "one two three four five six seven eight nine ten ".repeat(20);
+    let tokens = model.tokenize(&text, false).expect("tokenizes");
+    let p = &tokens[..limit - 1];
+    let mut calls = 0usize;
+    let err = model
+        .generate(p, &greedy(2).with_ban_eos(true), &mut |_| {
+            calls += 1;
+            Flow::Continue
+        })
+        .expect_err("prompt plus two tokens is past the context");
+    assert!(
+        matches!(err, LocalError::ContextFull { needed, limit: l } if needed == limit + 1 && l == limit),
+        "{err:?}"
+    );
+    assert_eq!(calls, 0, "no token before the error");
+    let one = model
+        .generate(p, &greedy(1).with_ban_eos(true), &mut |_| Flow::Continue)
+        .expect("one token still fits");
+    assert_eq!(one.tokens(), 1);
+}
+
+#[test]
+fn model_call_from_its_own_token_callback_is_refused_not_deadlocked() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let model = load();
+        let p = prompt(&model, "Count to ten.");
+        let mut nested = None;
+        model
+            .generate(&p, &greedy(4), &mut |_| {
+                nested = Some(model.score(&p[..2]));
+                Flow::Stop
+            })
+            .expect("generates");
+        let after = model.score(&p[..2]);
+        tx.send((nested, after.is_ok())).expect("send");
+    });
+    let (nested, after) = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("a nested call must not deadlock");
+    let err = nested.expect("callback ran").expect_err("nested call refused");
+    assert!(matches!(err, LocalError::Unsupported(_)), "{err:?}");
+    assert!(err.to_string().contains("token callback"), "{err}");
+    assert!(after, "the model works again once generate returns");
+}
+
+const FETCH_EMBED: &str =
+    "set TROUPEKIT_TEST_EMBED_GGUF to a mean-pooled embedding GGUF (for example a MiniLM or BGE export)";
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+#[test]
+fn pooled_embedding_gguf_gives_meaningful_vectors() {
+    let path = std::env::var_os("TROUPEKIT_TEST_EMBED_GGUF")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("TROUPEKIT_TEST_EMBED_GGUF is not set: {FETCH_EMBED}"));
+    let model = LlamaModel::load(
+        &path,
+        LlamaSettings::default().with_context(512).with_embeddings(true),
+    )
+    .expect("embedding GGUF loads");
+    let texts = [
+        "The cat sat on the mat.".to_string(),
+        "A cat is sitting on a mat.".to_string(),
+        "Quarterly tax filing deadlines for companies.".to_string(),
+        "The cat sat on the mat.".to_string(),
+    ];
+    let v = model.embed(&texts).expect("embeds");
+    for row in &v {
+        let norm = cosine(row, row).sqrt();
+        assert!((norm - 1.0).abs() < 1e-3, "not a unit vector: {norm}");
+    }
+    assert!((cosine(&v[0], &v[3]) - 1.0).abs() < 1e-4, "same text, same vector");
+    assert!(
+        cosine(&v[0], &v[1]) > cosine(&v[0], &v[2]),
+        "a paraphrase must be closer than an unrelated text"
+    );
+}

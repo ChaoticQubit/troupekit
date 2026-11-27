@@ -86,9 +86,9 @@ impl LlamaSettings {
         self
     }
 
-    /// Lets `embed` run on this model.
-    /// `LocalInfo::embedding_dims` is 0 unless this is set.
-    /// Default false.
+    /// Lets `embed` run on this model; each text is then decoded as one
+    /// batch the size of the context. `LocalInfo::embedding_dims` is 0
+    /// unless this is set. Default false.
     pub fn with_embeddings(mut self, embeddings: bool) -> Self {
         self.embeddings = embeddings;
         self
@@ -133,6 +133,54 @@ impl LlamaSettings {
 struct State {
     ctx: NonNull<ffi::TkCtx>,
     cached: Vec<i32>,
+}
+
+thread_local! {
+    static HELD: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The locked state of one model, recorded as held by this thread until
+/// dropped, so a call on the same model from inside a token callback is
+/// refused instead of waiting on its own lock. Derefs to the `State`.
+struct Held<'a> {
+    guard: MutexGuard<'a, State>,
+    key: usize,
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = State;
+
+    /// Returns the locked state. Output: a shared reference.
+    /// Valid while the lock is held.
+    /// Never blocks.
+    fn deref(&self) -> &State {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for Held<'_> {
+    /// Returns the locked state. Output: a mutable reference.
+    /// Valid while the lock is held.
+    /// Never blocks.
+    fn deref_mut(&mut self) -> &mut State {
+        &mut self.guard
+    }
+}
+
+impl Drop for Held<'_> {
+    /// Removes this model from the thread's held list before the lock is
+    /// released. Output: none.
+    /// The entry must be there: `lock` pushed it.
+    fn drop(&mut self) {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            let at = held
+                .iter()
+                .rposition(|k| *k == self.key)
+                .expect("a held model is on this thread's list");
+            held.remove(at);
+        });
+    }
 }
 
 /// A GGUF model run in-process by llama.cpp, checked before every C call.
@@ -217,13 +265,17 @@ impl LlamaModel {
             )));
         }
         let n_ctx = settings.context.min(train as usize);
-        let n_batch = n_ctx.min(BATCH_MAX);
+        let n_batch = if settings.embeddings {
+            n_ctx
+        } else {
+            n_ctx.min(BATCH_MAX)
+        };
         let threads = i32::try_from(settings.threads).expect("threads checked at most 256");
         let ctx_raw = unsafe {
             ffi::tk_ctx_new(
                 model.as_ptr(),
                 u32::try_from(n_ctx).map_err(|_| free_model("context too large".into()))?,
-                u32::try_from(n_batch).expect("batch at most 512"),
+                u32::try_from(n_batch).map_err(|_| free_model("batch too large".into()))?,
                 threads,
                 0,
             )
@@ -257,7 +309,13 @@ impl LlamaModel {
         })
     }
 
-    fn lock(&self) -> MutexGuard<'_, State> {
+    fn lock(&self) -> Result<Held<'_>, LocalError> {
+        let key = self as *const LlamaModel as usize;
+        if HELD.with(|held| held.borrow().contains(&key)) {
+            return Err(LocalError::Unsupported(
+                "a call on the same model from inside its own token callback",
+            ));
+        }
         let mut guard = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -269,7 +327,8 @@ impl LlamaModel {
         if self.reset_pending.swap(false, Ordering::SeqCst) {
             clear(&mut guard);
         }
-        guard
+        HELD.with(|held| held.borrow_mut().push(key));
+        Ok(Held { guard, key })
     }
 
     fn check_tokens(&self, tokens: &[u32]) -> Result<Vec<i32>, LocalError> {
@@ -317,7 +376,7 @@ impl LlamaModel {
     ) -> Result<(), LocalError> {
         for chunk in tokens.chunks(self.n_batch) {
             let pos = i32::try_from(state.cached.len()).expect("positions stay below the context");
-            let n = i32::try_from(chunk.len()).expect("chunk at most 512");
+            let n = i32::try_from(chunk.len()).expect("a chunk is at most one context");
             let rc = unsafe {
                 ffi::tk_decode_batch(
                     state.ctx.as_ptr(),
@@ -586,7 +645,7 @@ impl LocalModel for LlamaModel {
             .map(|t| self.tokenize(t, false))
             .collect::<Result<Vec<_>, _>>()?;
         let dims = unsafe { ffi::tk_model_n_embd_out(self.model.as_ptr()) } as usize;
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         let ctx = state.ctx;
         unsafe { ffi::tk_set_embeddings(ctx.as_ptr(), 1) };
         let result = token_lists
@@ -629,8 +688,15 @@ impl LlamaModel {
                 limit: self.n_ctx,
             });
         }
+        let fixed_end = prompt.len().saturating_add(params.max_tokens());
+        if params.ban_eos() && fixed_end > self.n_ctx {
+            return Err(LocalError::ContextFull {
+                needed: fixed_end,
+                limit: self.n_ctx,
+            });
+        }
         let mut sampler = Sampler::new(self.model, params)?;
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         let ctx = state.ctx;
         let reused = self.reuse_prefix(&mut state, &prompt);
         unsafe { ffi::tk_perf_reset(ctx.as_ptr()) };
@@ -673,12 +739,12 @@ impl LlamaModel {
                     "sampler returned token {token}"
                 )));
             }
-            if params.confidence() {
-                logprob_sum += log_softmax_at(self.logits_row(ctx, -1)?, token as usize);
-            }
             if !params.ban_eos() && unsafe { ffi::tk_is_eog(self.model.as_ptr(), token) } == 1 {
                 stop = GenStop::EndOfText;
                 break;
+            }
+            if params.confidence() {
+                logprob_sum += log_softmax_at(self.logits_row(ctx, -1)?, token as usize);
             }
             generated += 1;
             let step = text.push(&self.piece(token), on_token);
@@ -715,7 +781,7 @@ impl LlamaModel {
                 limit: self.n_ctx,
             });
         }
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         let ctx = state.ctx;
         unsafe { ffi::tk_kv_clear(ctx.as_ptr()) };
         state.cached.clear();
@@ -760,16 +826,18 @@ impl LlamaModel {
         if ids.is_empty() {
             return Ok(sum);
         }
-        for chunk in ids.chunks(self.n_batch) {
-            self.decode(state, chunk, true)?;
-            for i in 0..chunk.len() {
-                let ptr = unsafe { ffi::tk_embeddings(state.ctx.as_ptr(), i as i32) };
-                if ptr.is_null() {
-                    return Err(LocalError::Decode(format!("no embedding for output {i}")));
-                }
-                let row = unsafe { std::slice::from_raw_parts(ptr, dims) };
-                sum.iter_mut().zip(row).for_each(|(s, v)| *s += v);
+        assert!(
+            ids.len() <= self.n_batch,
+            "an embedding model decodes a whole context in one batch"
+        );
+        self.decode(state, &ids, true)?;
+        for i in 0..ids.len() {
+            let ptr = unsafe { ffi::tk_embeddings(state.ctx.as_ptr(), i as i32) };
+            if ptr.is_null() {
+                return Err(LocalError::Decode(format!("no embedding for output {i}")));
             }
+            let row = unsafe { std::slice::from_raw_parts(ptr, dims) };
+            sum.iter_mut().zip(row).for_each(|(s, v)| *s += v);
         }
         let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 0.0 && norm.is_finite() {

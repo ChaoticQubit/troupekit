@@ -202,9 +202,18 @@ fn kind_of_name(name: &str) -> &'static str {
     }
 }
 
+/// Returns the `$defs` key a `$ref` of the form `#/$defs/<token>` names:
+/// exactly one non-empty JSON Pointer token, decoded per RFC 6901 (`~1`
+/// then `~0`). A deeper pointer such as `#/$defs/a/b` is not a key.
+/// Output: the key, or `None` for any other form.
 fn def_name(path: &str) -> Option<String> {
-    let name = path.strip_prefix("#/$defs/")?;
-    Some(name.replace("~1", "/").replace("~0", "~"))
+    let token = path.strip_prefix("#/$defs/")?;
+    if token.is_empty() || token.contains('/') {
+        return None;
+    }
+    let name = token.replace("~1", "/").replace("~0", "~");
+    assert!(name.len() <= token.len());
+    Some(name)
 }
 
 /// Refuses a keyword next to `form` that the grammar cannot apply as

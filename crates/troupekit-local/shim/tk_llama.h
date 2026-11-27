@@ -68,9 +68,9 @@ int32_t tk_model_n_embd_out(const tk_model *model);
 /// Without one tk_chat_template_apply returns -1.
 int32_t tk_model_has_template(const tk_model *model);
 
-/// Creates a context for one sequence.
-/// Inputs: model, context and batch size in tokens, threads, and the
-/// initial embedding flag (0 or 1). Output: the context, or NULL.
+/// Creates a context for one sequence, with pooling off so embeddings
+/// are per-token rows. Inputs: model, context and batch size in tokens,
+/// threads, and the initial embedding flag. Output: the context, or NULL.
 tk_ctx *tk_ctx_new(tk_model *model, uint32_t n_ctx, uint32_t n_batch, int32_t threads, int32_t embeddings);
 
 /// Releases a context and its batch.
