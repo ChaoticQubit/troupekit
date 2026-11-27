@@ -311,17 +311,69 @@ fn tool_prompt(req: &CompletionRequest) -> String {
     prompt
 }
 
+const ANSWER_POINTER: &str = "#/oneOf/0/properties/answer";
+const DATA_KEYWORDS: [&str; 5] = ["$ref", "enum", "const", "default", "examples"];
+const NAMED_SCHEMAS: [&str; 5] = [
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+];
+
 fn envelope(req: &CompletionRequest) -> Value {
-    let answer = req
+    let mut answer = req
         .output_schema
         .clone()
         .unwrap_or_else(|| json!({"type": "string"}));
+    rebase_refs(&mut answer);
     let names: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
     json!({"oneOf": [
         {"type": "object", "properties": {"answer": answer}, "required": ["answer"], "additionalProperties": false},
         {"type": "object", "properties": {"tool": {"type": "string", "enum": names}, "arguments": {"type": "object"}},
          "required": ["tool", "arguments"], "additionalProperties": false}
     ]})
+}
+
+/// Rewrites every local pointer `$ref` (`#` or `#/...`) in `schema` to
+/// resolve from the envelope root, where the answer schema now sits at
+/// `ANSWER_POINTER`. A subschema with its own `$id` is its own resource,
+/// so it and everything under it are left as they are. Anchors and
+/// instance data (`enum`, `const`, `default`, `examples`) stay; maps
+/// of named subschemas such as `properties` are walked by value.
+fn rebase_refs(schema: &mut Value) {
+    match schema {
+        Value::Object(map) => {
+            if map.contains_key("$id") {
+                return;
+            }
+            if let Some(Value::String(target)) = map.get_mut("$ref") {
+                if target == "#" || target.starts_with("#/") {
+                    let rest = &target[1..];
+                    *target = format!("{ANSWER_POINTER}{rest}");
+                    assert!(target.starts_with(ANSWER_POINTER));
+                }
+            }
+            for (key, value) in map.iter_mut() {
+                let key = key.as_str();
+                if DATA_KEYWORDS.contains(&key) {
+                    continue;
+                }
+                match value {
+                    Value::Object(named) if NAMED_SCHEMAS.contains(&key) => {
+                        named.values_mut().for_each(rebase_refs);
+                    }
+                    _ => rebase_refs(value),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rebase_refs(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Turns host `reply` into message parts: the emulated JSON envelope

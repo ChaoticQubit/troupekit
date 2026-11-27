@@ -93,6 +93,52 @@ fn output_schema_with_emulated_tools_types_the_answer() {
 }
 
 #[test]
+fn envelope_keeps_local_refs_of_the_answer_schema() {
+    let mut req = with_tool();
+    req.output_schema = Some(json!({
+        "$defs": {"N": {"type": "integer"}},
+        "type": "object",
+        "properties": {
+            "n": {"$ref": "#/$defs/N"},
+            "me": {"$ref": "#"},
+            "tag": {"$ref": "#t"},
+            "default": {"$ref": "#/$defs/N"},
+        },
+    }));
+    let mut caps = HostModelCaps::default();
+    caps.json_schema = true;
+    let rendered = render(&req, &caps).unwrap();
+    let shape: serde_json::Value = serde_json::from_str(&rendered.schema_json.unwrap()).unwrap();
+    let answer = &shape["oneOf"][0]["properties"]["answer"];
+    let target = answer["properties"]["n"]["$ref"].as_str().unwrap();
+    let resolved = shape.pointer(target.strip_prefix('#').unwrap()).unwrap();
+    assert_eq!(resolved["type"], "integer");
+    let me = answer["properties"]["me"]["$ref"].as_str().unwrap();
+    assert_eq!(
+        shape.pointer(me.strip_prefix('#').unwrap()).unwrap(),
+        answer
+    );
+    assert_eq!(answer["properties"]["tag"]["$ref"], "#t");
+    assert_eq!(answer["properties"]["default"]["$ref"], target);
+}
+
+#[test]
+fn envelope_leaves_refs_of_an_own_id_schema() {
+    let mut req = with_tool();
+    req.output_schema = Some(json!({
+        "$id": "https://example.test/out",
+        "$defs": {"N": {"type": "integer"}},
+        "properties": {"n": {"$ref": "#/$defs/N"}},
+    }));
+    let mut caps = HostModelCaps::default();
+    caps.json_schema = true;
+    let rendered = render(&req, &caps).unwrap();
+    let shape: serde_json::Value = serde_json::from_str(&rendered.schema_json.unwrap()).unwrap();
+    let answer = &shape["oneOf"][0]["properties"]["answer"];
+    assert_eq!(answer["properties"]["n"]["$ref"], "#/$defs/N");
+}
+
+#[test]
 fn output_schema_with_native_tools_sends_both() {
     let mut req = with_tool();
     req.output_schema = Some(json!({"type": "object"}));
