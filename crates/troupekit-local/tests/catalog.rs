@@ -157,3 +157,19 @@ fn builtin_catalog_holds_the_test_model() {
     );
     assert_eq!(m.licence(), "apache-2.0");
 }
+
+#[test]
+fn builtin_catalog_ships_inside_the_crate() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/local.toml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} is not in the crate: {e}", path.display()));
+    let file = LocalCatalog::load(&text).expect("the shipped catalog parses");
+    let ids = |c: &LocalCatalog| {
+        c.rows()
+            .iter()
+            .map(|s| s.id().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&file), ids(LocalCatalog::builtin()));
+    assert!(!file.rows().is_empty());
+}
