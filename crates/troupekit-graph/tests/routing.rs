@@ -559,6 +559,18 @@ mod fields {
     }
 
     #[tokio::test]
+    async fn one_agent_sets_two_reducer_keys() {
+        let (model, _) = replying(r#"{"x": 1, "y": 2}"#);
+        let io = io(&[("fake/m", model)]);
+        let text = "name = 'two'\nstart = 'a'\n[state]\nm = 'int?'\nn = 'int?'\n[reducers]\nm = 'sum'\nn = 'sum'\n[[nodes]]\nid = 'a'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Count.'\nfields = { x = 'int', y = 'int' }\nsets = { x = 'm', y = 'n' }\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n";
+        let GraphOutcome::Done(state) = run(text, Map::new(), &io).await else {
+            panic!("the run finishes");
+        };
+        assert_eq!(state["m"], json!(1));
+        assert_eq!(state["n"], json!(2));
+    }
+
+    #[tokio::test]
     async fn goto_agent_maps_answer_while_routing_on_next() {
         let (model, schemas) = replying(r#"{"next": "r", "reason": "fits", "answer": "hello"}"#);
         let io = io(&[("fake/m", model)]);

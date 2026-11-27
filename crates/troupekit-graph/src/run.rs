@@ -2066,7 +2066,7 @@ impl GraphRun {
 
     fn reduce(&mut self, reduced: Vec<Reduced>) -> Result<(), String> {
         assert!(
-            reduced.windows(2).all(|w| w[0].branch < w[1].branch),
+            reduced.windows(2).all(|w| w[0].branch <= w[1].branch),
             "results are applied in ascending branch index"
         );
         let mut keys: Vec<String> = Vec::new();
