@@ -116,6 +116,61 @@ jobs:
           fi
           cargo test --locked $pkgs
 
+  llama:
+    name: llama embed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: gate
+        id: gate
+        shell: bash
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [[ "$HEAD_REF" == release/* ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          pkgs="$(sh scripts/changed-crates.sh "origin/$BASE")"
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ] && [ "$code" -ne 3 ]; then
+            echo "changed-crates.sh failed with exit $code"
+            exit "$code"
+          fi
+          case " $pkgs " in
+            *" troupekit-local "*) echo "run=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "run=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: steps.gate.outputs.run == 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-llama-${{ hashFiles('Cargo.lock', 'scripts/fetch-llama.sh') }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: steps.gate.outputs.run == 'true'
+        with:
+          path: ~/.cache/troupekit/models
+          key: test-models-${{ hashFiles('scripts/fetch-test-model.sh') }}
+      - name: fetch llama.cpp
+        if: steps.gate.outputs.run == 'true'
+        run: sh scripts/fetch-llama.sh
+      - name: fetch embedding model
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          path="$(sh scripts/fetch-test-model.sh embed)"
+          echo "TROUPEKIT_TEST_EMBED_GGUF=$path" >> "$GITHUB_ENV"
+      - name: embed test
+        if: steps.gate.outputs.run == 'true'
+        run: cargo test -p troupekit-local --features llama,embed --locked --test main -- --exact llama::pooled_embedding_gguf_gives_meaningful_vectors
+
   cipher:
     name: cipher ${{ matrix.feature }}
     runs-on: ubuntu-latest

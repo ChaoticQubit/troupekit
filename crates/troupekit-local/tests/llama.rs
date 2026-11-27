@@ -347,7 +347,7 @@ fn model_call_from_its_own_token_callback_is_refused_not_deadlocked() {
 }
 
 const FETCH_EMBED: &str =
-    "set TROUPEKIT_TEST_EMBED_GGUF to a mean-pooled embedding GGUF (for example a MiniLM or BGE export)";
+    "sh scripts/fetch-test-model.sh embed, then set TROUPEKIT_TEST_EMBED_GGUF to the printed path";
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
