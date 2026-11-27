@@ -629,6 +629,13 @@ impl LlamaModel {
                 limit: self.n_ctx,
             });
         }
+        let fixed_end = prompt.len().saturating_add(params.max_tokens());
+        if params.ban_eos() && fixed_end > self.n_ctx {
+            return Err(LocalError::ContextFull {
+                needed: fixed_end,
+                limit: self.n_ctx,
+            });
+        }
         let mut sampler = Sampler::new(self.model, params)?;
         let mut state = self.lock();
         let ctx = state.ctx;

@@ -294,3 +294,29 @@ fn end_of_text_is_left_out_of_the_confidence_mean() {
     let (a, b) = (ended.mean_logprob().unwrap(), capped.mean_logprob().unwrap());
     assert!((a - b).abs() < 1e-4, "EOG counted in the mean: {a} vs {b}");
 }
+
+#[test]
+fn fixed_length_overflow_is_refused_before_any_token() {
+    let model = LlamaModel::load(&test_gguf(), LlamaSettings::default().with_context(64))
+        .expect("test GGUF loads");
+    let limit = model.info().context_length();
+    let text = "one two three four five six seven eight nine ten ".repeat(20);
+    let tokens = model.tokenize(&text, false).expect("tokenizes");
+    let p = &tokens[..limit - 1];
+    let mut calls = 0usize;
+    let err = model
+        .generate(p, &greedy(2).with_ban_eos(true), &mut |_| {
+            calls += 1;
+            Flow::Continue
+        })
+        .expect_err("prompt plus two tokens is past the context");
+    assert!(
+        matches!(err, LocalError::ContextFull { needed, limit: l } if needed == limit + 1 && l == limit),
+        "{err:?}"
+    );
+    assert_eq!(calls, 0, "no token before the error");
+    let one = model
+        .generate(p, &greedy(1).with_ban_eos(true), &mut |_| Flow::Continue)
+        .expect("one token still fits");
+    assert_eq!(one.tokens(), 1);
+}
