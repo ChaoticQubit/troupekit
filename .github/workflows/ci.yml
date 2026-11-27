@@ -491,10 +491,13 @@ jobs:
         run: |
           set -euo pipefail
           ndk="${ANDROID_NDK_LATEST_HOME:?no Android NDK on this runner}"
-          test -d "$ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin"
           rustup target add aarch64-apple-ios aarch64-linux-android
-          export ANDROID_NDK_HOME="$ndk"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android26-clang"
+          bin="$ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+          export ANDROID_NDK_HOME="$ndk" ANDROID_NDK_ROOT="$ndk"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android26-clang"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$bin/aarch64-linux-android26-clang"
+          test -x "$CC_aarch64_linux_android"
           sh scripts/size-report.sh --label=runner | tee size.md
           test "$(grep -c '| runner |$' size.md)" = 6
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
