@@ -123,6 +123,7 @@ tk_ctx *tk_ctx_new(tk_model *model, uint32_t n_ctx, uint32_t n_batch, int32_t th
     params.n_threads = threads;
     params.n_threads_batch = threads;
     params.embeddings = embeddings != 0;
+    params.pooling_type = LLAMA_POOLING_TYPE_NONE;
     params.no_perf = false;
     struct llama_context *ctx = llama_init_from_model(model->model, params);
     if (ctx == NULL) {

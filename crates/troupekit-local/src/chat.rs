@@ -75,7 +75,8 @@ impl LocalChatSettings {
 
     /// Sets the minimum confidence (geometric mean token probability,
     /// 0 to 1) below which a call fails with a `Server` error a router
-    /// may fall back on. Default `None` (off: one softmax per token).
+    /// may fall back on. While set, a streamed reply is held and sent only
+    /// after it passes. Default `None` (off: one softmax per token).
     pub fn with_min_confidence(mut self, min_confidence: Option<f64>) -> Self {
         self.min_confidence = min_confidence
             .filter(|c| c.is_finite())
@@ -264,7 +265,8 @@ impl LocalChat {
             .with_cancel(Some(cancel));
         let prompt_tokens = prompt.len();
         let require_call = self.settings.tool_mode == ToolMode::Required && !req.tools.is_empty();
-        let mut gate = TextGate::new(!req.tools.is_empty(), require_call);
+        let hold_all = require_call || self.settings.min_confidence.is_some();
+        let mut gate = TextGate::new(!req.tools.is_empty(), hold_all);
         let generation = self.generate(prompt, params, &mut gate, on_delta).await?;
         self.check_confidence(&generation)?;
         let earlier_calls = req
