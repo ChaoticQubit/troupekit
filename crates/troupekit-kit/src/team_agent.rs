@@ -37,8 +37,9 @@ pub(crate) struct Members {
 /// How a leader works with its `members`: `Route` picks one member,
 /// `Coordinate` delegates to them, `Collaborate` briefs all and combines
 /// their answers, `Broadcast` briefs all and keeps every answer. `Tasks`
-/// delegates in passes until the leader says it is done; the run's steps,
-/// not its passes, are capped (96 at the default `max_iterations`).
+/// delegates in passes until the leader says it is done, at most
+/// `max_iterations` passes (5); a run still not done after the last pass
+/// fails. Member spend through delegation is not counted in the run caps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TeamMode {
     Route,
@@ -246,12 +247,14 @@ const RETRY_WAIT_MAX_MS: i64 = 30_000;
 /// A team agent's flow and the graph io its nodes run on: the leader's
 /// and members' personas, models, tools and evals, the leader's ledger and
 /// events, and the state key that holds the answer: `answers` for
-/// broadcast, which keeps every member's answer, else `output`. Built once
-/// at `build`, shared by every run.
+/// broadcast, which keeps every member's answer, else `output`, and for
+/// `tasks` that a run ending with `done` false fails. Built once at
+/// `build`, shared by every run.
 pub(crate) struct TeamFlow {
     flow: Flow,
     io: SimpleGraphIo,
     answer: &'static str,
+    tasks: bool,
 }
 
 impl Agent {
@@ -260,7 +263,7 @@ impl Agent {
     /// first problem: mode, members, a member's own settings, or the flow.
     pub(crate) async fn build_team(mut self) -> Result<BuiltAgent, KitError> {
         let name = self.name().to_string();
-        let (text, members, answer) = self.pattern()?;
+        let (text, members, answer, tasks) = self.pattern()?;
         assert!(!self.members.is_team(), "the pattern took every member");
         if members.is_empty() || members.len() > TEAM_MEMBERS_MAX {
             let m = format!(
@@ -290,14 +293,19 @@ impl Agent {
         let probe = input_state("build check");
         GraphRun::start(flow.clone(), probe, leader.limits().clone(), &io).await?;
         assert!(!flow.workflow().nodes.is_empty());
-        Ok(leader.with_team(TeamFlow { flow, io, answer }))
+        Ok(leader.with_team(TeamFlow {
+            flow,
+            io,
+            answer,
+            tasks,
+        }))
     }
 
     /// Takes the team or the handoffs off this agent and returns the
-    /// pattern TOML, the other agents and the state key of the answer:
-    /// `answers` for broadcast, else `output`. Fails for members and
-    /// handoffs at once.
-    fn pattern(&mut self) -> Result<(String, Vec<Agent>, &'static str), KitError> {
+    /// pattern TOML, the other agents, the state key of the answer
+    /// (`answers` for broadcast, else `output`) and whether the mode is
+    /// `tasks`. Fails for members and handoffs at once.
+    fn pattern(&mut self) -> Result<(String, Vec<Agent>, &'static str, bool), KitError> {
         let name = self.name().to_string();
         let team = self.members.team.take();
         let handoffs = std::mem::take(&mut self.members.handoffs);
@@ -313,9 +321,9 @@ impl Agent {
                 } else {
                     "output"
                 };
-                Ok((text, members, answer))
+                Ok((text, members, answer, mode == TeamMode::Tasks))
             }
-            (None, false) => Ok((handoff_text(&name, &handoffs)?, handoffs, "output")),
+            (None, false) => Ok((handoff_text(&name, &handoffs)?, handoffs, "output", false)),
             (None, true) => panic!("build_team runs for a team or handoffs"),
         }
     }
@@ -503,7 +511,13 @@ impl TeamFlow {
                     })
                 }
                 GraphOutcome::Done(state) => {
-                    return Ok(team_outcome(run, state, self.answer, input))
+                    if self.tasks && state.get("done") != Some(&Value::Bool(true)) {
+                        return Err(KitError::Failed {
+                            run_id: run.run_id(),
+                            reason: "the tasks leader was not done after its last pass".into(),
+                        });
+                    }
+                    return Ok(team_outcome(run, state, self.answer, input));
                 }
             }
         }

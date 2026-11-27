@@ -489,7 +489,10 @@ async fn members_tasks_loops_until_done() {
     let second = seen.lock().unwrap().clone();
     assert!(second.contains("the bill is 40 dollars"), "{second}");
     assert!(second.contains("check the tax"), "{second}");
-    let stuck = Arc::new(FnModel::new("fake/m", |_req| {
+    let stuck_passes = Arc::new(AtomicUsize::new(0));
+    let stuck_count = stuck_passes.clone();
+    let stuck = Arc::new(FnModel::new("fake/m", move |_req| {
+        stuck_count.fetch_add(1, Ordering::SeqCst);
         text_reply(
             r#"{"done":false,"tasks":["more"],"results":[],"answer":""}"#,
             10,
@@ -504,7 +507,15 @@ async fn members_tasks_loops_until_done() {
         .await
         .unwrap();
     let err = looping.run_with("Never done").await.unwrap_err();
-    assert!(matches!(err, KitError::Failed { .. }), "{err}");
+    assert!(
+        matches!(&err, KitError::Failed { reason, .. } if reason.contains("last pass")),
+        "{err}"
+    );
+    assert_eq!(
+        stuck_passes.load(Ordering::SeqCst),
+        5,
+        "a leader never done runs max_iterations passes"
+    );
 }
 
 #[tokio::test]

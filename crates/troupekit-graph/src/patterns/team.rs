@@ -320,11 +320,12 @@ fn coordinate(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     Ok(t.finish())
 }
 
-/// Compiles `tasks`: the leader delegates to the members and replies with
-/// `done`, the open `tasks`, this pass's `results` and its `answer`, set to
-/// `done`, `tasks`, `results` (extended pass by pass) and `output`. A switch
-/// on `done` ends the run or loops back to the leader, which reads the open
-/// tasks and every earlier result; `max_iterations` sets max_steps.
+/// Compiles `tasks` as `max_iterations` leader passes in a row with no
+/// edge back, so the pass count is bounded by the flow itself. Each pass
+/// delegates to the members, reads the open `tasks` and every earlier
+/// `results`, and sets `done`, `tasks`, `results` (extended) and `output`.
+/// A switch on `done` ends the run or enters the next pass; the last pass
+/// ends it, leaving `done` false when the leader is not done.
 fn tasks(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     let lead = node_id(&team.leader);
     let (mut t, mut reads) = start(file, team, &lead)?;
@@ -336,30 +337,46 @@ fn tasks(file: &str, team: &Team) -> Result<Table, WorkflowError> {
     t.reducer("results", "extend");
     reads.insert(1, "tasks".to_string());
     reads.insert(2, "results".to_string());
-    let mut leader = agent(&lead, &team.leader, Some(TASKS_PROMPT), &reads, None);
-    leader.insert("delegates".into(), strings(&team.members));
     let mut fields = Table::new();
     fields.insert("done".into(), Value::String("bool".into()));
     fields.insert("tasks".into(), Value::String("list<string>".into()));
     fields.insert("results".into(), Value::String("list<string>".into()));
     fields.insert("answer".into(), Value::String("string".into()));
-    leader.insert("fields".into(), Value::Table(fields));
     let mut sets = Table::new();
     sets.insert("done".into(), Value::String("done".into()));
     sets.insert("tasks".into(), Value::String("tasks".into()));
     sets.insert("results".into(), Value::String("results".into()));
     sets.insert("answer".into(), Value::String("output".into()));
-    leader.insert("sets".into(), Value::Table(sets));
-    t.node("team.leader", leader)?;
-    let mut switch = Table::new();
-    switch.insert("id".into(), Value::String("check_done".into()));
-    switch.insert("kind".into(), Value::String("switch".into()));
-    switch.insert("on".into(), Value::String("done".into()));
-    t.node("team.mode", switch)?;
-    t.edge(&lead, "check_done");
-    t.routed("check_done", END, "true");
-    t.routed("check_done", &lead, "false");
+    let passes = usize::try_from(team.max_iterations).expect("max_iterations is in range");
+    let ids: Vec<String> = (1..=passes)
+        .map(|k| match k {
+            1 => lead.clone(),
+            _ => format!("{lead}_pass_{k}"),
+        })
+        .collect();
+    for (k, id) in ids.iter().enumerate() {
+        let mut leader = agent(id, &team.leader, Some(TASKS_PROMPT), &reads, None);
+        leader.insert("delegates".into(), strings(&team.members));
+        leader.insert("fields".into(), Value::Table(fields.clone()));
+        leader.insert("sets".into(), Value::Table(sets.clone()));
+        t.node("team.leader", leader)?;
+        let Some(next) = ids.get(k + 1) else {
+            t.edge(id, END);
+            continue;
+        };
+        let check = format!("check_pass_{}", k + 1);
+        let mut switch = Table::new();
+        switch.insert("id".into(), Value::String(check.clone()));
+        switch.insert("kind".into(), Value::String("switch".into()));
+        switch.insert("on".into(), Value::String("done".into()));
+        t.node("team.mode", switch)?;
+        t.edge(id, &check);
+        t.routed(&check, END, "true");
+        t.routed(&check, next, "false");
+    }
     t.end("team")?;
+    assert_eq!(ids.len(), passes, "one leader node per pass");
+    assert_eq!(ids[0], lead, "the first pass is the start node");
     assert_eq!(reads[1], "tasks", "the leader reads the open tasks");
     assert_eq!(reads[2], "results", "the leader reads earlier results");
     Ok(t.finish())

@@ -773,6 +773,38 @@ fn tasks_compiles_to_bounded_leader_loop() {
     assert_eq!(lead["sets"]["results"].as_str(), Some("results"));
     let three = compile(FILE, &format!("{text}max_iterations = 3\n")).unwrap();
     assert_eq!(three["max_steps"].as_integer(), Some(64));
+    for (table, passes) in [(&table, 5), (&three, 3)] {
+        let leaders: Vec<&str> = nodes(table)
+            .iter()
+            .filter_map(Value::as_table)
+            .filter(|n| n.get("persona").and_then(Value::as_str) == Some("lead"))
+            .filter_map(|n| n["id"].as_str())
+            .collect();
+        assert_eq!(leaders.len(), passes, "one leader node per pass");
+        let edges = edge_list(table);
+        assert!(
+            edges.iter().all(|(_, to, _)| *to != "lead"),
+            "no edge returns to the first pass"
+        );
+        for (k, id) in leaders.iter().enumerate() {
+            let into: Vec<_> = edges.iter().filter(|(_, to, _)| to == id).collect();
+            assert_eq!(into.len(), usize::from(k > 0), "{id} is entered once");
+        }
+        let last = leaders[passes - 1];
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|(from, _, _)| *from == last)
+                .collect::<Vec<_>>(),
+            [&(last, "end", None)],
+            "the last pass ends the run"
+        );
+    }
+    let hundred = loaded(&format!("{text}max_iterations = 100\n"));
+    assert!(matches!(
+        hundred.kind("lead_pass_100"),
+        Some(FlowKind::Agent { .. })
+    ));
     refused(
         &format!("{text}max_iterations = 0\n"),
         "team.max_iterations",
@@ -785,9 +817,10 @@ fn tasks_compiles_to_bounded_leader_loop() {
     );
     let flow = loaded(&text);
     assert!(matches!(
-        flow.kind("check_done"),
+        flow.kind("check_pass_1"),
         Some(FlowKind::Switch { .. })
     ));
+    assert!(flow.kind("check_pass_5").is_none());
 }
 
 #[test]
