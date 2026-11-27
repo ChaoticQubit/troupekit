@@ -1,7 +1,7 @@
 use serde_json::{json, Map, Value};
-use troupekit_graph::{Ask, Conditions, NodeKind, Workflow, WorkflowError};
+use troupekit_graph::{Ask, Conditions, Flow, NodeKind, Workflow, WorkflowError};
 
-const FULL: &str = r#"
+pub(crate) const FULL: &str = r#"
 name = "plan-week"
 start = "plan"
 max_steps = 50
@@ -72,7 +72,14 @@ const HEAD: &str =
     "name = 'w'\nstart = 'a'\n[state]\nx = 'string'\ny = 'string'\nok = 'bool'\nn = 'int'\n";
 
 fn parse(text: &str) -> Result<Workflow, WorkflowError> {
-    Workflow::parse("test/w.toml", text)
+    let wf = Workflow::parse("test/w.toml", text);
+    let flow = Flow::parse("test/w.toml", text);
+    match (&wf, &flow) {
+        (Ok(w), Ok(f)) => assert_eq!(&Flow::from(w.clone()), f, "{text}"),
+        (Err(a), Err(b)) => assert_eq!(a, b),
+        _ => panic!("parsers disagree on:\n{text}\nworkflow: {wf:?}\nflow: {flow:?}"),
+    }
+    wf
 }
 
 fn nodes(list: &[&str]) -> String {

@@ -21,7 +21,7 @@ use troupekit_providers::wire::{AuthStyle, Protocol, Quirks};
 use troupekit_providers::{CompletionRequest, CompletionResponse, Delta, Model, Price, StopReason};
 use troupekit_tools::{hosted, typed_tool, HostedTool, ToolContext, ToolOutput, ToolRegistry};
 
-const PRICE: Price = Price {
+pub(crate) const PRICE: Price = Price {
     input_usd_micros_per_mtok: 1_000_000,
     output_usd_micros_per_mtok: 2_000_000,
     verified: true,
@@ -29,22 +29,22 @@ const PRICE: Price = Price {
     search_usd_micros: 0,
 };
 
-type Reply = Result<CompletionResponse, ProviderError>;
+pub(crate) type Reply = Result<CompletionResponse, ProviderError>;
 
-struct FakeModel {
+pub(crate) struct FakeModel {
     replies: Mutex<VecDeque<Reply>>,
     seen: Mutex<Vec<CompletionRequest>>,
 }
 
 impl FakeModel {
-    fn new(replies: Vec<Reply>) -> Arc<Self> {
+    pub(crate) fn new(replies: Vec<Reply>) -> Arc<Self> {
         Arc::new(Self {
             replies: Mutex::new(replies.into()),
             seen: Mutex::new(Vec::new()),
         })
     }
 
-    fn seen(&self) -> Vec<CompletionRequest> {
+    pub(crate) fn seen(&self) -> Vec<CompletionRequest> {
         self.seen.lock().unwrap().clone()
     }
 
@@ -83,7 +83,7 @@ impl Model for FakeModel {
     }
 }
 
-fn usage(input: u64, output: u64) -> Usage {
+pub(crate) fn usage(input: u64, output: u64) -> Usage {
     Usage {
         input_tokens: input,
         output_tokens: output,
@@ -91,7 +91,7 @@ fn usage(input: u64, output: u64) -> Usage {
     }
 }
 
-fn text(s: &str) -> Reply {
+pub(crate) fn text(s: &str) -> Reply {
     Ok(CompletionResponse {
         message: Message::text(Role::Assistant, s),
         usage: usage(10, 5),
@@ -99,7 +99,7 @@ fn text(s: &str) -> Reply {
     })
 }
 
-fn calls(list: &[(&str, &str)]) -> Reply {
+pub(crate) fn calls(list: &[(&str, &str)]) -> Reply {
     let parts = list
         .iter()
         .map(|(id, name)| ContentPart::ToolCall {
@@ -115,17 +115,17 @@ fn calls(list: &[(&str, &str)]) -> Reply {
     })
 }
 
-fn persona(extra: &str) -> Persona {
+pub(crate) fn persona(extra: &str) -> Persona {
     let text = format!("name = 'coach'\ndisplay_name = 'Coach'\nrole = 'Plans.'\ngoal = 'A plan.'\ninstructions = 'Plan it.'\nmodel = 'fake/m'\n{extra}");
     Persona::parse("test/coach.toml", &text).unwrap()
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct Q {
+pub(crate) struct Q {
     q: String,
 }
 
-fn counted(name: &str, count: Arc<AtomicUsize>) -> Arc<dyn troupekit_tools::Tool> {
+pub(crate) fn counted(name: &str, count: Arc<AtomicUsize>) -> Arc<dyn troupekit_tools::Tool> {
     Arc::new(typed_tool(
         name,
         "test tool",
@@ -139,15 +139,15 @@ fn counted(name: &str, count: Arc<AtomicUsize>) -> Arc<dyn troupekit_tools::Tool
     ))
 }
 
-struct Setup {
-    io: SimpleIo,
-    model: Arc<FakeModel>,
-    sink: Arc<VecSink>,
-    ledger: Arc<InMemoryLedger>,
-    count: Arc<AtomicUsize>,
+pub(crate) struct Setup {
+    pub(crate) io: SimpleIo,
+    pub(crate) model: Arc<FakeModel>,
+    pub(crate) sink: Arc<VecSink>,
+    pub(crate) ledger: Arc<InMemoryLedger>,
+    pub(crate) count: Arc<AtomicUsize>,
 }
 
-fn setup(replies: Vec<Reply>, price: Price) -> Setup {
+pub(crate) fn setup(replies: Vec<Reply>, price: Price) -> Setup {
     let count = Arc::new(AtomicUsize::new(0));
     let mut tools = ToolRegistry::new();
     tools.register(counted("echo", count.clone())).unwrap();
@@ -174,15 +174,15 @@ fn setup(replies: Vec<Reply>, price: Price) -> Setup {
     }
 }
 
-fn ask() -> Vec<Message> {
+pub(crate) fn ask() -> Vec<Message> {
     vec![Message::text(Role::User, "Plan my week")]
 }
 
-async fn run_to_end(run: &mut AgentRun, io: &dyn AgentIo) -> StepOutcome {
+pub(crate) async fn run_to_end(run: &mut AgentRun, io: &dyn AgentIo) -> StepOutcome {
     drive(run, io, &InMemCheckpoints::default()).await.unwrap()
 }
 
-async fn step_to_end(run: &mut AgentRun, io: &dyn AgentIo) -> StepOutcome {
+pub(crate) async fn step_to_end(run: &mut AgentRun, io: &dyn AgentIo) -> StepOutcome {
     loop {
         let out = run.step(io).await;
         if out != StepOutcome::Continue {
