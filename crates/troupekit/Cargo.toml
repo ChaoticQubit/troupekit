@@ -20,17 +20,27 @@ troupekit-host = { path = "../troupekit-host", version = "0.2.0", default-featur
 troupekit-store-sqlite = { path = "../troupekit-store-sqlite", version = "0.2.0", optional = true }
 troupekit-context = { path = "../troupekit-context", version = "0.2.0", optional = true }
 troupekit-kit = { path = "../troupekit-kit", version = "0.2.0", default-features = false, optional = true }
+troupekit-providers = { path = "../troupekit-providers", version = "0.2.0", default-features = false }
 troupekit-local = { path = "../troupekit-local", version = "0.2.0", default-features = false, optional = true }
 
 [features]
-default = ["sqlite", "reqwest"]
-sqlite = ["dep:troupekit-store-sqlite"]
-knowledge = ["sqlite", "dep:troupekit-context", "dep:troupekit-kit", "troupekit-kit/knowledge"]
-reqwest = ["troupekit-agent/reqwest", "troupekit-graph/reqwest", "troupekit-host/reqwest"]
+default = ["sqlite", "reqwest", "kit"]
+kit = ["dep:troupekit-kit"]
+sqlite = ["dep:troupekit-store-sqlite", "troupekit-kit?/sqlite"]
+knowledge = ["sqlite", "kit", "dep:troupekit-context", "troupekit-kit/knowledge"]
+reqwest = ["troupekit-agent/reqwest", "troupekit-graph/reqwest", "troupekit-host/reqwest", "troupekit-kit?/reqwest"]
 sqlcipher = ["sqlite", "troupekit-store-sqlite/sqlcipher"]
 sqlcipher-system = ["sqlite", "troupekit-store-sqlite/sqlcipher-system"]
-local = ["dep:troupekit-kit", "troupekit-kit/local", "dep:troupekit-local"]
+local = ["kit", "troupekit-kit/local", "dep:troupekit-local"]
 llama = ["local", "troupekit-kit/llama", "troupekit-local/llama"]
+
+[[example]]
+name = "hello"
+required-features = ["kit"]
+
+[[example]]
+name = "tool_agent"
+required-features = ["kit"]
 
 [[example]]
 name = "kill_resume"

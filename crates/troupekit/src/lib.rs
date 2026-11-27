@@ -1,14 +1,27 @@
-//! Troupekit entry crate. `Troupe::builder()` wires the five stores, in
-//! memory by default or in one SQLite file with `sqlite(path)`, and hands
-//! out a `Runner` over them. The engines are re-exported as modules.
+//! Troupekit entry crate. `use troupekit::prelude::*;` gives the `#[agent]`
+//! and `#[tool]` macros and the `Agent` and `Graph` builders (feature `kit`,
+//! on by default). `Troupe::builder()` wires the five stores, in memory by
+//! default or in one SQLite file with `sqlite(path)`, and hands out a
+//! `Runner` over them. The engines are re-exported as modules.
 
 pub use troupekit_agent as agent;
 pub use troupekit_core as core;
 pub use troupekit_graph as graph;
 pub use troupekit_host as host;
+pub use troupekit_providers as providers;
 pub use troupekit_trace as trace;
 #[cfg(feature = "local")]
 pub use troupekit_local as local;
+#[cfg(feature = "kit")]
+#[doc(hidden)]
+pub use troupekit_kit::__private;
+#[cfg(feature = "kit")]
+pub use troupekit_kit::{
+    agent, prelude, tool, Agent, AsTool, BuiltAgent, BuiltGraph, Graph, GraphReport, Input,
+    IntoToolOutput, Json, KitError, Laws, RunOutcome, Storage, Tool, ToolContext, ToolOutput,
+};
+#[cfg(feature = "knowledge")]
+pub use troupekit_kit::{knowledge, AgentMemory, Knowledge};
 
 #[cfg(feature = "sqlite")]
 pub use troupekit_store_sqlite::{Durability, SqliteStore, SqliteStoreBuilder};
@@ -16,9 +29,6 @@ pub use troupekit_store_sqlite::{Durability, SqliteStore, SqliteStoreBuilder};
 pub use troupekit_context as context;
 #[cfg(feature = "knowledge")]
 pub use troupekit_store_sqlite::{HnswParams, IndexKind, OpenReport, Quantization, SqliteVectors, VectorSettings};
-
-#[cfg(feature = "knowledge")]
-pub mod knowledge;
 
 use std::sync::Arc;
 use troupekit_agent::InMemoryLedger;
@@ -158,5 +168,3 @@ impl Troupe {
     }
 }
 
-#[cfg(feature = "local")]
-use troupekit_kit as _;
