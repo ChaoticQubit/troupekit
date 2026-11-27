@@ -204,10 +204,10 @@ impl AgentRun {
     }
 
     /// Forks the run saved in `cp`, keeps its first `index` messages, adds
-    /// `input` and leaves the fork ready for a model call. The cut must
-    /// follow a user or tool message, so it never splits a tool exchange,
-    /// and `input` must be a user message. Returns the fork, or `Setup`
-    /// for a bad cut and `Checkpoint` for a bad checkpoint.
+    /// `input` and leaves the fork ready for a model call. The cut follows
+    /// a user or tool message and keeps every kept tool call's result, so
+    /// it never splits a tool exchange; `input` must be a user message.
+    /// Returns the fork, or `Setup` for a bad cut, `Checkpoint` for a bad cp.
     pub fn fork_at_message(
         cp: &Checkpoint,
         index: usize,
@@ -224,6 +224,18 @@ impl AgentRun {
         }
         if input.as_ref().is_some_and(|m| m.role != Role::User) {
             return bad("input must be a user message");
+        }
+        let kept = &source.messages[..index];
+        let answered: Vec<&str> = kept
+            .iter()
+            .flat_map(|m| &m.parts)
+            .filter_map(|p| match p {
+                ContentPart::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        if let Some((id, _, _)) = kept.iter().flat_map(|m| m.tool_calls()).find(|(id, _, _)| !answered.contains(id)) {
+            return bad(&format!("tool call `{id}` would lose its result"));
         }
         let mut child = source.fork();
         child.messages.truncate(index);

@@ -1,4 +1,4 @@
-use crate::run::{calls, persona, setup, step_to_end, text, Q, PRICE};
+use crate::run::{calls, persona, setup, step_to_end, text, PRICE, Q};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use troupekit_agent::run::{AgentRun, RunState, StepOutcome};
@@ -80,9 +80,14 @@ async fn tool_turn_then_answer() -> (Checkpoint, crate::run::Setup) {
         vec![calls(&[("c1", "echo")]), text("first"), text("second")],
         PRICE,
     );
-    let mut run = AgentRun::new(&persona("tools = ['echo']"), ask(), Limits::default(), &s.io)
-        .await
-        .unwrap();
+    let mut run = AgentRun::new(
+        &persona("tools = ['echo']"),
+        ask(),
+        Limits::default(),
+        &s.io,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         step_to_end(&mut run, &s.io).await,
         StepOutcome::Done(json!("first"))
@@ -123,7 +128,10 @@ async fn fork_at_message_inside_tool_exchange_is_refused() {
     let inside = refused(AgentRun::fork_at_message(&cp, 2, None));
     assert!(inside.contains("user or tool message"), "{inside}");
     let after_answer = refused(AgentRun::fork_at_message(&cp, 4, None));
-    assert!(after_answer.contains("user or tool message"), "{after_answer}");
+    assert!(
+        after_answer.contains("user or tool message"),
+        "{after_answer}"
+    );
     let zero = refused(AgentRun::fork_at_message(&cp, 0, None));
     assert!(zero.contains("1 to 4"), "{zero}");
     let past = refused(AgentRun::fork_at_message(&cp, 5, None));
@@ -155,9 +163,14 @@ async fn forked_tool_calls_get_new_idempotency_keys() {
             },
         )))
         .unwrap();
-    let mut run = AgentRun::new(&persona("tools = ['keys']"), ask(), Limits::default(), &s.io)
-        .await
-        .unwrap();
+    let mut run = AgentRun::new(
+        &persona("tools = ['keys']"),
+        ask(),
+        Limits::default(),
+        &s.io,
+    )
+    .await
+    .unwrap();
     assert_eq!(run.step(&s.io).await, StepOutcome::Continue);
     assert!(matches!(run.state(), RunState::CallTools { .. }));
     let mut fork = run.fork();
@@ -168,4 +181,38 @@ async fn forked_tool_calls_get_new_idempotency_keys() {
     assert_eq!(keys[0], format!("{}:2:0", run.run_id()));
     assert_eq!(keys[1], format!("{}:1:0", fork.run_id()));
     assert_ne!(keys[0], keys[1]);
+}
+
+#[tokio::test]
+async fn fork_at_message_refuses_a_cut_between_tool_results() {
+    let s = setup(
+        vec![calls(&[("c1", "echo"), ("c2", "echo")]), text("first")],
+        PRICE,
+    );
+    let mut run = AgentRun::new(
+        &persona("tools = ['echo']"),
+        ask(),
+        Limits::default(),
+        &s.io,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        step_to_end(&mut run, &s.io).await,
+        StepOutcome::Done(json!("first"))
+    );
+    let mut cp = run.checkpoint();
+    let messages = cp.state["messages"].as_array_mut().unwrap();
+    assert_eq!(messages[2]["role"], json!("tool"));
+    let parts = messages[2]["parts"].as_array().unwrap().clone();
+    assert_eq!(parts.len(), 2, "one tool message holds both results");
+    messages[2]["parts"] = json!([parts[0]]);
+    messages.insert(3, json!({"role": "tool", "parts": [parts[1]]}));
+    let err = AgentRun::fork_at_message(&cp, 3, None).unwrap_err();
+    assert!(
+        matches!(&err, AgentError::Setup(m) if m.contains("`c2`")),
+        "{err}"
+    );
+    let whole = AgentRun::fork_at_message(&cp, 4, None).unwrap();
+    assert_eq!(whole.messages().len(), 4);
 }
