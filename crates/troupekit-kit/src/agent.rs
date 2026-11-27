@@ -69,6 +69,10 @@ pub struct Agent {
     auto_laws: bool,
     pub(crate) trace: crate::trace::TraceConfig,
     pub(crate) route: crate::route::RouteConfig,
+    #[cfg(feature = "local")]
+    pub(crate) local: Option<crate::local::LocalChoice>,
+    #[cfg(feature = "local")]
+    pub(crate) download: bool,
 }
 
 impl Agent {
@@ -108,6 +112,10 @@ impl Agent {
             auto_laws: true,
             trace: crate::trace::TraceConfig::default(),
             route: crate::route::RouteConfig::default(),
+            #[cfg(feature = "local")]
+            local: None,
+            #[cfg(feature = "local")]
+            download: false,
         }
     }
 
@@ -386,13 +394,15 @@ impl Agent {
                 ),
             ));
         }
+        #[cfg(feature = "local")]
+        let this = self.load_local(&mut crate::local::Loads::new()).await?;
+        #[cfg(not(feature = "local"))]
+        let this = self;
         #[cfg(feature = "knowledge")]
         let (this, preamble) = {
-            self.prepare(None)?;
-            crate::memory::attach(self).await?
+            this.prepare(None)?;
+            crate::memory::attach(this).await?
         };
-        #[cfg(not(feature = "knowledge"))]
-        let this = self;
         let prepared = this.prepare(None)?;
         let mut io = SimpleIo::new(prepared.registry);
         io.models
@@ -441,11 +451,17 @@ impl Agent {
     #[cfg(feature = "knowledge")]
     fn check_private_knowledge(&self) -> Result<(), KitError> {
         match &self.knowledge {
-            Some(k) if self.route.private && !k.on_device => Err(KitError::config(
+            Some(k)
+                if self.route.private
+                    && !k.on_device
+                    && !(k.embedder.is_none() && self.route.local_only) =>
+            {
+                Err(KitError::config(
                 &self.name,
                 "a private agent cannot send documents to a cloud embedder: \
                  use Knowledge::dir(..).on_device_embedder(..)",
-            )),
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -483,10 +499,33 @@ impl Agent {
             && self.route.same(&other.route)
     }
 
+    #[cfg(all(feature = "knowledge", feature = "local"))]
+    pub(crate) async fn knowledge_embedder(
+        &self,
+        k: &crate::knowledge::Knowledge,
+    ) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
+        match &k.local {
+            Some(choice) => self.local_embedder(choice).await,
+            None => self.default_embedder(),
+        }
+    }
+
+    #[cfg(all(feature = "knowledge", not(feature = "local")))]
+    pub(crate) async fn knowledge_embedder(
+        &self,
+        _k: &crate::knowledge::Knowledge,
+    ) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
+        self.default_embedder()
+    }
+
     #[cfg(feature = "knowledge")]
     pub(crate) fn default_embedder(
         &self,
     ) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
+        #[cfg(feature = "local")]
+        if let (true, Some(model)) = (self.route.local_only, &self.route.local_model) {
+            return crate::local::embedder_of(&self.name, model);
+        }
         crate::model::default_embedder(ModelChoice {
             agent: &self.name,
             selector: self.model.as_deref().unwrap_or_default(),
@@ -503,6 +542,27 @@ impl Agent {
         &self.name
     }
 
+    #[cfg(feature = "local")]
+    pub(crate) fn selector(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn set_selector(&mut self, selector: String) {
+        assert!(self.model.is_none(), "an explicit .model(..) is kept");
+        self.model = Some(selector);
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn has_client(&self) -> bool {
+        self.model_client.is_some()
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn transport_handle(&self) -> Option<Arc<dyn Transport>> {
+        self.transport.clone()
+    }
+
     pub(crate) fn prepare(&self, model_key: Option<&str>) -> Result<Prepared, KitError> {
         let name = self.name.as_str();
         let Some(instructions) = self.instructions.as_deref() else {
@@ -517,6 +577,13 @@ impl Agent {
                 "needs a model: call .model(\"vendor/model\")",
             ));
         };
+        #[cfg(not(feature = "local"))]
+        if selector.starts_with("local/") {
+            return Err(KitError::config(
+                name,
+                format!("model `{selector}` needs the `local` feature"),
+            ));
+        }
         self.check_private_knowledge()?;
         let mut registry = ToolRegistry::new();
         for tool in &self.tools {
@@ -528,17 +595,18 @@ impl Agent {
         self.route.check_judges(name, &persona)?;
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
-        let handle = resolve(ModelChoice {
-            agent: name,
-            selector,
-            catalog,
-            client: self.model_client.clone(),
-            price: self.price,
-            api_key: self.api_key.clone(),
-            api_key_env: self.api_key_env.as_deref(),
-            transport: self.transport.clone(),
+        let handle = self.route.handle(name, || {
+            resolve(ModelChoice {
+                agent: name,
+                selector,
+                catalog,
+                client: self.model_client.clone(),
+                price: self.price,
+                api_key: self.api_key.clone(),
+                api_key_env: self.api_key_env.as_deref(),
+                transport: self.transport.clone(),
+            })
         })?;
-        let handle = self.route.handle(name, handle)?;
         Ok(Prepared {
             persona,
             persona_text,
@@ -620,6 +688,7 @@ impl fmt::Debug for Agent {
             .field("private", &self.route.private)
             .field("tier", &self.route.tier)
             .field("route", &self.route.has_route())
+            .field("local_only", &self.route.local_only)
             .finish_non_exhaustive()
     }
 }

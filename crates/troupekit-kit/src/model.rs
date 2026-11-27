@@ -144,14 +144,14 @@ fn default_key_env(vendor: &str) -> String {
 }
 
 #[cfg(feature = "reqwest")]
-fn default_transport(agent: &str) -> Result<Arc<dyn Transport>, KitError> {
+pub(crate) fn default_transport(agent: &str) -> Result<Arc<dyn Transport>, KitError> {
     let transport = troupekit_providers::reqwest_transport::ReqwestTransport::new()
         .map_err(|e| KitError::config(agent, format!("HTTP client: {}", e.message)))?;
     Ok(Arc::new(transport))
 }
 
 #[cfg(not(feature = "reqwest"))]
-fn default_transport(agent: &str) -> Result<Arc<dyn Transport>, KitError> {
+pub(crate) fn default_transport(agent: &str) -> Result<Arc<dyn Transport>, KitError> {
     Err(KitError::config(
         agent,
         "no HTTP transport: enable the `reqwest` feature or call .transport(..)",

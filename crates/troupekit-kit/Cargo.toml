@@ -39,6 +39,7 @@ llama = ["local", "troupekit-local/llama"]
 reqwest = ["troupekit-agent/reqwest", "troupekit-graph/reqwest", "troupekit-providers/reqwest"]
 
 [dev-dependencies]
+troupekit-local = { path = "../troupekit-local", version = "0.2.0", default-features = false }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 tempfile = "3"
 

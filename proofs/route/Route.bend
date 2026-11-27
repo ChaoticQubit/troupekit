@@ -28,14 +28,14 @@ def only_on_device(ts: Targets) -> Targets:
   match ts:
     case Targets.Nil{}:
       Targets.Nil{}
-    case Targets.Cons{h, t}:
+    case Targets.Cons{+h, t}:
       cons_if(Target.on_device(h), h, only_on_device(t))
 
 def only_eligible(ts: Targets) -> Targets:
   match ts:
     case Targets.Nil{}:
       Targets.Nil{}
-    case Targets.Cons{h, t}:
+    case Targets.Cons{+h, t}:
       cons_if(Target.eligible(h), h, only_eligible(t))
 
 def drop_remote(when: Bool, ts: Targets) -> Targets:

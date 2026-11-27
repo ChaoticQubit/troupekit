@@ -39,6 +39,9 @@ pub enum KitError {
     Context(#[from] troupekit_context::ContextError),
     #[error(transparent)]
     Route(troupekit_providers::route::RouteError),
+    #[cfg(feature = "local")]
+    #[error(transparent)]
+    Local(#[from] troupekit_local::LocalError),
     #[error("run {run_id} failed: {reason}")]
     Failed { run_id: RunId, reason: String },
     #[error("run {run_id} paused: {reason:?}")]

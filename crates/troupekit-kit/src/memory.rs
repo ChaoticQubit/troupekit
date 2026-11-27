@@ -114,7 +114,7 @@ pub(crate) async fn attach(mut agent: Agent) -> Result<(Agent, Option<KnowledgeK
             tools.push(SEARCH_KNOWLEDGE);
             let embedder = match k.embedder.clone() {
                 Some(embedder) => embedder,
-                None => agent.default_embedder()?,
+                None => agent.knowledge_embedder(k).await?,
             };
             Some((
                 open_knowledge(&name, k, embedder, &store_path).await?,

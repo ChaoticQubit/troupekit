@@ -46,4 +46,6 @@ pub mod prelude {
 }
 
 #[cfg(feature = "local")]
-use troupekit_local as _;
+mod local;
+#[cfg(feature = "local")]
+pub use local::LocalChoice;

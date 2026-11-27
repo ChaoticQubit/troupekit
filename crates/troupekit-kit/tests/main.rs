@@ -12,6 +12,8 @@ mod lines;
 mod macros_agent;
 mod macros_tool;
 mod model;
+#[cfg(feature = "local")]
+mod local;
 mod output;
 mod route;
 mod storage;

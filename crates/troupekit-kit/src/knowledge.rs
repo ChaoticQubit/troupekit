@@ -333,6 +333,8 @@ pub struct Knowledge {
     pub(crate) store: Option<PathBuf>,
     pub(crate) embedder: Option<Arc<dyn Embedder>>,
     pub(crate) on_device: bool,
+    #[cfg(feature = "local")]
+    pub(crate) local: Option<crate::local::LocalChoice>,
     pub(crate) load: LoadSettings,
     pub(crate) chunk: ChunkConfig,
     pub(crate) allow_failed: bool,
@@ -350,6 +352,8 @@ impl Knowledge {
             store: None,
             embedder: None,
             on_device: false,
+            #[cfg(feature = "local")]
+            local: None,
             load: defaults.load().clone(),
             chunk: defaults.chunk(),
             allow_failed: false,
@@ -379,6 +383,7 @@ impl Knowledge {
     pub fn embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
         self.on_device = false;
+        self.clear_local();
         self
     }
 
@@ -388,8 +393,28 @@ impl Knowledge {
     pub fn on_device_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
         self.on_device = true;
+        self.clear_local();
         self
     }
+
+    /// Embeds on the device with a local model: a catalog id, a GGUF
+    /// file or a loaded `Arc<dyn LocalModel>`, loaded at `build` like
+    /// `Agent::local`. Marks the embedder on-device for private agents.
+    #[cfg(feature = "local")]
+    pub fn local_embedder(mut self, choice: impl Into<crate::local::LocalChoice>) -> Self {
+        self.embedder = None;
+        self.local = Some(choice.into());
+        self.on_device = true;
+        self
+    }
+
+    #[cfg(feature = "local")]
+    fn clear_local(&mut self) {
+        self.local = None;
+    }
+
+    #[cfg(not(feature = "local"))]
+    fn clear_local(&mut self) {}
 
     /// Sets the folder walk bounds and filters.
     /// Default `LoadSettings::default()`.

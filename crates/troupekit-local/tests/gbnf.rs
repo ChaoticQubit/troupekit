@@ -214,7 +214,9 @@ fn counts_lengths_and_depth_are_bounded() {
     assert!(refused(reversed).contains("`minimum`"));
     let negative = schema_to_gbnf(&json!({"type": "integer", "maximum": -1})).unwrap();
     assert!(
-        negative.gbnf().contains("r0 ::= \"-\" [1-9] [0-9]{0,15}\n"),
+        negative
+            .gbnf()
+            .contains("r0 ::= \"-\" ( [1-9] | [1-9] [0-9]{1,15} )\n"),
         "{}",
         negative.gbnf()
     );
@@ -223,4 +225,144 @@ fn counts_lengths_and_depth_are_bounded() {
         deep = json!({"type": "array", "items": deep});
     }
     assert!(refused(deep).contains("64"));
+}
+
+#[test]
+fn enum_and_const_take_sibling_constraints() {
+    let long = json!({"type": "string", "enum": ["a", "long"], "maxLength": 1});
+    assert!(refused(long).contains("`maxLength`"));
+    let mixed = json!({"type": "string", "enum": ["a", 1]});
+    assert!(refused(mixed).contains("`type`"));
+    let whole = json!({"type": "integer", "const": 1.5});
+    assert!(refused(whole).contains("`type`"));
+    let typed = schema_to_gbnf(&json!({"type": "string", "enum": ["a", "b"]})).unwrap();
+    assert!(
+        typed
+            .gbnf()
+            .starts_with("root ::= r0\nr0 ::= \"\\\"a\\\"\" | \"\\\"b\\\"\"\n"),
+        "{}",
+        typed.gbnf()
+    );
+    let reference = json!({"$defs": {"x": {"type": "array", "items": {"type": "null"}}}, "$ref": "#/$defs/x", "maxItems": 1});
+    assert!(refused(reference).contains("`maxItems`"));
+    let union = json!({"anyOf": [{"type": "null"}], "type": "null"});
+    assert!(refused(union).contains("`type`"));
+    let noted = json!({"$defs": {"x": {"type": "null"}}, "$ref": "#/$defs/x", "description": "ok"});
+    assert!(schema_to_gbnf(&noted).is_ok());
+}
+
+#[test]
+fn integer_bounds_are_exact() {
+    let exact = schema_to_gbnf(&json!({"type": "integer", "minimum": 5, "maximum": 5})).unwrap();
+    assert!(exact.gbnf().contains("r0 ::= \"5\"\n"), "{}", exact.gbnf());
+    let byte = schema_to_gbnf(&json!({"type": "integer", "minimum": 0, "maximum": 255})).unwrap();
+    assert!(
+        byte.gbnf().contains(
+            "r0 ::= [0-9] | [1-9] [0-9] | ( \"1\" [0-9]{2} | \"2\" ( [0-4] [0-9] | \"5\" [0-5] ) )\n"
+        ),
+        "{}",
+        byte.gbnf()
+    );
+    let floor = schema_to_gbnf(&json!({"type": "integer", "minimum": 0.0})).unwrap();
+    assert!(
+        floor.gbnf().contains("r0 ::= [0-9] | [1-9] [0-9]{1,15}\n"),
+        "{}",
+        floor.gbnf()
+    );
+    let teens =
+        schema_to_gbnf(&json!({"type": "integer", "minimum": 12.5, "maximum": 19})).unwrap();
+    assert!(
+        teens.gbnf().contains("r0 ::= \"1\" [3-9]\n"),
+        "{}",
+        teens.gbnf()
+    );
+    let between = json!({"type": "integer", "minimum": 1.2, "maximum": 1.8});
+    assert!(refused(between).contains("`minimum`"));
+    let float = json!({"type": "number", "minimum": 0, "maximum": 1});
+    assert!(refused(float).contains("integer"));
+}
+
+#[test]
+fn one_of_needs_disjoint_branches() {
+    let numbers = json!({"oneOf": [{"type": "integer"}, {"type": "number"}]});
+    assert!(refused(numbers).contains("`anyOf`"));
+    let objects = json!({"oneOf": [
+        {"type": "object", "properties": {"a": {"type": "null"}}},
+        {"type": "object", "properties": {"b": {"type": "null"}}},
+    ]});
+    assert!(refused(objects).contains("`anyOf`"));
+    let same = json!({"oneOf": [{"const": "x"}, {"enum": ["y", "x"]}]});
+    assert!(refused(same).contains("`anyOf`"));
+    let names = json!({"oneOf": [
+        {"type": "string", "const": "red", "description": "Red."},
+        {"type": "string", "const": "blue"},
+    ]});
+    assert!(schema_to_gbnf(&names).is_ok());
+    let tagged = json!({
+        "$defs": {"cat": {"type": "object", "properties": {"kind": {"const": "cat"}}, "required": ["kind"]}},
+        "oneOf": [
+            {"$ref": "#/$defs/cat"},
+            {"type": "object", "properties": {"kind": {"const": "dog"}, "bark": {"type": "boolean"}}, "required": ["kind"]},
+        ],
+    });
+    assert!(schema_to_gbnf(&tagged).is_ok());
+    let union = json!({"anyOf": [{"type": "integer"}, {"type": "number"}]});
+    assert!(schema_to_gbnf(&union).is_ok());
+}
+
+#[test]
+fn integer_bounds_past_sixteen_digits_are_refused() {
+    let huge = json!({"type": "integer", "maximum": 10_000_000_000_000_000u64});
+    assert!(refused(huge).contains("`maximum`"));
+    let edge = schema_to_gbnf(&json!({"type": "integer", "minimum": -9_999_999_999_999_998i64}));
+    assert!(edge.is_ok());
+}
+
+#[test]
+fn one_of_literals_use_json_schema_equality() {
+    let overlap = [
+        json!({"oneOf": [{"const": 1}, {"const": 1.0}]}),
+        json!({"oneOf": [{"const": [1]}, {"const": [1.0]}]}),
+        json!({"oneOf": [{"const": {"a": [1, {"b": 2}]}}, {"enum": [{"a": [1.0, {"b": 2.0}]}]}]}),
+    ];
+    for schema in overlap {
+        assert!(refused(schema.clone()).contains("`anyOf`"), "{schema}");
+    }
+    let distinct = [
+        json!({"oneOf": [{"const": [1]}, {"const": [2]}]}),
+        json!({"oneOf": [{"const": 9007199254740993u64}, {"const": 9007199254740992u64}]}),
+        json!({"oneOf": [{"const": {"a": 1}}, {"const": {"a": 1, "b": 2}}]}),
+    ];
+    for schema in distinct {
+        assert!(schema_to_gbnf(&schema).is_ok(), "{schema}");
+    }
+}
+
+#[test]
+fn integer_endpoints_stay_exact() {
+    let quoted = |digits: &str| -> String {
+        digits
+            .chars()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for value in [
+        9_007_199_254_740_993i64,
+        9_999_999_999_999_999,
+        -9_999_999_999_999_999,
+    ] {
+        let schema = json!({"type": "integer", "minimum": value, "maximum": value});
+        let grammar = schema_to_gbnf(&schema).unwrap();
+        let digits = value.unsigned_abs().to_string();
+        let body = if value < 0 {
+            format!("\"-\" {}", quoted(&digits))
+        } else {
+            quoted(&digits)
+        };
+        let expected = format!("r0 ::= {body}\n");
+        assert!(grammar.gbnf().contains(&expected), "{}", grammar.gbnf());
+    }
+    let float = json!({"type": "integer", "minimum": 1e16});
+    assert!(refused(float).contains("`minimum`"));
 }
