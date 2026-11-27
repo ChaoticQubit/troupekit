@@ -673,12 +673,12 @@ impl LlamaModel {
                     "sampler returned token {token}"
                 )));
             }
-            if params.confidence() {
-                logprob_sum += log_softmax_at(self.logits_row(ctx, -1)?, token as usize);
-            }
             if !params.ban_eos() && unsafe { ffi::tk_is_eog(self.model.as_ptr(), token) } == 1 {
                 stop = GenStop::EndOfText;
                 break;
+            }
+            if params.confidence() {
+                logprob_sum += log_softmax_at(self.logits_row(ctx, -1)?, token as usize);
             }
             generated += 1;
             let step = text.push(&self.piece(token), on_token);

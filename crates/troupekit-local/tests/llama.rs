@@ -271,3 +271,26 @@ fn reset_from_the_token_callback_does_not_deadlock() {
         .expect("generation finished; reset in the callback must not deadlock");
     assert_eq!(reused, 0, "the reset took effect before the next call");
 }
+
+#[test]
+fn end_of_text_is_left_out_of_the_confidence_mean() {
+    let model = load();
+    let p = prompt(&model, "Say hi.");
+    let ended = model
+        .generate(&p, &greedy(64).with_confidence(true), &mut |_| Flow::Continue)
+        .expect("generates");
+    assert_eq!(ended.stop(), GenStop::EndOfText, "pick a prompt that ends");
+    assert!(ended.tokens() > 0);
+    model.reset();
+    let capped = model
+        .generate(
+            &p,
+            &greedy(ended.tokens()).with_confidence(true),
+            &mut |_| Flow::Continue,
+        )
+        .expect("generates");
+    assert_eq!(capped.stop(), GenStop::MaxTokens);
+    assert_eq!(capped.text(), ended.text());
+    let (a, b) = (ended.mean_logprob().unwrap(), capped.mean_logprob().unwrap());
+    assert!((a - b).abs() < 1e-4, "EOG counted in the mean: {a} vs {b}");
+}
