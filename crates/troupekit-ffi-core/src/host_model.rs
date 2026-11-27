@@ -1,5 +1,5 @@
 use crate::error::{ErrorCode, FfiError};
-use crate::host::{HostModel, TokenSink};
+use crate::host::{HostModel, TokenSink, MAX_QUEUED_DELTAS};
 use crate::records::{HostMessage, HostModelCaps, HostReply, HostRequest};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -130,7 +130,7 @@ impl HostModelAdapter {
         forward: bool,
         on_delta: &mut (dyn for<'d> FnMut(&'d Delta) + Send),
     ) -> Result<HostReply, ProviderError> {
-        let (sink, mut deltas) = TokenSink::channel(forward, MAX_REPLY_BYTES);
+        let (sink, mut deltas) = TokenSink::channel(forward, MAX_REPLY_BYTES, MAX_QUEUED_DELTAS);
         let host = self.host.clone();
         let mut job = tokio::task::spawn_blocking(move || {
             catch_unwind(AssertUnwindSafe(|| host.generate(request, sink)))

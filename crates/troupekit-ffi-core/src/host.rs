@@ -106,33 +106,42 @@ pub trait HostTransport: Send + Sync {
 /// Built by troupekit for each `HostModel::generate` call.
 #[derive(Debug)]
 pub struct TokenSink {
-    deltas: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    deltas: Option<tokio::sync::mpsc::Sender<String>>,
     bytes: Mutex<usize>,
     cap: usize,
 }
 
+/// Most deltas waiting for the run to take them; later ones are dropped
+/// until it catches up, so a fast host cannot grow memory without bound.
+pub(crate) const MAX_QUEUED_DELTAS: usize = 1024;
+
 impl TokenSink {
     /// Pushes one text delta of the reply in progress. Never blocks.
     /// Input: the new text only, not the text so far.
-    /// Output: none; deltas past the reply cap are dropped.
+    /// Output: none; empty deltas, deltas past the reply cap and deltas
+    /// while the queue is full are dropped.
     pub fn delta(&self, text: String) {
         let Some(deltas) = &self.deltas else {
             return;
         };
+        if text.is_empty() {
+            return;
+        }
         let mut used = self.bytes.lock().unwrap_or_else(PoisonError::into_inner);
         let total = used.saturating_add(text.len());
-        if total <= self.cap {
+        if total <= self.cap && deltas.try_send(text).is_ok() {
             *used = total;
             assert!(*used <= self.cap);
-            let _ = deltas.send(text);
         }
     }
 
     pub(crate) fn channel(
         forward: bool,
         cap: usize,
-    ) -> (Arc<TokenSink>, tokio::sync::mpsc::UnboundedReceiver<String>) {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        queue: usize,
+    ) -> (Arc<TokenSink>, tokio::sync::mpsc::Receiver<String>) {
+        assert!(queue > 0);
+        let (sender, receiver) = tokio::sync::mpsc::channel(queue);
         let sink = TokenSink {
             deltas: forward.then_some(sender),
             bytes: Mutex::new(0),

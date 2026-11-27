@@ -25,7 +25,7 @@ fn text_reply(text: &str) -> HostReply {
 
 #[test]
 fn delta_bytes_capped() {
-    let (sink, mut deltas) = TokenSink::channel(true, 10);
+    let (sink, mut deltas) = TokenSink::channel(true, 10, 8);
     sink.delta("12345".into());
     sink.delta("123456".into());
     sink.delta("12345".into());
@@ -35,9 +35,26 @@ fn delta_bytes_capped() {
         got.push(text);
     }
     assert_eq!(got, vec!["12345".to_string(), "12345".to_string()]);
-    let (off, mut none) = TokenSink::channel(false, 10);
+    let (off, mut none) = TokenSink::channel(false, 10, 8);
     off.delta("1".into());
     assert!(none.try_recv().is_err());
+}
+
+#[test]
+fn empty_deltas_ignored_and_queue_bounded() {
+    let (sink, mut deltas) = TokenSink::channel(true, 100, 2);
+    sink.delta(String::new());
+    sink.delta("a".into());
+    sink.delta(String::new());
+    sink.delta("b".into());
+    sink.delta("c".into());
+    let mut got = Vec::new();
+    while let Ok(text) = deltas.try_recv() {
+        got.push(text);
+    }
+    assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
+    sink.delta("d".into());
+    assert_eq!(deltas.try_recv().unwrap(), "d");
 }
 
 #[test]
