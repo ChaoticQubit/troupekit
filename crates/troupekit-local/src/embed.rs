@@ -8,8 +8,8 @@ use troupekit_context::error::ContextError;
 const BATCH: usize = 32;
 
 /// On-device embeddings from a `LocalModel`, for knowledge search with
-/// no network. Mean-pooled, L2-normalized vectors (the model does the
-/// pooling); batches of at most 32 texts run off the async runtime.
+/// no network. Mean-pooled, L2-normalized vectors (the mean of the
+/// token rows); batches of at most 32 texts run off the async runtime.
 pub struct LocalEmbedder {
     model: Arc<dyn LocalModel>,
     dims: usize,

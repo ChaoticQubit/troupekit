@@ -86,9 +86,9 @@ impl LlamaSettings {
         self
     }
 
-    /// Lets `embed` run on this model.
-    /// `LocalInfo::embedding_dims` is 0 unless this is set.
-    /// Default false.
+    /// Lets `embed` run on this model; each text is then decoded as one
+    /// batch the size of the context. `LocalInfo::embedding_dims` is 0
+    /// unless this is set. Default false.
     pub fn with_embeddings(mut self, embeddings: bool) -> Self {
         self.embeddings = embeddings;
         self
@@ -265,13 +265,17 @@ impl LlamaModel {
             )));
         }
         let n_ctx = settings.context.min(train as usize);
-        let n_batch = n_ctx.min(BATCH_MAX);
+        let n_batch = if settings.embeddings {
+            n_ctx
+        } else {
+            n_ctx.min(BATCH_MAX)
+        };
         let threads = i32::try_from(settings.threads).expect("threads checked at most 256");
         let ctx_raw = unsafe {
             ffi::tk_ctx_new(
                 model.as_ptr(),
                 u32::try_from(n_ctx).map_err(|_| free_model("context too large".into()))?,
-                u32::try_from(n_batch).expect("batch at most 512"),
+                u32::try_from(n_batch).map_err(|_| free_model("batch too large".into()))?,
                 threads,
                 0,
             )
@@ -372,7 +376,7 @@ impl LlamaModel {
     ) -> Result<(), LocalError> {
         for chunk in tokens.chunks(self.n_batch) {
             let pos = i32::try_from(state.cached.len()).expect("positions stay below the context");
-            let n = i32::try_from(chunk.len()).expect("chunk at most 512");
+            let n = i32::try_from(chunk.len()).expect("a chunk is at most one context");
             let rc = unsafe {
                 ffi::tk_decode_batch(
                     state.ctx.as_ptr(),
@@ -822,16 +826,18 @@ impl LlamaModel {
         if ids.is_empty() {
             return Ok(sum);
         }
-        for chunk in ids.chunks(self.n_batch) {
-            self.decode(state, chunk, true)?;
-            for i in 0..chunk.len() {
-                let ptr = unsafe { ffi::tk_embeddings(state.ctx.as_ptr(), i as i32) };
-                if ptr.is_null() {
-                    return Err(LocalError::Decode(format!("no embedding for output {i}")));
-                }
-                let row = unsafe { std::slice::from_raw_parts(ptr, dims) };
-                sum.iter_mut().zip(row).for_each(|(s, v)| *s += v);
+        assert!(
+            ids.len() <= self.n_batch,
+            "an embedding model decodes a whole context in one batch"
+        );
+        self.decode(state, &ids, true)?;
+        for i in 0..ids.len() {
+            let ptr = unsafe { ffi::tk_embeddings(state.ctx.as_ptr(), i as i32) };
+            if ptr.is_null() {
+                return Err(LocalError::Decode(format!("no embedding for output {i}")));
             }
+            let row = unsafe { std::slice::from_raw_parts(ptr, dims) };
+            sum.iter_mut().zip(row).for_each(|(s, v)| *s += v);
         }
         let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 0.0 && norm.is_finite() {

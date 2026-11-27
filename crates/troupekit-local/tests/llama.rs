@@ -345,3 +345,38 @@ fn model_call_from_its_own_token_callback_is_refused_not_deadlocked() {
     assert!(err.to_string().contains("token callback"), "{err}");
     assert!(after, "the model works again once generate returns");
 }
+
+const FETCH_EMBED: &str =
+    "set TROUPEKIT_TEST_EMBED_GGUF to a mean-pooled embedding GGUF (for example a MiniLM or BGE export)";
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+#[test]
+fn pooled_embedding_gguf_gives_meaningful_vectors() {
+    let path = std::env::var_os("TROUPEKIT_TEST_EMBED_GGUF")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("TROUPEKIT_TEST_EMBED_GGUF is not set: {FETCH_EMBED}"));
+    let model = LlamaModel::load(
+        &path,
+        LlamaSettings::default().with_context(512).with_embeddings(true),
+    )
+    .expect("embedding GGUF loads");
+    let texts = [
+        "The cat sat on the mat.".to_string(),
+        "A cat is sitting on a mat.".to_string(),
+        "Quarterly tax filing deadlines for companies.".to_string(),
+        "The cat sat on the mat.".to_string(),
+    ];
+    let v = model.embed(&texts).expect("embeds");
+    for row in &v {
+        let norm = cosine(row, row).sqrt();
+        assert!((norm - 1.0).abs() < 1e-3, "not a unit vector: {norm}");
+    }
+    assert!((cosine(&v[0], &v[3]) - 1.0).abs() < 1e-4, "same text, same vector");
+    assert!(
+        cosine(&v[0], &v[1]) > cosine(&v[0], &v[2]),
+        "a paraphrase must be closer than an unrelated text"
+    );
+}
