@@ -801,12 +801,10 @@ impl GraphRun {
         unreachable!("the loop returns within MAX_LINEAGE + 1 hops")
     }
 
-    /// Writes `value` to state key `key` between steps, as node `as_node`
-    /// would (its reducer applies), as a durable change: steps + 1, status
-    /// queued. Refuses a finished run, an undeclared, untracked or mistyped
-    /// key, a key an approval node writes or read for an answer it gave, a
-    /// key written before an answered approval and read after it, and a
-    /// node that does not write `key`. Returns `Resume` on a refusal.
+    /// Writes `value` to `key` between steps as node `as_node` would (its
+    /// reducer applies): steps + 1, status queued. Refuses a finished run or
+    /// one with recovered results pending, a bad key or node, and a key an
+    /// answered approval saw or depends on. Returns `Resume` on a refusal.
     pub fn update_state(
         &mut self,
         key: &str,
@@ -814,6 +812,9 @@ impl GraphRun {
         as_node: Option<&str>,
     ) -> Result<(), GraphError> {
         let bad = |m: String| Err(GraphError::Resume(m));
+        if self.marks.as_ref().is_some_and(|m| m.step == self.steps + 1 && !m.done.is_empty()) {
+            return bad("recovered branch results of the next step are pending; step the run once before editing".into());
+        }
         assert_ne!(self.status, GraphStatus::Running, "state is edited between steps");
         if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
             return bad("the run is finished".into());

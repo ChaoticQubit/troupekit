@@ -720,3 +720,24 @@ async fn child_progress_in_a_durable_step_is_kept_across_a_crash() {
     );
     assert_eq!(state["x"], json!("a1"));
 }
+
+#[tokio::test]
+async fn edit_state_waits_for_recovered_branch_results() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let io = io(&gates, model());
+    let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    let err = run.update_state("seed", json!("edited"), None).unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Resume(m) if m.contains("recovered")),
+        "{err}"
+    );
+    gates.open("b");
+    let state = done(drive(&mut run, &io, &store).await);
+    assert_eq!(
+        gates.calls("a").len(),
+        1,
+        "a's kept result is applied, not re-run"
+    );
+    assert_eq!(state["x"], json!("a1"));
+}
