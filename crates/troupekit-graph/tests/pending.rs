@@ -451,7 +451,7 @@ async fn second_write_for_the_same_branch_conflicts() {
 }
 
 #[tokio::test]
-async fn kept_writes_of_a_moved_step_are_dropped() {
+async fn kept_writes_survive_a_saved_stop_and_retry() {
     let (store, gates) = (Store::default(), GatedTool::new());
     let io = io(&gates, model());
     let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
@@ -464,10 +464,10 @@ async fn kept_writes_of_a_moved_step_are_dropped() {
     let state = done(drive(&mut run, &io, &store).await);
     assert_eq!(
         gates.calls("a").len(),
-        2,
-        "writes of step 2 never apply to step 4"
+        1,
+        "the kept write of step 2 carries over the stop and applies at step 4"
     );
-    assert_eq!(state["x"], json!("a2"));
+    assert_eq!(state["x"], json!("a1"));
 }
 
 #[tokio::test]
@@ -757,6 +757,28 @@ async fn raise_resume_and_retry_wait_for_recovered_branch_results() {
     pending(run.raise_budget(Limits::default()));
     pending(run.resume("a", json!("answer")));
     pending(run.retry(None));
+    gates.open("b");
+    let state = done(drive(&mut run, &io, &store).await);
+    assert_eq!(
+        gates.calls("a").len(),
+        1,
+        "a's kept result is applied, not re-run"
+    );
+    assert_eq!(state["x"], json!("a1"));
+}
+
+#[tokio::test]
+async fn stop_then_retry_keeps_recovered_branch_results() {
+    let (store, gates) = (Store::default(), GatedTool::new());
+    let io = io(&gates, model());
+    let id = crash_after_branch_a(FAN, &io, &store, &gates).await;
+    let mut run = GraphRun::restore(&store, id).await.unwrap();
+    run.stop(Stop::Cancelled).unwrap();
+    assert!(matches!(
+        run.step_durable(&io, &store).await.unwrap(),
+        GraphOutcome::Failed(_)
+    ));
+    run.retry(None).unwrap();
     gates.open("b");
     let state = done(drive(&mut run, &io, &store).await);
     assert_eq!(

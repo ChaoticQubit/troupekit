@@ -571,7 +571,8 @@ impl GraphRun {
     }
 
     /// Stops the run for `why`: it becomes `failed` and takes no step until
-    /// `retry`, so it calls no model. A durable change for the next save.
+    /// `retry`, so it calls no model; recovered branch results stay pending
+    /// for the retried step. A durable change for the next save.
     /// Returns `Resume` when the run is already finished.
     pub fn stop(&mut self, why: Stop) -> Result<(), GraphError> {
         if matches!(self.status, GraphStatus::Done | GraphStatus::Failed { .. }) {
@@ -579,6 +580,7 @@ impl GraphRun {
         }
         self.status = GraphStatus::Failed { error: why.error() };
         self.stopped = Some(why);
+        self.carry_recovered();
         self.steps += 1;
         Ok(())
     }
@@ -598,7 +600,9 @@ impl GraphRun {
     /// queues it. A failed tool call re-runs with its first idempotency key.
     /// Returns `Resume` when it is not `retryable` or has recovered results pending.
     pub fn retry(&mut self, time_limit_ms: Option<u64>) -> Result<(), GraphError> {
-        self.no_pending_marks()?;
+        if self.stopped.is_none() {
+            self.no_pending_marks()?;
+        }
         if !self.retryable() {
             return Err(GraphError::Resume(
                 "only a stopped run or one failed on a transient error can be retried".into(),
@@ -1219,8 +1223,6 @@ impl GraphRun {
         io: &dyn GraphIo,
         store: Option<&dyn CheckpointStore>,
     ) -> Result<GraphOutcome, GraphError> {
-        let marks = self.marks.take();
-        let reserve = self.reserve.take();
         match &self.status {
             GraphStatus::Done => return Ok(GraphOutcome::Done(self.state.clone())),
             GraphStatus::Failed { error } => return Ok(GraphOutcome::Failed(error.clone())),
@@ -1230,6 +1232,8 @@ impl GraphRun {
             GraphStatus::Running => unreachable!("a step never starts inside another"),
             GraphStatus::Queued | GraphStatus::Checkpointed => {}
         }
+        let marks = self.marks.take();
+        let reserve = self.reserve.take();
         match (reserve, store) {
             (Some(r), Some(store)) if r.step == self.steps + 1 => {
                 assert_eq!(self.seq, r.range.from, "a reserved attempt emits from its range");
@@ -1309,7 +1313,18 @@ impl GraphRun {
         Ok(())
     }
 
+    fn carry_recovered(&mut self) {
+        let next = self.steps + 1;
+        if let Some(m) = self.marks.as_mut().filter(|m| m.step == next) {
+            m.step += 1;
+        }
+        if let Some(r) = self.reserve.as_mut().filter(|r| r.step == next) {
+            r.step += 1;
+        }
+    }
+
     fn queue(&mut self) {
+        self.carry_recovered();
         self.steps += 1;
         self.status = GraphStatus::Queued;
     }
