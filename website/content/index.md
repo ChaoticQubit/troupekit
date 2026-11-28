@@ -67,7 +67,7 @@ Source: the `description` field of each `crates/*/Cargo.toml`.
 ## What is coming
 
 - Coming in 0.4: Swift, Kotlin and Python bindings, and Apple and Android on-device models.
-- Coming in 0.5: team, crew and handoff patterns in TOML, fan-out and forking a run.
+- Coming in 0.5: team, crew and handoff patterns in TOML, parallel branches with declared reducers, fan-out over lists, and forking a run from any checkpoint.
 
 The [Roadmap](roadmap.md) lists every planned release.
 
