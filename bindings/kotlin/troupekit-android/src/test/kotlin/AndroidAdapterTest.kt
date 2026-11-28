@@ -1,6 +1,7 @@
 package dev.troupekit.android
 
 import com.sun.net.httpserver.HttpServer
+import dev.troupekit.HostException
 import dev.troupekit.HostHeader
 import dev.troupekit.HostHttpRequest
 import dev.troupekit.HostMessage
@@ -63,6 +64,46 @@ class AndroidAdapterTest {
         val request = HostRequest(null, listOf(HostMessage("user", "hi", null, null)), null, null, 16u)
         val error = assertFailsWith<Exception> { model.generateText(request) { } }
         assertTrue(error.toString().contains("on-device model unavailable: model file missing"), error.toString())
+    }
+
+    @Test
+    fun replyTimeoutCancelsAndThrowsNamedHostError() {
+        var cancelled = false
+        val deltas = mutableListOf<String>()
+        var late: ((String) -> Unit)? = null
+        val error = assertFailsWith<HostException.Failed> {
+            OnDeviceModel.collect(50, { chunk, _, _ -> late = chunk }, { cancelled = true }) { deltas.add(it) }
+        }
+        assertEquals("on-device model error: no reply within 50 ms", error.detail)
+        assertTrue(cancelled)
+        late?.invoke("too late")
+        assertEquals(emptyList(), deltas)
+    }
+
+    @Test
+    fun replyBeforeTimeoutStreamsEveryChunk() {
+        val deltas = mutableListOf<String>()
+        val text = OnDeviceModel.collect(5_000, { chunk, done, _ ->
+            chunk("hel")
+            chunk("")
+            chunk("lo")
+            done()
+        }, { error("no cancel on a finished reply") }) { deltas.add(it) }
+        assertEquals("hello", text)
+        assertEquals(listOf("hel", "lo"), deltas)
+    }
+
+    @Test
+    fun streamErrorThrowsNamedHostError() {
+        val error = assertFailsWith<HostException.Failed> {
+            OnDeviceModel.collect(5_000, { _, _, fail -> fail(IllegalStateException("busy")) }, { }) { }
+        }
+        assertEquals("on-device model error: busy", error.detail)
+    }
+
+    @Test
+    fun nonPositiveReplyTimeoutIsRefused() {
+        assertFailsWith<IllegalArgumentException> { OnDeviceModel("unused.litertlm", replyTimeoutMs = 0) }
     }
 
     @Test

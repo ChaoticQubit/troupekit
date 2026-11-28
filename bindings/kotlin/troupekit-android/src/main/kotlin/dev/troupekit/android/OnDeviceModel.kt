@@ -16,24 +16,28 @@ import dev.troupekit.HostRequest
 import dev.troupekit.TokenSink
 import java.io.File
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
  * A LiteRT-LM model file on the device as a troupekit `HostModel`.
  * Tools are emulated by the Rust side, so the tool loop and every checkpoint stay in troupekit.
- * Input: the `.litertlm` path, the backend and the context size. Safe to create anywhere; it reports unavailable.
+ * Input: the `.litertlm` path, the backend, the context size and the reply timeout, which bounds one
+ * generate call after the engine is loaded. Safe to create anywhere; it reports unavailable.
  */
 class OnDeviceModel(
     private val modelPath: String,
     private val backend: Backend = Backend.CPU(),
     private val maxNumTokens: Int = 4096,
     private val cacheDir: String? = null,
+    private val replyTimeoutMs: Long = DEFAULT_REPLY_TIMEOUT_MS,
 ) : HostModel, AutoCloseable {
     private val lock = Any()
     private var engine: Engine? = null
 
     init {
         require(maxNumTokens > 0) { "maxNumTokens must be above 0, got $maxNumTokens" }
+        require(replyTimeoutMs > 0) { "replyTimeoutMs must be above 0, got $replyTimeoutMs" }
     }
 
     override fun id(): String = "android/litertlm"
@@ -109,34 +113,70 @@ class OnDeviceModel(
         return created
     }
 
-    private fun stream(conversation: Conversation, prompt: String, onDelta: (String) -> Unit): String {
-        val done = CountDownLatch(1)
-        val failure = AtomicReference<Throwable?>(null)
-        val text = StringBuilder()
-        conversation.sendMessageAsync(prompt, object : MessageCallback {
-            override fun onMessage(message: Message) {
-                val chunk = message.toString()
-                if (chunk.isNotEmpty()) {
-                    text.append(chunk)
-                    onDelta(chunk)
+    private fun stream(conversation: Conversation, prompt: String, onDelta: (String) -> Unit): String =
+        collect(replyTimeoutMs, { chunk, done, fail ->
+            conversation.sendMessageAsync(prompt, object : MessageCallback {
+                override fun onMessage(message: Message) {
+                    chunk(message.toString())
                 }
-            }
 
-            override fun onDone() {
-                done.countDown()
-            }
+                override fun onDone() {
+                    done()
+                }
 
-            override fun onError(throwable: Throwable) {
-                failure.set(throwable)
-                done.countDown()
-            }
-        })
-        done.await()
-        failure.get()?.let { throw HostException.Failed("on-device model error: ${it.message ?: it.javaClass.simpleName}") }
-        return text.toString()
-    }
+                override fun onError(throwable: Throwable) {
+                    fail(throwable)
+                }
+            })
+        }, { conversation.cancelProcess() }, onDelta)
 
     companion object {
+        /** Default bound of one reply after the engine is loaded: two minutes. */
+        const val DEFAULT_REPLY_TIMEOUT_MS: Long = 120_000
+
+        /**
+         * Starts one streamed reply and waits for it at most `timeoutMs`; on timeout it calls `cancel`.
+         * Non-empty chunks reach `onDelta` in order; none reach it once the wait has ended.
+         * Input: the timeout, the start and cancel hooks, the delta callback. Output: the reply text;
+         * throws `HostException.Failed` naming the timeout or the stream error.
+         */
+        internal fun collect(
+            timeoutMs: Long,
+            start: (chunk: (String) -> Unit, done: () -> Unit, fail: (Throwable) -> Unit) -> Unit,
+            cancel: () -> Unit,
+            onDelta: (String) -> Unit,
+        ): String {
+            require(timeoutMs > 0) { "timeoutMs must be above 0, got $timeoutMs" }
+            val finished = CountDownLatch(1)
+            val failure = AtomicReference<Throwable?>(null)
+            val gate = Any()
+            val text = StringBuilder()
+            var open = true
+            start(
+                { chunk ->
+                    synchronized(gate) {
+                        if (open && chunk.isNotEmpty()) {
+                            text.append(chunk)
+                            onDelta(chunk)
+                        }
+                    }
+                },
+                { finished.countDown() },
+                { error ->
+                    failure.compareAndSet(null, error)
+                    finished.countDown()
+                },
+            )
+            val inTime = finished.await(timeoutMs, TimeUnit.MILLISECONDS)
+            synchronized(gate) { open = false }
+            if (!inTime) {
+                cancel()
+                throw HostException.Failed("on-device model error: no reply within $timeoutMs ms")
+            }
+            failure.get()?.let { throw HostException.Failed("on-device model error: ${it.message ?: it.javaClass.simpleName}") }
+            return synchronized(gate) { text.toString() }
+        }
+
         /**
          * Renders a request as instructions plus one prompt holding every turn as text.
          * Tool calls and tool results become labelled lines; the prompt ends with `assistant:`.
