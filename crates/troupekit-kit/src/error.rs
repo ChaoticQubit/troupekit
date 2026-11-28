@@ -37,6 +37,11 @@ pub enum KitError {
     #[cfg(feature = "knowledge")]
     #[error(transparent)]
     Context(#[from] troupekit_context::ContextError),
+    #[error(transparent)]
+    Route(troupekit_providers::route::RouteError),
+    #[cfg(feature = "local")]
+    #[error(transparent)]
+    Local(#[from] troupekit_local::LocalError),
     #[error("run {run_id} failed: {reason}")]
     Failed { run_id: RunId, reason: String },
     #[error("run {run_id} paused: {reason:?}")]
@@ -68,20 +73,26 @@ impl KitError {
     /// resume or inspect it. Input: the run id and the failure.
     /// Output: `InRun`, or `err` as is when it already names a run.
     pub(crate) fn in_run(run_id: RunId, err: KitError) -> Self {
-        let named = matches!(
-            err,
-            KitError::Failed { .. }
-                | KitError::Paused { .. }
-                | KitError::Cancelled { .. }
-                | KitError::Retries { .. }
-                | KitError::InRun { .. }
-        );
-        if named {
+        if err.run_id().is_some() {
             return err;
         }
         KitError::InRun {
             run_id,
             source: Box::new(err),
+        }
+    }
+
+    /// Returns the run this error belongs to, for traces and callers.
+    /// Input: any error. Output: the run id of a failed, paused,
+    /// cancelled, retried or wrapped run; `None` for pre-run errors.
+    pub(crate) fn run_id(&self) -> Option<RunId> {
+        match self {
+            KitError::Failed { run_id, .. }
+            | KitError::Paused { run_id, .. }
+            | KitError::Cancelled { run_id }
+            | KitError::Retries { run_id, .. }
+            | KitError::InRun { run_id, .. } => Some(*run_id),
+            _ => None,
         }
     }
 }

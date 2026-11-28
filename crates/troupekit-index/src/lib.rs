@@ -293,3 +293,4 @@ pub(crate) fn check_k(k: usize) -> Result<(), IndexError> {
     }
     Ok(())
 }
+

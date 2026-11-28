@@ -1,0 +1,1 @@
+{"type": "object", "properties": {"count": {"type": "integer", "format": "uint8", "minimum": 0, "maximum": 255}, "note": {"type": ["string", "null"]}, "temp": {"type": "integer", "minimum": -40, "maximum": 5}}, "required": ["count", "note", "temp"]}

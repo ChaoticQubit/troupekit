@@ -1,0 +1,12 @@
+root ::= r0
+r0 ::= "{" ws "\"c\"" ws ":" ws null ( ws "," ws r3 )? ws "}"
+r1 ::= "\"d\"" ws ":" ws boolean
+r2 ::= "\"b\"" ws ":" ws number ( ws "," ws r1 )? | r1
+r3 ::= "\"a\"" ws ":" ws string ( ws "," ws r2 )? | r2
+ws ::= ( " " | "\n" [ \t]{0,20} )?
+null ::= "null"
+boolean ::= "true" | "false"
+char ::= [^"\\\x7F\x00-\x1F] | [\\] (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+string ::= "\"" char* "\""
+integer ::= "-"? ( "0" | [1-9] [0-9]{0,15} )
+number ::= integer ( "." [0-9]{1,16} )? ( [eE] [-+]? [0-9]{1,3} )?

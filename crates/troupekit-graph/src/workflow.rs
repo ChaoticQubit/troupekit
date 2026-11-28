@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use troupekit_agent::dsl::{is_ident, parse_call, Call};
-use troupekit_agent::persona::{toml_error, valid_name};
+use troupekit_agent::persona::{toml_error, trace_keys, valid_name};
+use troupekit_trace::TraceSpec;
 use troupekit_agent::{compile_output, validate};
 use troupekit_tools::valid_tool_name;
 
@@ -98,6 +99,9 @@ struct WorkflowFile {
     nodes: Vec<NodeFile>,
     #[serde(default)]
     edges: Vec<Edge>,
+    trace: Option<toml::Value>,
+    trace_content: Option<bool>,
+    trace_file: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +138,8 @@ impl Workflow {
             .map_err(|m| err("max_steps", m))?;
         let max_retries = ranged(raw.max_retries, MAX_RETRIES_RANGE, DEFAULT_MAX_RETRIES)
             .map_err(|m| err("max_retries", m))?;
+        trace_keys(raw.trace.as_ref(), raw.trace_content, raw.trace_file.as_deref())
+            .map_err(|(field, m)| err(field, m))?;
         let state = state_schemas(&raw.state).map_err(|m| err("state", m))?;
         if raw.nodes.is_empty() || raw.nodes.len() > MAX_NODES {
             return Err(err(
@@ -399,6 +405,18 @@ impl Workflow {
         }
         Ok(())
     }
+}
+
+/// Returns the trace settings of workflow TOML `text` read from `file`:
+/// `None` without `trace` or with tracing off. Only the trace keys are
+/// validated here; `Workflow::parse` checks the whole file.
+pub fn trace_spec(file: &str, text: &str) -> Result<Option<TraceSpec>, WorkflowError> {
+    let raw: WorkflowFile = toml::from_str(text).map_err(|e| {
+        let p = toml_error(file, text, &e);
+        WorkflowError::new(&p.file, &p.field, p.message)
+    })?;
+    trace_keys(raw.trace.as_ref(), raw.trace_content, raw.trace_file.as_deref())
+        .map_err(|(field, m)| WorkflowError::new(file, field, m))
 }
 
 fn ranged(

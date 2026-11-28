@@ -1,0 +1,2 @@
+agent_private_not_bool.rs:5:
+error: private = takes true or false

@@ -20,3 +20,4 @@ pub fn vendor_of(agent: &Agent) -> Option<troupekit_providers::catalog::VendorSp
 pub fn selector_of(agent: &Agent) -> Option<String> {
     agent.selector()
 }
+pub use troupekit_trace as trace;

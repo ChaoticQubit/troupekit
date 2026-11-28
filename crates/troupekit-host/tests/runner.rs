@@ -225,3 +225,74 @@ async fn worker_mode_stops_on_shutdown() {
         .unwrap();
     assert_eq!(s.saved(id).await.status(), &GraphStatus::Done);
 }
+
+#[tokio::test]
+async fn runner_process_emits_job_span() {
+    let (tools, _) = saving_tools(false);
+    let s = stack(planner_model(), tools);
+    let id = s.start(LINEAR, "run 5k").await;
+    let sink = Arc::new(troupekit_trace::MemorySink::default());
+    let tracer = troupekit_trace::Tracer::builder()
+        .sink(sink.clone())
+        .build()
+        .unwrap();
+    let report = tracer
+        .in_scope(s.runner().tick(TickOptions::default()))
+        .await
+        .unwrap();
+    drop(tracer);
+    assert_eq!(report.processed, 3);
+    let records: Vec<serde_json::Value> = sink
+        .lines()
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let starts = |name: &str| -> Vec<&serde_json::Value> {
+        records
+            .iter()
+            .filter(|r| r["t"] == "start" && r["name"] == name)
+            .collect()
+    };
+    let jobs = starts("graph.job");
+    assert_eq!(jobs.len(), 3);
+    assert!(jobs
+        .iter()
+        .all(|r| r["cat"] == "graphs" && r["fields"]["run"] == id.to_string().as_str()));
+    let job_ids: Vec<&serde_json::Value> = jobs.iter().map(|r| &r["span"]).collect();
+    let steps = starts("graph.step");
+    assert_eq!(steps.len(), 3);
+    assert!(steps.iter().all(|r| job_ids.contains(&&r["parent"])));
+    let ends: Vec<&serde_json::Value> = records
+        .iter()
+        .filter(|r| r["t"] == "end" && job_ids.contains(&&r["span"]))
+        .collect();
+    assert!(ends.iter().all(|r| r["fields"]["outcome"] == "stepped"));
+}
+
+#[tokio::test]
+async fn trace_sink_takes_toml_traced_runs() {
+    use troupekit_trace::{MemorySink, Trace, TraceSet, TraceSpec};
+    let (tools, _) = saving_tools(false);
+    let s = stack(planner_model(), tools);
+    let wf = troupekit_graph::Workflow::parse("test/wf.toml", LINEAR).unwrap();
+    let input = [("goal".to_string(), json!("run 5k"))].into_iter().collect();
+    let mut run = troupekit_graph::GraphRun::new(wf, input, troupekit_agent::Limits::default(), s.io.as_ref())
+        .await
+        .unwrap();
+    run.set_trace(TraceSpec::new(TraceSet::none().with(Trace::Graphs)));
+    s.runner().enqueue(&run).await.unwrap();
+    let sink = Arc::new(MemorySink::default());
+    let runner = s.runner().with_trace_sink(sink.clone());
+    let report = runner.tick(TickOptions::default()).await.unwrap();
+    assert_eq!(report.processed, 3);
+    let lines = sink.lines();
+    let count = |name: &str| {
+        lines
+            .iter()
+            .filter(|l| l.contains("\"t\":\"start\"") && l.contains(&format!("\"name\":\"{name}\"")))
+            .count()
+    };
+    assert_eq!(count("graph.step"), 3, "{lines:?}");
+    assert_eq!(count("model.call"), 0, "only the spec's categories");
+    assert_eq!(lines.iter().filter(|l| l.contains("\"t\":\"header\"")).count(), 3);
+}

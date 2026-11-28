@@ -1,11 +1,13 @@
-//! The `troupekit` binary. 0.2 ships one command, `ingest`.
+//! The `troupekit` binary: `ingest` a folder, or view a `trace` file.
 //! Exit codes: 0 success, 1 a failed run or failed files, 2 bad usage.
 
 mod args;
+mod trace;
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
-use args::{EmbedderChoice, IngestArgs, Kind, Quant};
+use args::{Command, EmbedderChoice, IngestArgs, Kind, Quant};
 use troupekit::context::chunk::ChunkConfig;
 use troupekit::context::embed::{Embedder, HashingEmbedder};
 use troupekit::core::secret::Secret;
@@ -17,11 +19,13 @@ const BUILTIN_CATALOG: &str = include_str!("../../../catalog/providers.toml");
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
-    let call = match args::parse(&argv) {
-        Ok(call) => call,
+    let call = match args::command(&argv) {
+        Ok(Command::Ingest(call)) => call,
+        Ok(Command::Trace(call)) => return trace_main(&call),
         Err(message) => {
             eprintln!("troupekit: {message}");
             eprintln!("{}", args::USAGE);
+            eprintln!("{}", args::TRACE_USAGE);
             return ExitCode::from(2);
         }
     };
@@ -43,6 +47,24 @@ fn main() -> ExitCode {
             } else {
                 ExitCode::from(1)
             }
+        }
+        Err(message) => {
+            eprintln!("troupekit: {message}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Runs `troupekit trace` and maps the result to an exit code:
+/// 0 after printing the tree or writing the page, 1 on a read or write error.
+fn trace_main(call: &args::TraceArgs) -> ExitCode {
+    match trace::run(call, std::io::stdout().is_terminal()) {
+        Ok(text) => {
+            print!("{text}");
+            if !text.ends_with('\n') {
+                println!();
+            }
+            ExitCode::SUCCESS
         }
         Err(message) => {
             eprintln!("troupekit: {message}");
@@ -128,3 +150,4 @@ async fn run(call: &IngestArgs) -> Result<IngestReport, String> {
     let report = ingest_dir(&vectors, embedder.as_ref(), &call.dir, &ingest).await.map_err(|e| format!("ingest of {}: {e}", call.dir.display()))?;
     Ok(report)
 }
+

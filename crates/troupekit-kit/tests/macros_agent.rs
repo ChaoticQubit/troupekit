@@ -139,3 +139,54 @@ async fn macro_events_key_reaches_builder() {
     let events = collected().0.lock().unwrap().len();
     assert!(events >= 2, "{events}");
 }
+
+fn office() -> troupekit_providers::route::RoutePolicy {
+    troupekit_providers::route::RoutePolicy::parse(
+        "office.toml",
+        "name = \"office\"\n[[target]]\nid = \"cloud\"\ntiers = [\"large\"]\n",
+    )
+    .unwrap()
+}
+
+/// Echo the user.
+#[agent(
+    model = "fake/m",
+    trace = [Agents, troupekit::prelude::Trace::Models],
+    trace_content = false,
+    private = false,
+    route = office(),
+    tier = "large",
+)]
+fn routed_echo() {}
+
+/// Echo the user.
+#[agent(model = "fake/m", trace = all)]
+fn traced_echo() {}
+
+#[tokio::test]
+async fn macro_trace_keys_reach_builder() {
+    use std::sync::Arc;
+    use troupekit_trace::MemorySink;
+    let header = |sink: &MemorySink| -> serde_json::Value {
+        serde_json::from_str(&sink.lines()[0]).unwrap()
+    };
+    let sink = Arc::new(MemorySink::default());
+    let text = routed_echo()
+        .model_client(echo_model())
+        .trace_to(sink.clone())
+        .run("hi")
+        .await
+        .unwrap();
+    assert_eq!(text, "Hello! You said: hi");
+    assert_eq!(header(&sink)["categories"], serde_json::json!(["agents", "models"]));
+    assert_eq!(header(&sink)["content"], false);
+
+    let all = Arc::new(MemorySink::default());
+    traced_echo()
+        .model_client(echo_model())
+        .trace_to(all.clone())
+        .run("hi")
+        .await
+        .unwrap();
+    assert_eq!(header(&all)["categories"].as_array().unwrap().len(), 11);
+}

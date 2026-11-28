@@ -11,6 +11,8 @@ use troupekit_core::ids::RunId;
 use troupekit_core::message::{Message, Role};
 use troupekit_core::store::Checkpoint;
 use troupekit_tools::{fence_untrusted, ToolContext, ToolError};
+use troupekit_agent::persona::{open_trace, SavedTrace};
+use troupekit_trace::{content, trace, trace_span, Span, Trace, TraceSpec};
 
 /// Version of the serialized graph run.
 /// `from_checkpoint` refuses any other, so a deploy never resumes
@@ -199,6 +201,8 @@ pub struct GraphRun {
     stopped: Option<Stop>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace: Option<SavedTrace>,
 }
 
 impl GraphRun {
@@ -269,7 +273,24 @@ impl GraphRun {
             active_ms: 0,
             stopped: None,
             failure: None,
+            trace: None,
         })
+    }
+
+    /// Traces this run with `spec` from its next step on; the spec is kept
+    /// in the checkpoint, so a resumed run keeps it. Input: the spec.
+    /// Output: none.
+    pub fn set_trace(&mut self, spec: TraceSpec) {
+        self.trace = Some(SavedTrace::from_spec(&spec));
+        assert_eq!(self.trace(), Some(spec));
+    }
+
+    /// Returns the trace spec set with `set_trace`, if any.
+    /// Input: none. Output: the spec.
+    pub fn trace(&self) -> Option<TraceSpec> {
+        self.trace
+            .as_ref()
+            .map(|saved| saved.spec().expect("trace spec checked when set or loaded"))
     }
 
     /// Sets the active-work time limit: the run stops once its steps have
@@ -388,6 +409,9 @@ impl GraphRun {
         }
         if run.status == GraphStatus::Running {
             return Err(bad("a checkpoint never holds a running step".into()));
+        }
+        if let Some(saved) = &run.trace {
+            saved.spec().map_err(bad)?;
         }
         for b in &run.branches {
             if let At::Agent { run: agent, .. } = &b.at {
@@ -548,7 +572,23 @@ impl GraphRun {
     /// Runs one step: one unit of work (one agent step or one tool call)
     /// for every branch that can work, concurrently, with control nodes
     /// resolved before and after. Waiting and final runs change nothing.
+    /// With a trace spec the step nests in the active scope, or writes its file.
     pub async fn step(&mut self, io: &dyn GraphIo) -> GraphOutcome {
+        let working = matches!(self.status, GraphStatus::Queued | GraphStatus::Checkpointed);
+        let Some(spec) = self.trace().filter(|_| working) else {
+            return self.step_once(io).await;
+        };
+        if let Some(scope) = troupekit_trace::current() {
+            let nested = scope.nest(spec.categories(), None);
+            return nested.in_scope(self.step_once(io)).await;
+        }
+        match open_trace(&spec, &self.workflow.name, self.run_id) {
+            Ok(tracer) => tracer.in_scope(self.step_once(io)).await,
+            Err(_) => self.step_once(io).await,
+        }
+    }
+
+    async fn step_once(&mut self, io: &dyn GraphIo) -> GraphOutcome {
         match &self.status {
             GraphStatus::Done => return GraphOutcome::Done(self.state.clone()),
             GraphStatus::Failed { error } => return GraphOutcome::Failed(error.clone()),
@@ -622,7 +662,16 @@ impl GraphRun {
     }
 
     async fn work(&mut self, io: &dyn GraphIo, em: &Emitter<'_>) -> GraphOutcome {
-        if self.steps > u64::from(self.workflow.max_steps) {
+        let held = self.steps <= u64::from(self.workflow.max_steps);
+        trace!(
+            Trace::Laws,
+            "law.check",
+            law = "step_stays_within_max_steps",
+            held = held,
+            steps = self.steps,
+            max_steps = self.workflow.max_steps,
+        );
+        if !held {
             return GraphOutcome::Failed(format!("max_steps {} reached", self.workflow.max_steps));
         }
         match self.settle(io).await {
@@ -742,12 +791,15 @@ impl GraphRun {
                     match (&mut b.at, &node.kind) {
                         (At::Agent { run, .. }, NodeKind::Agent { persona, .. }) => {
                             let nio = NodeIo::new(em, &node.id, persona);
-                            Work::Agent(run.step(&nio).await)
+                            let span = graph_step_span(&node.id, "agent", step);
+                            Work::Agent(span.instrument(run.step(&nio)).await)
                         }
                         (At::Enter, NodeKind::Tool { tool }) => {
                             let key = b.call.unwrap_or(CallKey { step, index: i });
                             let ctx = ToolContext::for_call(run_id, key.step, key.index);
-                            Work::Tool(call_tool(io, em, node, tool, state, ctx).await)
+                            let span = graph_step_span(&node.id, "tool", step);
+                            let call = call_tool(io, em, node, tool, state, ctx);
+                            Work::Tool(span.instrument(call).await)
                         }
                         _ => unreachable!("only agent and tool branches work"),
                     }
@@ -784,6 +836,9 @@ impl GraphRun {
                 changed = true;
                 let out = self.workflow.next(&b.node);
                 assert!(!out.is_empty(), "only end nodes have no out-edges");
+                for e in &out {
+                    graph_edge(&b.node, &e.to, e.when.as_deref());
+                }
                 next.extend(out.into_iter().map(|e| Branch::enter(&e.to)));
             }
             self.branches = next;
@@ -811,6 +866,7 @@ impl GraphRun {
                             .into_iter()
                             .find(|e| e.when.as_deref() == Some(label.as_str()))
                             .ok_or_else(|| fail(format!("no edge for label `{label}`")))?;
+                        graph_edge(&node.id, &edge.to, Some(label.as_str()));
                         self.branches[i] = Branch::enter(&edge.to);
                     }
                     NodeKind::Human { .. } => {
@@ -829,9 +885,12 @@ impl GraphRun {
                             run_cap,
                         );
                         let input = vec![agent_input(prompt.as_deref(), data)];
-                        let run = AgentRun::new(&p, input, limits, io.agent())
+                        let mut run = AgentRun::new(&p, input, limits, io.agent())
                             .await
                             .map_err(|e| fail(e.to_string()))?;
+                        if let Some(spec) = io.persona_trace(persona).await {
+                            run.set_trace(spec);
+                        }
                         self.branches[i].at = At::Agent {
                             run: Box::new(run),
                             call_cap,
@@ -880,6 +939,19 @@ impl GraphRun {
         );
         true
     }
+}
+
+/// Opens the `graph.step` span for one branch's work at `node`.
+/// Input: the node id, its kind name and the run step. Output: the span,
+/// disabled when the `graphs` category is off.
+fn graph_step_span(node: &str, kind: &'static str, step: u64) -> Span {
+    trace_span!(Trace::Graphs, "graph.step", node = node, kind = kind, step = step)
+}
+
+/// Writes one `graph.edge` event for the edge taken from `from` to `to`.
+/// Input: both node ids and the edge label, if any. Output: none.
+fn graph_edge(from: &str, to: &str, label: Option<&str>) {
+    trace!(Trace::Graphs, "graph.edge", from = from, to = to, label = label.unwrap_or(""));
 }
 
 fn node_limits(
@@ -936,11 +1008,28 @@ async fn call_tool(
         call_id: key.clone(),
         name: tool.to_string(),
     });
-    let result = io
-        .agent()
-        .tools()
-        .call(tool, Value::Object(args), &ctx)
-        .await;
+    let mut span = trace_span!(
+        Trace::Tools,
+        "tool.call",
+        name = tool,
+        call_id = key.as_str(),
+        node = node.id.as_str(),
+        args = content(serde_json::to_string(&args).expect("tool arguments serialize")),
+    );
+    let call = io.agent().tools().call(tool, Value::Object(args), &ctx);
+    let result = span.instrument(call).await;
+    match &result {
+        Ok(out) if span.is_enabled() => {
+            span.record("is_error", out.is_error);
+            span.record("output", content(out.content.as_str()));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            span.fail("tool call failed");
+            span.record("error", content(e.to_string()));
+        }
+    }
+    drop(span);
     em.emit(EventBody::ToolCallFinished {
         call_id: key,
         is_error: !matches!(&result, Ok(o) if !o.is_error),

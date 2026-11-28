@@ -4,6 +4,7 @@ use crate::error::ContextError;
 use crate::text::stable_hash;
 use std::collections::BTreeMap;
 use troupekit_core::store::{VectorRecord, VectorStore};
+use troupekit_trace::{content, trace_span, Trace};
 
 pub const META_SCOPE: &str = "scope";
 pub const META_SOURCE: &str = "source";
@@ -77,6 +78,19 @@ pub fn chunk_id(doc: &Document, index: usize) -> String {
 /// Returns the chunk count, or `ContextError::Invalid` for a blank scope or
 /// source or a reserved key in `doc.meta`; blank text writes nothing.
 pub async fn ingest(vectors: &dyn VectorStore, embedder: &dyn Embedder, doc: &Document, cfg: &ChunkConfig) -> Result<usize, ContextError> {
+    let mut span = trace_span!(Trace::Knowledge, "knowledge.ingest", text_bytes = doc.text.len(), source = content(doc.source.as_str()));
+    let result = span.instrument(ingest_records(vectors, embedder, doc, cfg)).await;
+    match &result {
+        Ok(chunks) => span.record("chunks", *chunks),
+        Err(e) => {
+            span.fail("knowledge ingest failed");
+            span.record("error", content(e.to_string()));
+        }
+    }
+    result
+}
+
+async fn ingest_records(vectors: &dyn VectorStore, embedder: &dyn Embedder, doc: &Document, cfg: &ChunkConfig) -> Result<usize, ContextError> {
     let records = document_records(embedder, doc, cfg).await?;
     if records.is_empty() {
         return Ok(0);

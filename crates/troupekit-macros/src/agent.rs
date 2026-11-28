@@ -6,7 +6,7 @@ use crate::tokens::{Delim, Error, Piece, SpanId, Tok};
 use crate::tool::crate_path;
 
 const WHAT: &str = "#[agent]";
-const KEYS: [&str; 21] = [
+const KEYS: [&str; 28] = [
     "model",
     "tools",
     "evals",
@@ -28,16 +28,24 @@ const KEYS: [&str; 21] = [
     "events",
     "name",
     "crate",
+    "trace",
+    "trace_content",
+    "local",
+    "download",
+    "route",
+    "private",
+    "tier",
 ];
+const TRACE_MESSAGE: &str = "trace = takes all or a list like [Tools, Laws]";
 const DEFAULT_CRATE: &str = "::troupekit";
 
 /// One builder call the `#[agent]` expansion makes: the method name and
-/// the original value tokens passed to it, re-emitted with their spans.
+/// the value pieces passed to it, original tokens keeping their spans.
 /// Calls run in attribute order, after `new` and `instructions`.
 #[derive(Clone, Debug)]
 pub struct Call {
     pub method: &'static str,
-    pub value: Vec<SpanId>,
+    pub value: Vec<Piece>,
 }
 
 /// A validated `#[agent]` fn, ready for code generation.
@@ -108,8 +116,9 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
     let mut krate = DEFAULT_CRATE.to_string();
     let mut name_set = false;
     let mut calls = Vec::new();
+    let mut trace_at = None;
     for arg in &args {
-        let spans = || arg.value.iter().map(Tok::span).collect::<Vec<_>>();
+        let spans = || orig(&arg.value);
         match arg.key.as_str() {
             "name" => {
                 name = arg.string(WHAT)?;
@@ -134,7 +143,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     }
                     calls.push(Call {
                         method: "tool",
-                        value: path.iter().map(Tok::span).collect(),
+                        value: orig(&path),
                     });
                 }
             }
@@ -147,7 +156,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     }
                     calls.push(Call {
                         method: "eval",
-                        value: vec![entry[0].span()],
+                        value: orig(&entry[..1]),
                     });
                 }
             }
@@ -165,7 +174,7 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     one.string(WHAT)?;
                     calls.push(Call {
                         method: "laws",
-                        value: one.value.iter().map(Tok::span).collect(),
+                        value: orig(&one.value),
                     });
                 }
             }
@@ -182,11 +191,45 @@ pub fn parse_agent(attr: &[Tok], item: &[Tok]) -> Result<AgentFn, Error> {
                     value: spans(),
                 });
             }
+            "trace" => {
+                trace_at = Some((calls.len(), arg));
+                calls.push(Call {
+                    method: "trace",
+                    value: Vec::new(),
+                });
+            }
+            "trace_content" | "private" | "download" => {
+                if !is_bool(&arg.value) {
+                    return Err(Error::new(
+                        arg.value_span(),
+                        format!("{} = takes true or false", arg.key),
+                    ));
+                }
+                calls.push(Call {
+                    method: method(&arg.key),
+                    value: spans(),
+                });
+            }
+            "route" => calls.push(Call {
+                method: if is_string(&arg.value) { "route_file" } else { "route" },
+                value: spans(),
+            }),
+            "tier" => {
+                arg.string(WHAT)?;
+                calls.push(Call {
+                    method: "tier",
+                    value: spans(),
+                });
+            }
             _ => calls.push(Call {
                 method: method(&arg.key),
                 value: spans(),
             }),
         }
+    }
+    if let Some((at, arg)) = trace_at {
+        assert_eq!(calls[at].method, "trace", "the placeholder is in place");
+        calls[at] = trace_call(arg, &krate)?;
     }
     if !name_set && !valid_ident {
         return Err(Error::new(
@@ -240,13 +283,49 @@ pub fn expand_agent(a: &AgentFn) -> Vec<Piece> {
     ))];
     for call in &a.calls {
         body.push(Piece::Code(format!(".{}", call.method)));
-        body.push(Piece::Group(
-            Delim::Paren,
-            call.value.iter().map(|s| Piece::Orig(*s)).collect(),
-        ));
+        body.push(Piece::Group(Delim::Paren, call.value.clone()));
     }
     out.push(Piece::Group(Delim::Brace, body));
     out
+}
+
+fn orig(toks: &[Tok]) -> Vec<Piece> {
+    toks.iter().map(|t| Piece::Orig(t.span())).collect()
+}
+
+fn is_bool(toks: &[Tok]) -> bool {
+    matches!(toks, [t] if t.is_ident("true") || t.is_ident("false"))
+}
+
+fn is_string(toks: &[Tok]) -> bool {
+    matches!(toks, [Tok::Lit(l, _)] if l.starts_with('"') || l.starts_with('r'))
+}
+
+fn trace_call(arg: &Arg, krate: &str) -> Result<Call, Error> {
+    if matches!(arg.value.as_slice(), [t] if t.is_ident("all")) {
+        return Ok(Call {
+            method: "tracing",
+            value: vec![Piece::Code("true".into())],
+        });
+    }
+    let mut inner = Vec::new();
+    for (i, entry) in list(arg, TRACE_MESSAGE)?.iter().enumerate() {
+        if !is_path(entry) {
+            return Err(Error::new(entry[0].span(), TRACE_MESSAGE));
+        }
+        if i > 0 {
+            inner.push(Piece::Code(",".into()));
+        }
+        if entry.len() == 1 {
+            inner.push(Piece::Code(format!("{krate}::__private::trace::Trace::")));
+        }
+        inner.extend(orig(entry));
+    }
+    assert!(inner.iter().all(|p| !matches!(p, Piece::Group(..))));
+    Ok(Call {
+        method: "trace",
+        value: vec![Piece::Group(Delim::Bracket, inner)],
+    })
 }
 
 fn method(key: &str) -> &'static str {
@@ -346,7 +425,9 @@ mod tests {
             limits = Limits::default(), checkpoints = Storage::memory(), max_turns = 4, \
             max_tokens = 100, retries = 1, role = \"R\", goal = \"G\", display_name = \"D\", \
             instructions = \"I\", laws = [\"a.bend\", \"b.bend\"], auto_laws = false, \
-            name = \"adder\", crate = \"::kit\",";
+            name = \"adder\", crate = \"::kit\", trace = all, trace_content = true, \
+            local = \"qwen\", download = true, route = \"route.toml\", private = true, \
+            tier = \"small\",";
         let a = parse(attr, "fn calc() {}").unwrap();
         assert_eq!(a.name, "adder");
         assert_eq!(a.instructions.as_deref(), Some("I"));
@@ -367,7 +448,14 @@ mod tests {
                 "display_name",
                 "laws",
                 "laws",
-                "auto_laws"
+                "auto_laws",
+                "tracing",
+                "trace_content",
+                "local",
+                "download",
+                "route_file",
+                "private",
+                "tier"
             ]
         );
         assert_eq!(a.calls[3].value.len(), 5);
@@ -523,7 +611,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_key() {
-        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, model_client, transport, events, name, crate");
+        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, model_client, transport, events, name, crate, trace, trace_content, local, download, route, private, tier");
     }
 
     #[test]
@@ -547,6 +635,64 @@ mod tests {
             &format!("{DOC}fn calc() {{}}"),
             "#[agent] key `laws` takes a string literal",
         );
+    }
+
+    fn code_of(pieces: &[Piece]) -> String {
+        pieces
+            .iter()
+            .map(|p| match p {
+                Piece::Code(s) => s.clone(),
+                Piece::Orig(_) => "#".into(),
+                Piece::Group(_, inner) => format!("[{}]", code_of(inner)),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn trace_all_and_list_become_builder_calls() {
+        let item = format!("{DOC}fn calc() {{}}");
+        let all = parse("trace = all", &item).unwrap();
+        assert_eq!(methods(&all), ["tracing"]);
+        assert_eq!(code_of(&all.calls[0].value), "true");
+        let list = parse(
+            "trace = [Tools, Trace::Laws, ::x::Trace::Agents], crate = \"::kit\"",
+            &item,
+        )
+        .unwrap();
+        assert_eq!(methods(&list), ["trace"]);
+        assert_eq!(
+            code_of(&list.calls[0].value),
+            "[::kit::__private::trace::Trace::#,####,#########]"
+        );
+        let empty = parse("trace = []", &item).unwrap();
+        assert_eq!(code_of(&empty.calls[0].value), "[]");
+        for bad in ["trace = true", "trace = \"all\"", "trace = [1]", "trace = none"] {
+            rejects(bad, &item, TRACE_MESSAGE);
+        }
+    }
+
+    #[test]
+    fn local_and_route_accept_literal_or_expression() {
+        let item = format!("{DOC}fn calc() {{}}");
+        let a = parse(
+            "local = \"qwen\", route = \"route.toml\", tier = \"small\"",
+            &item,
+        )
+        .unwrap();
+        assert_eq!(methods(&a), ["local", "route_file", "tier"]);
+        let b = parse("local = my_model(), route = office_policy()", &item).unwrap();
+        assert_eq!(methods(&b), ["local", "route"]);
+        assert_eq!(b.calls[0].value.len(), 2);
+        rejects("tier = small", &item, "#[agent] key `tier` takes a string literal");
+        for key in ["private", "trace_content", "download"] {
+            rejects(
+                &format!("{key} = maybe"),
+                &item,
+                &format!("{key} = takes true or false"),
+            );
+        }
+        let flags = parse("private = false, download = false", &item).unwrap();
+        assert_eq!(methods(&flags), ["private", "download"]);
     }
 
     #[test]

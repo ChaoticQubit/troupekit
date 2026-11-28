@@ -10,6 +10,7 @@ mod http_model;
 mod middleware;
 mod openai;
 mod request;
+mod route;
 mod reqwest_transport;
 mod sse;
 mod status;
