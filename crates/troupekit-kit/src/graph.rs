@@ -1,12 +1,13 @@
 use crate::agent::Agent;
 use crate::built::Discard;
 use crate::error::KitError;
+use crate::flow::Part;
 use crate::laws::Laws;
 use crate::storage::Storage;
 use crate::tool::AsTool;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,31 +21,32 @@ use troupekit_core::event::Usage;
 use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::store::CheckpointStore;
-use troupekit_graph::{GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
+use troupekit_graph::{Flow, GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSpec};
 
-const MAX_NODES: usize = 64;
+pub(crate) const MAX_NODES: usize = 64;
 const MAX_GRAPH_RETRIES: u32 = 50;
 const DEFAULT_GRAPH_RETRIES: u32 = 3;
 const RETRY_WAIT_CHUNK_MS: i64 = 300_000;
-const INPUT: &str = "input";
-const END: &str = "end";
+pub(crate) const INPUT: &str = "input";
+pub(crate) const END: &str = "end";
 
 #[derive(Clone)]
-enum Node {
+pub(crate) enum Node {
     Agent(Box<Agent>),
     Step(Arc<dyn Tool>),
 }
 
-/// Builds a pipeline of agents and tool fns that run one after another.
-/// Each node reads the output of the node before it, the first reads the
-/// input; the last node's output is the answer. Fan-out, routers and
-/// human nodes stay in workflow TOML.
+/// Builds a pipeline of agents and tool fns that run one after another,
+/// or a flow once `parallel` and `join` add branches. Each node reads the
+/// output of the nodes that feed it, the first reads the input; the last
+/// node's output is the answer. Routers stay in workflow TOML.
 #[derive(Clone)]
 pub struct Graph {
-    name: String,
-    nodes: Vec<(String, Node)>,
-    edges: Vec<(String, String)>,
+    pub(crate) name: String,
+    pub(crate) nodes: Vec<(String, Node)>,
+    pub(crate) edges: Vec<(String, String)>,
+    pub(crate) parts: Vec<Part>,
     storage: Storage,
     limits: Limits,
     ledger: Option<Arc<dyn UsageLedger>>,
@@ -64,6 +66,7 @@ impl Graph {
             name: name.into(),
             nodes: Vec::new(),
             edges: Vec::new(),
+            parts: Vec::new(),
             storage: Storage::memory(),
             limits: Limits::default(),
             ledger: None,
@@ -177,16 +180,39 @@ impl Graph {
                 self.retries
             )));
         }
-        let order = self.chain().map_err(fail)?;
+        let (order, reads, last, topo) = if self.parts.is_empty() {
+            let order = self.chain().map_err(fail)?;
+            let reads: BTreeMap<String, Vec<String>> = (0..order.len())
+                .map(|i| (order[i].clone(), vec![feeder(&order, i).to_string()]))
+                .collect();
+            let last = order.last().expect("chain has a node").clone();
+            (order, reads, last, None)
+        } else {
+            let topo = self.topology().map_err(fail)?;
+            let order: Vec<String> = topo
+                .order
+                .iter()
+                .filter(|id| topo.reads.contains_key(*id))
+                .cloned()
+                .collect();
+            (order, topo.reads.clone(), topo.last.clone(), Some(topo))
+        };
         let laws = Laws::check(&owner, &self.law_paths, &self.inline_laws, self.auto_laws)?;
-        let workflow = self.workflow(&order)?;
+        let flow = match &topo {
+            Some(topo) => Some(self.flow(topo)?),
+            None => None,
+        };
+        let workflow = match &flow {
+            Some(flow) => flow.workflow().clone(),
+            None => self.workflow(&order)?,
+        };
         let mut registry = ToolRegistry::new();
         let mut agent_io = SimpleIo::new(ToolRegistry::new());
         let mut files: HashMap<String, String> = HashMap::new();
         let mut keys: HashMap<String, (String, &Agent)> = HashMap::new();
         let mut evals: HashMap<String, EvalFn> = HashMap::new();
-        for (i, id) in order.iter().enumerate() {
-            let feeder = feeder(&order, i);
+        for id in &order {
+            let feeds = &reads[id];
             match self.node(id) {
                 Node::Agent(agent) => {
                     if let Some(what) = agent.graph_conflict() {
@@ -241,13 +267,20 @@ impl Graph {
                 }
                 Node::Step(tool) => {
                     let args = arg_names(tool.spec());
-                    if args != [feeder] {
+                    let (mut got, mut want) = (args.clone(), feeds.clone());
+                    got.sort();
+                    want.sort();
+                    if got != want {
                         return Err(fail(format!(
-                            "step `{id}` takes ({}) but is fed by ({feeder}); name its arguments after the nodes that feed it",
-                            args.join(", ")
+                            "step `{id}` takes ({}) but is fed by ({}); name its arguments after the nodes that feed it",
+                            args.join(", "),
+                            feeds.join(", ")
                         )));
                     }
-                    if !takes_text(&tool.spec().schema["properties"][feeder]) {
+                    if let Some(feeder) = feeds
+                        .iter()
+                        .find(|f| !takes_text(&tool.spec().schema["properties"][f.as_str()]))
+                    {
                         return Err(fail(format!(
                             "step `{id}` argument `{feeder}` must accept a string; every graph node is fed text"
                         )));
@@ -265,19 +298,20 @@ impl Graph {
         let agent_io: Arc<dyn AgentIo> = Arc::new(agent_io);
         let loader = PersonaLoader::new(vec![Arc::new(MemorySource::new("graph", files))]);
         let io = SimpleGraphIo::new(agent_io, loader);
-        GraphRun::new(
-            workflow.clone(),
+        start(
+            &workflow,
+            flow.as_ref(),
             input_state("build check"),
             self.limits.clone(),
             &io,
         )
         .await?;
         let store = self.storage.open().await?;
-        let last = order.last().expect("chain has a node").clone();
         Ok(BuiltGraph {
             inner: Arc::new(Inner {
                 owner,
                 workflow,
+                flow,
                 io,
                 limits: self.limits,
                 store,
@@ -301,12 +335,12 @@ impl Graph {
         self.build().await?.run_with(input).await
     }
 
-    fn node(&self, id: &str) -> &Node {
+    pub(crate) fn node(&self, id: &str) -> &Node {
         let found = self.nodes.iter().find(|(n, _)| n == id);
         &found.expect("chain ids come from the nodes").1
     }
 
-    fn chain(&self) -> Result<Vec<String>, String> {
+    pub(crate) fn ids(&self) -> Result<Vec<&str>, String> {
         if self.nodes.is_empty() {
             return Err("needs at least one node".into());
         }
@@ -326,6 +360,11 @@ impl Graph {
             }
             ids.push(id);
         }
+        Ok(ids)
+    }
+
+    fn chain(&self) -> Result<Vec<String>, String> {
+        let ids = self.ids()?;
         if self.edges.is_empty() {
             return Ok(ids.iter().map(|s| s.to_string()).collect());
         }
@@ -405,16 +444,7 @@ impl Graph {
             edge.insert("to".into(), Toml::String(to.to_string()));
             edges.push(Toml::Table(edge));
         }
-        let mut table = toml::Table::new();
-        table.insert("name".into(), Toml::String(self.name.clone()));
-        table.insert("start".into(), Toml::String(order[0].clone()));
-        if let Some(steps) = self.max_steps {
-            table.insert("max_steps".into(), Toml::Integer(i64::from(steps)));
-        }
-        table.insert("max_retries".into(), Toml::Integer(i64::from(self.retries)));
-        table.insert("state".into(), Toml::Table(state));
-        table.insert("nodes".into(), Toml::Array(nodes));
-        table.insert("edges".into(), Toml::Array(edges));
+        let table = self.file_table(&order[0], state, nodes, edges);
         let text = toml::to_string(&table).map_err(|e| {
             KitError::config(
                 &format!("graph:{}", self.name),
@@ -422,6 +452,47 @@ impl Graph {
             )
         })?;
         Ok(Workflow::parse(&format!("graph:{}", self.name), &text)?)
+    }
+}
+
+impl Graph {
+    /// Builds the top-level TOML table of the graph file: name, `start`,
+    /// step and retry caps, and the given state, nodes and edges.
+    /// Shared by the chain workflow and the flow. Returns the table.
+    pub(crate) fn file_table(
+        &self,
+        start: &str,
+        state: toml::Table,
+        nodes: Vec<Toml>,
+        edges: Vec<Toml>,
+    ) -> toml::Table {
+        let mut table = toml::Table::new();
+        table.insert("name".into(), Toml::String(self.name.clone()));
+        table.insert("start".into(), Toml::String(start.to_string()));
+        if let Some(steps) = self.max_steps {
+            table.insert("max_steps".into(), Toml::Integer(i64::from(steps)));
+        }
+        table.insert("max_retries".into(), Toml::Integer(i64::from(self.retries)));
+        table.insert("state".into(), Toml::Table(state));
+        table.insert("nodes".into(), Toml::Array(nodes));
+        table.insert("edges".into(), Toml::Array(edges));
+        table
+    }
+}
+
+/// Starts a run of `flow` when the graph has parts, else of `workflow`
+/// exactly as 0.2 did, so a chain run keeps its checkpoint format.
+/// Returns the new run or the setup error.
+async fn start(
+    workflow: &Workflow,
+    flow: Option<&Flow>,
+    input: Map<String, Value>,
+    limits: Limits,
+    io: &SimpleGraphIo,
+) -> Result<GraphRun, troupekit_graph::GraphError> {
+    match flow {
+        Some(flow) => GraphRun::start(flow.clone(), input, limits, io).await,
+        None => GraphRun::new(workflow.clone(), input, limits, io).await,
     }
 }
 
@@ -500,6 +571,7 @@ pub struct BuiltGraph {
 struct Inner {
     owner: String,
     workflow: Workflow,
+    flow: Option<Flow>,
     io: SimpleGraphIo,
     limits: Limits,
     store: Option<Arc<dyn CheckpointStore>>,
@@ -520,8 +592,9 @@ impl BuiltGraph {
     /// The run id in the report works with `resume`.
     pub async fn run_with(&self, input: impl Into<String>) -> Result<GraphReport, KitError> {
         let inner = &self.inner;
-        let mut run = GraphRun::new(
-            inner.workflow.clone(),
+        let mut run = start(
+            &inner.workflow,
+            inner.flow.as_ref(),
             input_state(&input.into()),
             inner.limits.clone(),
             &inner.io,
@@ -563,8 +636,8 @@ impl BuiltGraph {
         Ok(self.finish(&mut run, store.as_ref()).await?.output)
     }
 
-    /// Returns the validated workflow this graph runs.
-    /// Built from the builder by `Workflow::parse`.
+    /// Returns the validated workflow this graph runs: for a chain, built
+    /// by `Workflow::parse`; with parts, the outline of its flow.
     /// Read only.
     pub fn workflow(&self) -> &Workflow {
         &self.inner.workflow
@@ -689,7 +762,7 @@ async fn wait_until(clock: &dyn Clock, at_ms: i64, chunk_ms: i64) {
     }
 }
 
-fn step_name(id: &str) -> String {
+pub(crate) fn step_name(id: &str) -> String {
     format!("step__{id}")
 }
 
