@@ -184,7 +184,8 @@ async fn toml_persona_env_key_is_scrubbed_from_spans() {
     std::env::set_var(var, key);
     let sink = Arc::new(MemorySink::default());
     Agent::from_toml(
-        "name = \"echo\"\ninstructions = \"Echo the user.\"\nmodel = \"anthropic/claude-haiku-5-5\"\n",
+        "name = \"echo\"\ndisplay_name = \"Echo\"\nrole = \"Echoes.\"\ngoal = \"Echo.\"\n\
+         instructions = \"Echo the user.\"\nmodel = \"anthropic/claude-haiku-5-5\"\n",
     )
     .model_client(echo_model())
     .api_key_env(var)
