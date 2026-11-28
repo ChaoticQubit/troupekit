@@ -55,7 +55,6 @@ sh scripts/check-commits.sh origin/main HEAD
 
 ## Code style
 
-- Format with `cargo fmt`.
 - Document public items with doc comments. The code base explains itself through doc comments on items and does not use inline comments.
 
 ## License

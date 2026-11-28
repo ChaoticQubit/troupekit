@@ -5,7 +5,7 @@ Troupekit is an open-source Rust framework for LLM agents. You write an agent as
 ## Why Troupekit
 
 - **One Rust core.** Agents, workflows, retrieval, memory and tracing in one workspace, with no Python runtime.
-- **Durable by default.** Runs checkpoint into one SQLite file, so a killed process resumes where it stopped.
+- **Durable when you want it.** Stores live in memory by default; with `Troupe::builder().sqlite(path)` runs checkpoint into one SQLite file, so a killed process resumes where it stopped.
 - **Local or cloud.** Call Anthropic, OpenAI, Gemini or any OpenAI-compatible server, or run a GGUF model on the device through llama.cpp.
 - **Your documents.** Keyword, vector and hybrid search over local files, with HNSW and quantized indexes.
 - **Built for devices.** CI builds for Linux x86_64 and aarch64, Windows, macOS, Android and iOS.
