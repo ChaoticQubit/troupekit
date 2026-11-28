@@ -1,0 +1,18 @@
+[book]
+title = "Troupekit Documentation"
+description = "Troupekit 0.3, a Rust framework for building LLM agents from persona TOML files."
+language = "en"
+src = "build/src"
+
+[build]
+build-dir = "build/html"
+create-missing = false
+
+[output.html]
+default-theme = "rust-dark"
+preferred-dark-theme = "rust-dark"
+smart-punctuation = false
+additional-css = ["assets/rust-dark.css"]
+additional-js = ["assets/troupekit.js"]
+git-repository-url = "https://github.com/ChaoticQubit/troupekit"
+site-url = "/troupekit/"

@@ -1,0 +1,91 @@
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - 'website/**'
+      - '.github/workflows/docs.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'website/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MDBOOK_VERSION: 0.5.4
+  MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
+
+jobs:
+  build:
+    name: build site and PDF
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Check code samples against their sources
+        run: python3 website/tools/check_samples.py .
+
+      - name: Convert content to mdBook source
+        run: python3 website/tools/convert.py website/content website/build/src
+
+      - name: Install mdBook
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/mdbook.tar.gz" \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${MDBOOK_SHA256}  $RUNNER_TEMP/mdbook.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/mdbook"
+          tar -xzf "$RUNNER_TEMP/mdbook.tar.gz" -C "$RUNNER_TEMP/mdbook"
+          echo "$RUNNER_TEMP/mdbook" >> "$GITHUB_PATH"
+
+      - name: Build site
+        run: |
+          mdbook --version
+          mdbook build website
+
+      - name: Build PDF
+        run: |
+          out="$GITHUB_WORKSPACE/website/build/html"
+          google-chrome --headless=new --no-sandbox --disable-gpu \
+            --no-pdf-header-footer --run-all-compositor-stages-before-draw \
+            --print-to-pdf="$out/troupekit.pdf" "file://$out/print.html"
+          test -s "$out/troupekit.pdf"
+          head -c 5 "$out/troupekit.pdf" | grep -q '%PDF-'
+          ls -l "$out/troupekit.pdf"
+
+      - name: Check links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
+        with:
+          args: >-
+            --no-progress
+            --exclude '^https://docs\.rs/troupekit'
+            --exclude '^https://github\.com/ChaoticQubit/troupekit/blob/main/CONTRIBUTING\.md$'
+            --exclude-path 'website/build/html/404\.html'
+            'website/build/html/**/*.html'
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
+        with:
+          path: website/build/html
+
+  deploy:
+    name: deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346
