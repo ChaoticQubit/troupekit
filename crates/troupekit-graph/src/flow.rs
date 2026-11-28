@@ -43,17 +43,17 @@ pub enum Reducer {
 impl Reducer {
     /// Combines the writes of one step to one key with its `current` value
     /// (`None` or `null` when unset). `writes` holds `(branch index, value)`
-    /// in ascending branch index; the caller checks the result's type.
-    /// Returns the new value, or why a write does not fit.
+    /// in ascending branch index with no repeats; the caller checks the
+    /// result's type. Returns the new value, or why the writes do not fit,
+    /// naming a refused value's type and size, never the value.
     pub fn reduce(
         self,
         current: Option<&Value>,
         writes: &[(usize, Value)],
     ) -> Result<Value, String> {
-        assert!(
-            writes.windows(2).all(|w| w[0].0 < w[1].0),
-            "writes are applied in ascending branch index"
-        );
+        if !writes.windows(2).all(|w| w[0].0 < w[1].0) {
+            return Err("writes must be in ascending branch index with no repeats".into());
+        }
         let current = current.filter(|v| !v.is_null()).cloned();
         let Some((_, last)) = writes.last() else {
             return Ok(current.unwrap_or(Value::Null));
@@ -69,7 +69,7 @@ impl Reducer {
                 let mut list = list_of(current)?;
                 for (b, v) in writes {
                     let Value::Array(items) = v else {
-                        return Err(format!("`extend` takes a list; branch {b} wrote {v}"));
+                        return Err(format!("`extend` takes a list; branch {b} wrote {}", shape(v)));
                     };
                     list.extend(items.iter().cloned());
                 }
@@ -79,12 +79,12 @@ impl Reducer {
                 let mut out = match current {
                     None => Map::new(),
                     Some(Value::Object(m)) => m,
-                    Some(v) => return Err(format!("`merge` needs an object; the key holds {v}")),
+                    Some(v) => return Err(format!("`merge` needs an object; the key holds {}", shape(&v))),
                 };
                 let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
                 for (b, v) in writes {
                     let Value::Object(m) = v else {
-                        return Err(format!("`merge` takes an object; branch {b} wrote {v}"));
+                        return Err(format!("`merge` takes an object; branch {b} wrote {}", shape(v)));
                     };
                     for (k, item) in m {
                         if let Some(other) = seen.insert(k, *b) {
@@ -105,7 +105,7 @@ impl Reducer {
                     if !v.is_number() {
                         let who =
                             b.map_or("the key holds".to_string(), |b| format!("branch {b} wrote"));
-                        return Err(format!("`{}` takes a number; {who} {v}", self.name()));
+                        return Err(format!("`{}` takes a number; {who} {}", self.name(), shape(v)));
                     }
                 }
                 match self {
@@ -143,7 +143,7 @@ fn list_of(current: Option<Value>) -> Result<Vec<Value>, String> {
     match current {
         None => Ok(Vec::new()),
         Some(Value::Array(items)) => Ok(items),
-        Some(v) => Err(format!("the key holds {v}, not a list")),
+        Some(v) => Err(format!("the key holds {}, not a list", shape(&v))),
     }
 }
 
@@ -164,6 +164,21 @@ fn sum<'v>(values: impl Iterator<Item = &'v Value> + Clone) -> Result<Value, Str
     serde_json::Number::from_f64(total)
         .map(Value::Number)
         .ok_or_else(|| "`sum` is not a finite number".to_string())
+}
+
+/// Describes `v` for an error without its content: its JSON type and
+/// serialized size, such as `a string (812 bytes)`. Values written by
+/// agents and tools can be large or private. Returns the description.
+pub(crate) fn shape(v: &Value) -> String {
+    let kind = match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a bool",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "a list",
+        Value::Object(_) => "an object",
+    };
+    format!("{kind} ({} bytes)", v.to_string().len())
 }
 
 /// How concurrent agent branches share the remaining run budget: `Even`
@@ -193,6 +208,10 @@ pub enum FlowKind {
         delegates: Vec<String>,
         model: Option<String>,
         defer: bool,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        fields: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        sets: BTreeMap<String, String>,
     },
     #[non_exhaustive]
     Tool {
@@ -237,7 +256,7 @@ impl FlowKind {
     /// Converts a 0.1 node kind into its flow kind with every 0.5 option
     /// at its default: no goto, delegates or model override, no deferred
     /// entry, an all-join. Returns the flow kind.
-    fn from_v1(kind: &NodeKind) -> FlowKind {
+    pub(crate) fn from_v1(kind: &NodeKind) -> FlowKind {
         match kind {
             NodeKind::Agent { persona, prompt } => FlowKind::Agent {
                 persona: persona.clone(),
@@ -246,6 +265,8 @@ impl FlowKind {
                 delegates: Vec::new(),
                 model: None,
                 defer: false,
+                fields: BTreeMap::new(),
+                sets: BTreeMap::new(),
             },
             NodeKind::Tool { tool } => FlowKind::Tool {
                 tool: tool.clone(),
@@ -504,10 +525,27 @@ to = "done"
     }
 
     #[test]
-    #[should_panic(expected = "ascending branch index")]
     fn reduce_refuses_writes_out_of_branch_order() {
         let w = writes(&[(1, Value::from(1)), (0, Value::from(2))]);
-        let _ = Reducer::Sum.reduce(None, &w);
+        let e = Reducer::Sum.reduce(None, &w).unwrap_err();
+        assert!(e.contains("ascending branch index"), "{e}");
+    }
+
+    #[test]
+    fn reducer_errors_name_the_type_never_the_value() {
+        use serde_json::json;
+        let secret = "s3cr3t model answer";
+        for (r, w) in [
+            (Reducer::Sum, json!(secret)),
+            (Reducer::Extend, json!(secret)),
+            (Reducer::Merge, json!(secret)),
+        ] {
+            let e = r.reduce(None, &[(0, w)]).unwrap_err();
+            assert!(!e.contains(secret), "{e}");
+            assert!(e.contains("a string (21 bytes)"), "{e}");
+        }
+        let e = Reducer::Append.reduce(Some(&json!(secret)), &[(0, json!(1))]).unwrap_err();
+        assert!(!e.contains(secret) && e.contains("a string ("), "{e}");
     }
 
     #[test]
@@ -585,5 +623,55 @@ to = "done"
         assert_eq!(flow.kind("missing"), None);
         let back: Flow = serde_json::from_value(serde_json::to_value(&flow).unwrap()).unwrap();
         assert_eq!(back, flow);
+    }
+
+    const ONE: &str = "name = 'w'\nstart = 'a'\n[state]\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 't'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n";
+
+    #[test]
+    fn reduce_refuses_a_repeated_branch() {
+        let w = [(0, serde_json::json!(1)), (0, serde_json::json!(2))];
+        let e = Reducer::Last.reduce(None, &w).unwrap_err();
+        assert!(e.contains("no repeats"), "{e}");
+    }
+
+    #[test]
+    #[should_panic(expected = "one kind per node")]
+    fn from_parts_with_a_missing_kind_trips() {
+        let wf = Workflow::parse("test/w.toml", ONE).unwrap();
+        let _ = Flow::from_parts(
+            wf,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Vec::new(),
+            BudgetSplit::Even,
+            false,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "every node has a kind")]
+    fn from_parts_with_a_stray_kind_trips() {
+        let wf = Workflow::parse("test/w.toml", ONE).unwrap();
+        let kinds = [("a", FlowKind::End), ("zz", FlowKind::End)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let _ = Flow::from_parts(
+            wf,
+            kinds,
+            BTreeMap::new(),
+            Vec::new(),
+            BudgetSplit::Even,
+            false,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "workflow node ids are unique")]
+    fn from_a_workflow_with_duplicate_ids_trips() {
+        let mut wf = Workflow::parse("test/w.toml", ONE).unwrap();
+        let again = wf.nodes[0].clone();
+        wf.nodes.push(again);
+        let _ = Flow::from(wf);
     }
 }

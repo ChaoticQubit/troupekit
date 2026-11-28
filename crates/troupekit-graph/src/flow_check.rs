@@ -10,6 +10,18 @@ use troupekit_agent::persona::valid_name;
 use troupekit_tools::valid_tool_name;
 
 const MAX_FAN_OUT_DEPTH: usize = 4;
+
+fn check_header(wf: &Workflow) {
+    assert_eq!(wf.nodes.len(), 1, "the header workflow holds one node");
+}
+
+fn check_walk(walked: usize, limit: usize) {
+    assert!(walked <= limit, "choice-free cycles are rejected, so every walk ends");
+}
+
+fn check_join_inputs(inputs: usize, in_degree: usize) {
+    assert_eq!(inputs, in_degree, "join inputs count every edge, goto edges included");
+}
 const DEFAULT_MAX_ITEMS: u32 = 256;
 const MAX_ITEMS_RANGE: std::ops::RangeInclusive<i64> = 1..=10_000;
 const DEFAULT_CONCURRENCY: u32 = 8;
@@ -65,6 +77,8 @@ struct NodeFile {
     goto: Option<Vec<String>>,
     delegates: Option<Vec<String>>,
     model: Option<String>,
+    fields: Option<BTreeMap<String, String>>,
+    sets: Option<BTreeMap<String, String>>,
 }
 
 impl NodeFile {
@@ -84,6 +98,8 @@ impl NodeFile {
             || self.goto.is_some()
             || self.delegates.is_some()
             || self.model.is_some()
+            || self.fields.is_some()
+            || self.sets.is_some()
     }
 }
 
@@ -201,7 +217,7 @@ fn header(file: &str, raw: &FlowFile) -> Result<Workflow, WorkflowError> {
     table.insert("nodes".into(), toml::Value::Array(vec![end.into()]));
     let text = toml::to_string(&table).expect("a toml table serializes");
     let mut wf = Workflow::parse(file, &text)?;
-    assert_eq!(wf.nodes.len(), 1, "the header workflow holds one node");
+    check_header(&wf);
     wf.start = raw.start.clone();
     Ok(wf)
 }
@@ -247,6 +263,52 @@ fn ranged(
     }
 }
 
+/// Checks an agent node's reply `fields` (name to type) and `sets`
+/// (reply field to state key) against its goto targets, its `writes` key
+/// and `state`. Returns both maps, or the field and what is wrong.
+fn reply_fields(
+    fields: Option<BTreeMap<String, String>>,
+    sets: Option<BTreeMap<String, String>>,
+    goto: &[String],
+    writes: Option<&str>,
+    state: &BTreeMap<String, Value>,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), Problem> {
+    let e = |f: &str, m: String| (f.to_string(), m);
+    let given = fields.is_some();
+    let (fields, sets) = (fields.unwrap_or_default(), sets.unwrap_or_default());
+    let routed = ["next", "reason"];
+    if let Some(f) = routed.iter().find(|f| !goto.is_empty() && fields.contains_key(**f)) {
+        return Err(e("fields", format!("`{f}` is set by goto")));
+    }
+    if given {
+        let mut table: toml::Table = fields
+            .iter()
+            .map(|(k, v)| (k.clone(), toml::Value::String(v.clone())))
+            .collect();
+        if !goto.is_empty() {
+            table.insert("next".into(), toml::Value::String(format!("enum({})", goto.join(", "))));
+            table.insert("reason".into(), toml::Value::String("string".into()));
+        }
+        troupekit_agent::compile_output(&table).map_err(|m| e("fields", m))?;
+    }
+    if !sets.is_empty() && !given {
+        return Err(e("sets", "`sets` needs `fields`".into()));
+    }
+    let mut keys: BTreeSet<&str> = writes.into_iter().collect();
+    for (field, key) in &sets {
+        if !fields.contains_key(field) && !(!goto.is_empty() && routed.contains(&field.as_str())) {
+            return Err(e("sets", format!("`{field}` is not a field of the reply")));
+        }
+        if !state.contains_key(key) {
+            return Err(e("sets", format!("`{key}` is not declared in [state]")));
+        }
+        if !keys.insert(key) {
+            return Err(e("sets", format!("`{key}` is written twice")));
+        }
+    }
+    Ok((fields, sets))
+}
+
 fn spec(n: NodeFile, state: &BTreeMap<String, Value>) -> Result<Spec, Problem> {
     let e = |f: &str, m: String| (f.to_string(), m);
     let set = [
@@ -270,9 +332,11 @@ fn spec(n: NodeFile, state: &BTreeMap<String, Value>) -> Result<Spec, Problem> {
         ("goto", n.goto.is_some()),
         ("delegates", n.delegates.is_some()),
         ("model", n.model.is_some()),
+        ("fields", n.fields.is_some()),
+        ("sets", n.sets.is_some()),
     ];
     let allowed: &[&str] = match n.kind.as_str() {
-        "agent" => &["persona", "prompt", "reads", "writes", "goto", "delegates", "model", "defer"],
+        "agent" => &["persona", "prompt", "reads", "writes", "goto", "delegates", "model", "defer", "fields", "sets"],
         "tool" => &["tool", "reads", "writes", "defer"],
         "human" => &["ask", "prompt", "reads", "writes"],
         "router" => &["condition"],
@@ -348,6 +412,7 @@ fn spec(n: NodeFile, state: &BTreeMap<String, Value>) -> Result<Spec, Problem> {
             if n.model.as_ref().is_some_and(|m| m.trim().is_empty()) {
                 return Err(e("model", "must not be blank".into()));
             }
+            let (fields, sets) = reply_fields(n.fields, n.sets, &goto, n.writes.as_deref(), state)?;
             FlowKind::Agent {
                 persona,
                 prompt: n.prompt,
@@ -355,6 +420,8 @@ fn spec(n: NodeFile, state: &BTreeMap<String, Value>) -> Result<Spec, Problem> {
                 delegates,
                 model: n.model,
                 defer,
+                fields,
+                sets,
             }
         }
         "tool" => {
@@ -852,6 +919,9 @@ impl<'a> Graph<'a> {
                     if self.is_choice(body) {
                         return Err(nf(&s.id, "body", format!("`{body}` has goto targets")));
                     }
+                    if matches!(&b.kind, FlowKind::Agent { sets, .. } if !sets.is_empty()) {
+                        return Err(nf(&s.id, "body", format!("`{body}` sets state keys; a map body writes only its item result")));
+                    }
                     if !b.reads.contains(item) {
                         return Err(nf(
                             &s.id,
@@ -974,10 +1044,7 @@ impl<'a> Graph<'a> {
             let mut walked = 0;
             loop {
                 walked += 1;
-                assert!(
-                    walked <= limit,
-                    "choice-free cycles are rejected, so every walk ends"
-                );
+                check_walk(walked, limit);
                 let s = self.spec(cur).expect("edge ends checked");
                 if matches!(s.kind, FlowKind::Join { .. }) {
                     break;
@@ -1001,6 +1068,9 @@ impl<'a> Graph<'a> {
                 }
                 if let Some(w) = &s.writes {
                     writes.insert(w.as_str());
+                }
+                if let FlowKind::Agent { sets, .. } = &s.kind {
+                    writes.extend(sets.values().map(String::as_str));
                 }
                 let mut next = cur;
                 if self.outs(cur).len() >= 2 {
@@ -1050,11 +1120,7 @@ impl<'a> Graph<'a> {
                     .map(move |_| from)
             })
             .collect();
-        assert_eq!(
-            inputs.len(),
-            self.in_degree(j),
-            "join inputs count every edge, goto edges included"
-        );
+        check_join_inputs(inputs.len(), self.in_degree(j));
         if inputs.len() != tails.len() || inputs.iter().any(|i| !tails.contains(i)) {
             return Err(nf(
                 j,
@@ -1066,5 +1132,46 @@ impl<'a> Graph<'a> {
             writes: owner.into_keys().collect(),
             depth: deepest,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "the header workflow holds one node")]
+    fn header_with_more_nodes_trips() {
+        let wf = Workflow::parse(
+            "test/w.toml",
+            "name = 'w'\nstart = 'a'\n[state]\n[[nodes]]\nid = 'a'\nkind = 'tool'\ntool = 't'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'a'\nto = 'e'\n",
+        )
+        .unwrap();
+        check_header(&wf);
+    }
+
+    #[test]
+    #[should_panic(expected = "choice-free cycles are rejected, so every walk ends")]
+    fn walk_past_its_bound_trips() {
+        check_walk(3, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "join inputs count every edge, goto edges included")]
+    fn join_inputs_off_in_degree_trip() {
+        check_join_inputs(1, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "deeper fan-outs are refused before recursing")]
+    fn fan_out_too_deep_trips() {
+        let specs = vec![Spec {
+            id: "a".into(),
+            kind: FlowKind::End,
+            reads: Vec::new(),
+            writes: None,
+        }];
+        let graph = Graph::new(&specs, &[], "a");
+        let _ = graph.fan_out("a", MAX_FAN_OUT_DEPTH + 1, &BTreeMap::new());
     }
 }

@@ -213,6 +213,11 @@ fn map_needs_a_list_key_and_a_body_without_edges() {
         "agent, tool or flow",
     );
     refused(
+        &map_flow(MAP, &BODY.replace("\nwrites = 'y'", ""), ""),
+        "nodes.m.body",
+        "must write one value",
+    );
+    refused(
         &map_flow(&format!("{MAP}\nmax_items = 0"), BODY, ""),
         "nodes.m.max_items",
         "between 1 and 10000",
@@ -648,4 +653,178 @@ fn goto_into_a_join_is_an_input_from_outside_the_fan_out() {
         "nodes.j",
         "inputs from outside the fan-out at `a`",
     );
+}
+
+mod untracked {
+    use crate::pending::Store;
+    use serde_json::{json, Map};
+    use std::sync::Arc;
+    use troupekit_agent::{Limits, PersonaLoader, SimpleIo};
+    use troupekit_core::store::CheckpointStore;
+    use troupekit_graph::testing::GatedTool;
+    use troupekit_graph::{Flow, GraphError, GraphOutcome, GraphRun, SimpleGraphIo};
+    use troupekit_tools::{ToolOutput, ToolRegistry};
+
+    const SECRET: &str = "s3cr3t-token-value";
+
+    const FAN: &str = "name = 'u'\nstart = 'k'\nuntracked = ['secret']\n[state]\nsecret = 'string?'\nseen = 'string?'\nother = 'string?'\n[[nodes]]\nid = 'k'\nkind = 'tool'\ntool = 'k'\nwrites = 'secret'\n[[nodes]]\nid = 'f'\nkind = 'tool'\ntool = 'f'\nwrites = 'other'\n[[nodes]]\nid = 'u'\nkind = 'tool'\ntool = 'u'\nreads = ['secret']\nwrites = 'seen'\n[[nodes]]\nid = 'j'\nkind = 'join'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'k'\nto = 'f'\n[[edges]]\nfrom = 'k'\nto = 'u'\n[[edges]]\nfrom = 'f'\nto = 'j'\n[[edges]]\nfrom = 'u'\nto = 'j'\n[[edges]]\nfrom = 'j'\nto = 'e'\n";
+
+    fn io(gates: &GatedTool) -> SimpleGraphIo {
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(gates.tool("k", |_| ToolOutput::text(SECRET)))
+            .unwrap();
+        tools
+            .register(gates.tool("f", |_| ToolOutput::text("fine")))
+            .unwrap();
+        tools
+            .register(gates.tool("u", |args| {
+                let got = if args["secret"].is_null() {
+                    "none"
+                } else {
+                    "used"
+                };
+                ToolOutput::text(got)
+            }))
+            .unwrap();
+        SimpleGraphIo::new(Arc::new(SimpleIo::new(tools)), PersonaLoader::new(vec![]))
+    }
+
+    async fn start(text: &str, io: &SimpleGraphIo) -> Result<GraphRun, GraphError> {
+        let flow = Flow::parse("test/u.toml", text).unwrap();
+        GraphRun::start(flow, Map::new(), Limits::default(), io).await
+    }
+
+    #[tokio::test]
+    async fn untracked_key_never_written_to_checkpoint() {
+        let gates = GatedTool::new();
+        for g in ["k", "f", "u"] {
+            gates.open(g);
+        }
+        let io = io(&gates);
+        let mut run = start(FAN, &io).await.unwrap();
+        let mut texts = vec![run.checkpoint().state.to_string()];
+        let mut out = GraphOutcome::Continue;
+        for _ in 0..10 {
+            out = run.step(&io).await;
+            texts.push(run.checkpoint().state.to_string());
+            if out != GraphOutcome::Continue {
+                break;
+            }
+        }
+        let GraphOutcome::Done(state) = out else {
+            panic!("{out:?}");
+        };
+        assert_eq!(
+            state["seen"],
+            json!("used"),
+            "tools read the untracked value in memory"
+        );
+        for t in texts {
+            assert!(
+                !t.contains(SECRET),
+                "a checkpoint holds the untracked value: {t}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn untracked_key_reads_null_after_resume() {
+        let gates = GatedTool::new();
+        for g in ["k", "f", "u"] {
+            gates.open(g);
+        }
+        let io = io(&gates);
+        let mut run = start(FAN, &io).await.unwrap();
+        assert_eq!(run.step(&io).await, GraphOutcome::Continue);
+        let mut run = GraphRun::from_checkpoint(&run.checkpoint()).unwrap();
+        let mut out = GraphOutcome::Continue;
+        for _ in 0..10 {
+            out = run.step(&io).await;
+            if out != GraphOutcome::Continue {
+                break;
+            }
+        }
+        let GraphOutcome::Done(state) = out else {
+            panic!("{out:?}");
+        };
+        assert_eq!(
+            state["seen"],
+            json!("none"),
+            "an untracked key is absent after resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn untracked_key_never_in_branch_write() {
+        let text = FAN
+            .replace("[[edges]]\nfrom = 'k'\nto = 'f'\n[[edges]]\nfrom = 'k'\nto = 'u'\n", "[[edges]]\nfrom = 's'\nto = 'k'\n[[edges]]\nfrom = 's'\nto = 'f'\n[[edges]]\nfrom = 'k'\nto = 'u'\n")
+            .replace("start = 'k'", "start = 's'")
+            .replace("[[nodes]]\nid = 'k'", "[[nodes]]\nid = 's'\nkind = 'tool'\ntool = 'f'\n[[nodes]]\nid = 'k'");
+        let (store, gates) = (Store::default(), GatedTool::new());
+        for g in ["k", "f", "u"] {
+            gates.open(g);
+        }
+        let io = io(&gates);
+        let mut run = start(&text, &io).await.unwrap();
+        store.save(run.checkpoint()).await.unwrap();
+        for _ in 0..10 {
+            let out = run.step_durable(&io, &store).await.unwrap();
+            store.save(run.checkpoint()).await.unwrap();
+            if out != GraphOutcome::Continue {
+                break;
+            }
+        }
+        let writes = store.writes.lock().unwrap();
+        assert!(!writes.is_empty(), "tracked branches keep their writes");
+        for w in writes.values() {
+            assert!(
+                !w.write().to_string().contains(SECRET),
+                "a branch write holds the untracked value: {}",
+                w.node()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn untracked_key_read_by_an_agent_is_refused_at_start() {
+        let gates = GatedTool::new();
+        let io = io(&gates);
+        let text = FAN.replace(
+            "id = 'u'\nkind = 'tool'\ntool = 'u'\n",
+            "id = 'u'\nkind = 'agent'\npersona = 'writer'\n",
+        );
+        let err = start(&text, &io).await.unwrap_err();
+        assert!(
+            matches!(&err, GraphError::Setup(m) if m.contains("node `u`") && m.contains("untracked key `secret`")),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn untracked_set_beside_a_tracked_whole_reply_is_refused_at_start() {
+        let gates = GatedTool::new();
+        let io = io(&gates);
+        let text = "name = 'l'\nstart = 'login'\nuntracked = ['token']\n[state]\ntoken = 'string?'\nreply = '{token: string, note: string}?'\n[[nodes]]\nid = 'login'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Log in.'\nfields = { token = 'string', note = 'string' }\nsets = { token = 'token' }\nwrites = 'reply'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'login'\nto = 'e'\n";
+        let err = start(text, &io).await.unwrap_err();
+        assert!(
+            matches!(&err, GraphError::Setup(m) if m.contains("agent node `login`") && m.contains("untracked key `token`")),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn untracked_key_written_or_set_by_an_agent_is_refused_at_start() {
+        let gates = GatedTool::new();
+        let io = io(&gates);
+        let sets = "name = 'l'\nstart = 'login'\nuntracked = ['token']\n[state]\ntoken = 'string?'\n[[nodes]]\nid = 'login'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Log in.'\nfields = { token = 'string' }\nsets = { token = 'token' }\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'login'\nto = 'e'\n";
+        let writes = "name = 'l'\nstart = 'login'\nuntracked = ['token']\n[state]\ntoken = 'string?'\n[[nodes]]\nid = 'login'\nkind = 'agent'\npersona = 'writer'\nprompt = 'Log in.'\nwrites = 'token'\n[[nodes]]\nid = 'e'\nkind = 'end'\n[[edges]]\nfrom = 'login'\nto = 'e'\n";
+        for text in [sets, writes] {
+            let err = start(text, &io).await.unwrap_err();
+            assert!(
+                matches!(&err, GraphError::Setup(m) if m.contains("agent node `login`") && m.contains("untracked key `token`")),
+                "{err}"
+            );
+        }
+    }
 }
