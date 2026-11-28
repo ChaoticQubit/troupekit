@@ -4,8 +4,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 lib=crates/troupekit-core/src/lib.rs
 out="${BENCH_OUT:-$root/docs/tasks/build-speed/raw/bench.csv}"
 header=label,scenario,condition,run,tree,wall_s,peak_rss_kb,target_kb,load1_before,load1_after,jobs,wrapper,commit,iso_time,incremental
-default_trees="/Users/chaoticqubit/CrazyAgent/troupekit-wt/bs-load-1 /Users/chaoticqubit/CrazyAgent/troupekit-wt/bs-load-2 /Users/chaoticqubit/CrazyAgent/troupekit-wt/bs-load-3"
-trees="${BENCH_TREES:-$default_trees}"
+trees="${BENCH_TREES:-}"
 
 usage() {
   echo "usage: sh scripts/bench.sh <label> <clean|incr|check|test> <best|worst> <run>" >&2
@@ -52,6 +51,9 @@ load1() { sysctl -n vm.loadavg | awk '{print $2}'; }
 
 case "${1:-}" in
   report) report "${2:-$out}"; exit 0 ;;
+esac
+[ -n "$trees" ] || { echo "set BENCH_TREES to the work trees to build" >&2; exit 2; }
+case "${1:-}" in
   fetch) for t in $trees; do (cd "$t" && cargo fetch --locked); done; exit 0 ;;
 esac
 [ "$#" -eq 4 ] || usage
