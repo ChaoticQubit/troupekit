@@ -1,14 +1,21 @@
 use crate::error::KitError;
 use crate::graph::{step_name, Graph, Node, END, INPUT, MAX_NODES};
+use async_trait::async_trait;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use toml::Value as Toml;
 use troupekit_graph::{Flow, Reducer};
+use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolSpec};
 
 /// One flow part added by a builder method: a fan-out into parallel
-/// branches, a join that merges them, a reducer on a join, or a human node
-/// (an approval when `routes` is empty, else a question).
+/// branches, a join that merges them, a reducer on a join, a map over a
+/// list, or a human node (an approval when `routes` is empty).
 #[derive(Clone, Debug)]
 pub(crate) enum Part {
+    Map {
+        id: String,
+        body: String,
+    },
     Reducer {
         join: String,
         reducer: Reducer,
@@ -46,6 +53,8 @@ pub enum Trigger {
 /// an any-join may leave unset and the answer nodes. Built by `topology`.
 pub(crate) struct Topology {
     pub(crate) order: Vec<String>,
+    pub(crate) steps: Vec<String>,
+    pub(crate) maps: BTreeMap<String, Mapped>,
     pub(crate) reads: BTreeMap<String, Vec<String>>,
     pub(crate) writes: BTreeMap<String, String>,
     pub(crate) reducers: BTreeMap<String, Reducer>,
@@ -55,7 +64,17 @@ pub(crate) struct Topology {
     pub(crate) lasts: Vec<String>,
 }
 
+/// A map node's body (an agent or step node with no edges) and the one key
+/// its feeder writes, which the hidden items step parses as a JSON array.
+/// Held by `Topology::maps`, keyed by the map id.
+pub(crate) struct Mapped {
+    pub(crate) body: String,
+    pub(crate) feeder: String,
+}
+
 const GATE: &str = "__gate";
+const ITEMS: &str = "__items";
+const ITEM: &str = "__item";
 const ROUTE: &str = "__route";
 const MAX_ID: usize = 64;
 
@@ -137,6 +156,18 @@ impl Graph {
         self
     }
 
+    /// Adds map node `id`, which runs node `body` once per item of its
+    /// feeder's output, read as a JSON array (non-text items as JSON text),
+    /// and writes the list of results. `body` is an agent or step with no
+    /// edges; a step body names its argument after `id`. Returns the builder.
+    pub fn map(mut self, id: impl Into<String>, body: impl Into<String>) -> Self {
+        self.parts.push(Part::Map {
+            id: id.into(),
+            body: body.into(),
+        });
+        self
+    }
+
     /// Adds approval node `id`: the run pauses with `prompt`, and
     /// `BuiltGraph::answer(run, id, true)` continues on its one `.edge`;
     /// `false` ends the run, which then fails as declined. The node after
@@ -185,6 +216,35 @@ impl Graph {
         let nodes = self.ids()?;
         let mut joins: BTreeMap<&str, &[String]> = BTreeMap::new();
         let mut humans: BTreeMap<&str, &[(String, String)]> = BTreeMap::new();
+        let mut maps: BTreeMap<&str, &str> = BTreeMap::new();
+        for part in &self.parts {
+            let Part::Map { id, body } = part else {
+                continue;
+            };
+            let clash = id == INPUT || id == END || nodes.contains(&id.as_str());
+            if clash || maps.contains_key(id.as_str()) || id.len() + ITEMS.len() > MAX_ID {
+                return Err(format!("map id `{id}` is taken or too long"));
+            }
+            if !nodes.contains(&body.as_str()) || maps.values().any(|b| b == body) {
+                return Err(format!(
+                    "map `{id}` body `{body}` is not a free agent or step node"
+                ));
+            }
+            maps.insert(id, body);
+        }
+        let bodies: BTreeSet<&str> = maps.values().copied().collect();
+        let linked = |n: &str| {
+            self.edges.iter().any(|e| e.0 == n || e.1 == n)
+                || self.parts.iter().any(|p| match p {
+                    Part::Parallel { from, to } => from == n || to.iter().any(|t| t == n),
+                    Part::Join { from, .. } => from.iter().any(|f| f == n),
+                    Part::Human { routes, .. } => routes.iter().any(|(_, t)| t == n),
+                    _ => false,
+                })
+        };
+        if let Some(body) = bodies.iter().find(|b| linked(b)) {
+            return Err(format!("map body `{body}` takes no edges; the map runs it"));
+        }
         let mut edges: Vec<(String, String)> = self.edges.clone();
         let mut sources: BTreeSet<&str> = BTreeSet::new();
         let taken = |id: &str,
@@ -193,6 +253,9 @@ impl Graph {
             id == INPUT
                 || id == END
                 || nodes.contains(&id)
+                || maps.contains_key(id)
+                || id.ends_with(ITEMS)
+                || id.ends_with(ITEM)
                 || joins.contains_key(id)
                 || humans.contains_key(id)
                 || id.ends_with(GATE)
@@ -246,7 +309,7 @@ impl Graph {
                     humans.insert(id, routes);
                     edges.extend(routes.iter().map(|(_, t)| (id.clone(), t.clone())));
                 }
-                Part::Reducer { .. } => {}
+                Part::Reducer { .. } | Part::Map { .. } => {}
             }
         }
         let mut reducers: BTreeMap<String, Reducer> = BTreeMap::new();
@@ -281,6 +344,8 @@ impl Graph {
         let all: Vec<&str> = nodes
             .iter()
             .copied()
+            .filter(|n| !bodies.contains(n))
+            .chain(maps.keys().copied())
             .chain(joins.keys().copied())
             .chain(humans.keys().copied())
             .collect();
@@ -385,9 +450,35 @@ impl Graph {
             }
             keys
         };
-        let reads = nodes
+        let mut reads: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut mapped = BTreeMap::new();
+        for id in nodes.iter().filter(|n| !bodies.contains(*n)) {
+            reads.insert(id.to_string(), reads_of(id));
+        }
+        for (id, body) in &maps {
+            let feeder = match &reads_of(id)[..] {
+                [one] => one.clone(),
+                many => {
+                    return Err(format!(
+                        "map `{id}` is fed by {}; it needs one feeder, so give its join a reducer",
+                        many.join(", ")
+                    ))
+                }
+            };
+            reads.insert(body.to_string(), vec![id.to_string()]);
+            mapped.insert(
+                id.to_string(),
+                Mapped {
+                    body: body.to_string(),
+                    feeder,
+                },
+            );
+        }
+        let steps: Vec<String> = order
             .iter()
-            .map(|id| (id.to_string(), reads_of(id)))
+            .filter(|id| reads.contains_key(*id))
+            .cloned()
+            .chain(mapped.values().map(|m| m.body.clone()))
             .collect();
         let human_reads = humans
             .keys()
@@ -406,6 +497,8 @@ impl Graph {
         assert_eq!(order.len(), all.len(), "every node is ordered once");
         Ok(Topology {
             order,
+            steps,
+            maps: mapped,
             reads,
             writes,
             reducers,
@@ -442,9 +535,44 @@ impl Graph {
                 _ => None,
             })
         };
+        let target = |to: &str| match topo.maps.contains_key(to) {
+            true => format!("{to}{ITEMS}"),
+            false => to.to_string(),
+        };
         for id in &topo.order {
             let mut node = toml::Table::new();
             node.insert("id".into(), text(id));
+            if let Some(m) = topo.maps.get(id) {
+                let items = format!("{id}{ITEMS}");
+                let item = format!("{id}{ITEM}");
+                let mut parse = toml::Table::new();
+                parse.insert("id".into(), text(&items));
+                parse.insert("kind".into(), text("tool"));
+                parse.insert("tool".into(), text(&items_tool(id)));
+                parse.insert("reads".into(), keys(std::slice::from_ref(&m.feeder)));
+                parse.insert("writes".into(), text(&items));
+                node.insert("kind".into(), text("map"));
+                node.insert("over".into(), text(&items));
+                node.insert("item".into(), text(&item));
+                node.insert("body".into(), text(&m.body));
+                node.insert("writes".into(), text(id));
+                let mut body = toml::Table::new();
+                body.insert("id".into(), text(&m.body));
+                self.node_table(&m.body, &mut body);
+                body.insert("reads".into(), keys(std::slice::from_ref(&item)));
+                body.insert("writes".into(), text(&m.body));
+                for (key, kind) in [
+                    (&items, "list"),
+                    (id, "list"),
+                    (&item, "string"),
+                    (&m.body, "string"),
+                ] {
+                    state.insert(key.clone(), text(kind));
+                }
+                edges.push(edge(&items, id, None));
+                nodes.extend([parse, node, body].map(Toml::Table));
+                continue;
+            }
             if let Some(any) = join(id) {
                 node.insert("kind".into(), text("join"));
                 if any {
@@ -499,7 +627,7 @@ impl Graph {
         for (from, to) in &topo.edges {
             match human(from) {
                 Some((_, routes)) if routes.is_empty() => {
-                    edges.push(edge(&format!("{from}{GATE}"), to, Some("true")));
+                    edges.push(edge(&format!("{from}{GATE}"), &target(to), Some("true")));
                 }
                 Some((_, routes)) => {
                     let label = &routes
@@ -507,9 +635,9 @@ impl Graph {
                         .find(|(_, t)| t == to)
                         .expect("route edges come from routes")
                         .0;
-                    edges.push(edge(&format!("{from}{ROUTE}"), to, Some(label)));
+                    edges.push(edge(&format!("{from}{ROUTE}"), &target(to), Some(label)));
                 }
-                None => edges.push(edge(from, to, None)),
+                None => edges.push(edge(from, &target(to), None)),
             }
         }
         let mut reducers = toml::Table::new();
@@ -580,4 +708,73 @@ fn edge(from: &str, to: &str, when: Option<&str>) -> Toml {
         edge.insert("when".into(), text(when));
     }
     Toml::Table(edge)
+}
+
+/// Returns the name of the hidden tool that parses the items of map `id`.
+/// It cannot clash with a step tool, which starts with `step__`.
+/// Used by `flow` and by `build` when it registers the tool.
+pub(crate) fn items_tool(id: &str) -> String {
+    format!("map__{id}")
+}
+
+/// The hidden step before a map node: reads the feeder's text, parses it
+/// as a JSON array and answers the items as a list of text (non-text items
+/// as JSON text). Anything else is an error output naming the map node.
+pub(crate) struct ItemsTool {
+    spec: ToolSpec,
+    map: String,
+    feeder: String,
+}
+
+impl ItemsTool {
+    /// Builds the items step of map `map` fed by state key `feeder`.
+    /// Its schema takes one string argument named after the feeder.
+    /// Returns the tool, registered by `build`.
+    pub(crate) fn new(map: &str, feeder: &str) -> Self {
+        let spec = ToolSpec {
+            name: items_tool(map),
+            description: format!("parses the items of map `{map}`"),
+            schema: json!({
+                "type": "object",
+                "properties": { feeder: { "type": "string" } },
+                "required": [feeder],
+            }),
+            hosted: None,
+        };
+        ItemsTool {
+            spec,
+            map: map.to_string(),
+            feeder: feeder.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ItemsTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+
+    async fn call(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let raw = args
+            .get(&self.feeder)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw) else {
+            return Ok(ToolOutput::error(format!(
+                "map `{}`: the output of `{}` is not a JSON array",
+                self.map, self.feeder
+            )));
+        };
+        let texts: Vec<String> = items
+            .into_iter()
+            .map(|v| match v {
+                Value::String(s) => s,
+                other => other.to_string(),
+            })
+            .collect();
+        Ok(ToolOutput::text(
+            serde_json::to_string(&texts).expect("a list of text serializes"),
+        ))
+    }
 }

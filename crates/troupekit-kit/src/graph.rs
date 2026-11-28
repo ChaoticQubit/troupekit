@@ -1,7 +1,7 @@
 use crate::agent::Agent;
 use crate::built::Discard;
 use crate::error::KitError;
-use crate::flow::Part;
+use crate::flow::{ItemsTool, Part};
 use crate::laws::Laws;
 use crate::storage::Storage;
 use crate::tool::AsTool;
@@ -189,12 +189,7 @@ impl Graph {
             (order, reads, vec![last], None)
         } else {
             let topo = self.topology().map_err(fail)?;
-            let order: Vec<String> = topo
-                .order
-                .iter()
-                .filter(|id| topo.reads.contains_key(*id))
-                .cloned()
-                .collect();
+            let order = topo.steps.clone();
             (order, topo.reads.clone(), topo.lasts.clone(), Some(topo))
         };
         let lists: Vec<String> = topo
@@ -202,6 +197,11 @@ impl Graph {
             .flat_map(|t| t.reducers.iter())
             .filter(|(_, r)| **r == troupekit_graph::Reducer::Append)
             .map(|(j, _)| j.clone())
+            .chain(topo.iter().flat_map(|t| t.maps.keys().cloned()))
+            .collect();
+        let body_of: HashMap<&str, &str> = topo
+            .iter()
+            .flat_map(|t| t.maps.iter().map(|(m, b)| (b.body.as_str(), m.as_str())))
             .collect();
         let laws = Laws::check(&owner, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let flow = match &topo {
@@ -217,8 +217,18 @@ impl Graph {
         let mut files: HashMap<String, String> = HashMap::new();
         let mut keys: HashMap<String, (String, &Agent)> = HashMap::new();
         let mut evals: HashMap<String, EvalFn> = HashMap::new();
+        if let Some(topo) = &topo {
+            for (map, m) in &topo.maps {
+                registry.register(Arc::new(ItemsTool::new(map, &m.feeder)))?;
+            }
+        }
         for id in &order {
             let feeds = &reads[id];
+            let lists: &[String] = if body_of.contains_key(id.as_str()) {
+                &[]
+            } else {
+                &lists
+            };
             match self.node(id) {
                 Node::Agent(agent) => {
                     if let Some(what) = agent.graph_conflict() {
@@ -300,7 +310,13 @@ impl Graph {
                             "step `{id}` argument `{feeder}` must accept a string; every graph node is fed text"
                         )));
                     }
-                    registry.register(Arc::new(StepTool::new(id, tool.clone())))?;
+                    let step = match body_of.get(id.as_str()) {
+                        Some(map) => {
+                            StepTool::renamed(id, tool.clone(), map, &format!("{map}__item"))
+                        }
+                        None => StepTool::new(id, tool.clone()),
+                    };
+                    registry.register(Arc::new(step))?;
                 }
             }
         }
@@ -764,6 +780,7 @@ impl fmt::Debug for BuiltGraph {
 struct StepTool {
     spec: ToolSpec,
     inner: Arc<dyn Tool>,
+    rename: Option<(String, String)>,
 }
 
 impl StepTool {
@@ -772,7 +789,31 @@ impl StepTool {
             name: step_name(id),
             ..inner.spec().clone()
         };
-        StepTool { spec, inner }
+        StepTool {
+            spec,
+            inner,
+            rename: None,
+        }
+    }
+
+    /// Wraps step `id` as a map body: the engine passes the item as
+    /// argument `outer`, the step names it `inner` (the map id), so the
+    /// schema shows `outer` and each call renames it back. Returns the tool.
+    fn renamed(id: &str, inner: Arc<dyn Tool>, arg: &str, outer: &str) -> Self {
+        let mut step = StepTool::new(id, inner);
+        let schema = &mut step.spec.schema;
+        if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+            if let Some(p) = props.remove(arg) {
+                props.insert(outer.to_string(), p);
+            }
+        }
+        if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+            for r in required.iter_mut().filter(|r| r.as_str() == Some(arg)) {
+                *r = Value::String(outer.to_string());
+            }
+        }
+        step.rename = Some((outer.to_string(), arg.to_string()));
+        step
     }
 }
 
@@ -782,7 +823,12 @@ impl Tool for StepTool {
         &self.spec
     }
 
-    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn call(&self, mut args: Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+        if let (Some((outer, inner)), Some(map)) = (&self.rename, args.as_object_mut()) {
+            if let Some(v) = map.remove(outer) {
+                map.insert(inner.clone(), v);
+            }
+        }
         let out = self.inner.call(args, ctx).await?;
         if out.is_error {
             return Ok(out);

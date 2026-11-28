@@ -389,3 +389,116 @@ async fn reducer_needs_a_join_and_a_text_reducer() {
         .unwrap_err();
     assert!(sum.to_string().contains("append or last"), "{sum}");
 }
+
+/// Splits the cleaned text into a JSON array of words.
+#[tool]
+fn words(clean: String) -> String {
+    let words: Vec<&str> = clean.split_whitespace().collect();
+    serde_json::to_string(&words).unwrap()
+}
+
+/// Uppercases one word of the map.
+#[tool]
+fn shout_word(each: String) -> String {
+    each.to_uppercase()
+}
+
+/// Joins the mapped words.
+#[tool]
+fn join_words(each: Vec<String>) -> String {
+    each.join(" ")
+}
+
+fn mapper() -> Graph {
+    Graph::new("mapper")
+        .step("clean", trim_input)
+        .step("split", words)
+        .step("shout", shout_word)
+        .step("glue", join_words)
+        .map("each", "shout")
+        .edge("clean", "split")
+        .edge("split", "each")
+        .edge("each", "glue")
+}
+
+#[tokio::test]
+async fn map_over_feeder_array() {
+    let built = mapper().build().await.unwrap();
+    let report = built.run_with("  a bb ccc  ").await.unwrap();
+    assert_eq!(report.output(), &serde_json::json!("A BB CCC"));
+    assert_eq!(
+        report.state()["each"],
+        serde_json::json!(["A", "BB", "CCC"])
+    );
+}
+
+#[tokio::test]
+async fn map_on_non_array_fails_naming_the_node() {
+    let built = Graph::new("mapper")
+        .step("clean", trim_input)
+        .step("shout", shout_word)
+        .step("glue", join_words)
+        .map("each", "shout")
+        .edge("clean", "each")
+        .edge("each", "glue")
+        .build()
+        .await
+        .unwrap();
+    let err = built.run("not a list").await.unwrap_err();
+    assert!(matches!(err, troupekit::KitError::Failed { .. }), "{err}");
+    assert!(err.to_string().contains("map `each`"), "{err}");
+}
+
+#[tokio::test]
+async fn map_body_must_stand_alone() {
+    let err = mapper().edge("glue", "shout").build().await.unwrap_err();
+    assert!(err.to_string().contains("body `shout`"), "{err}");
+    let err = mapper().map("again", "ghost").build().await.unwrap_err();
+    assert!(err.to_string().contains("`ghost`"), "{err}");
+}
+
+/// Adds a bang to the upper text.
+#[tool]
+fn add_bang(upper: String) -> String {
+    format!("{upper}!")
+}
+
+/// Adds a question mark to the upper text.
+#[tool]
+fn add_query(upper: String) -> String {
+    format!("{upper}?")
+}
+
+/// Joins the inner branches.
+#[tool]
+fn pair_up(bang: String, query: String) -> String {
+    format!("{bang}{query}")
+}
+
+/// Joins the outer branches.
+#[tool]
+fn report_pair(pair: String, count: String) -> String {
+    format!("{pair}:{count}")
+}
+
+#[tokio::test]
+async fn parallel_then_join_nested() {
+    let out = Graph::new("nest")
+        .step("clean", trim_input)
+        .step("upper", upper_clean)
+        .step("count", count_clean)
+        .step("bang", add_bang)
+        .step("query", add_query)
+        .step("pair", pair_up)
+        .step("report", report_pair)
+        .parallel("clean", ["upper", "count"])
+        .parallel("upper", ["bang", "query"])
+        .join("inner", ["bang", "query"])
+        .edge("inner", "pair")
+        .join("outer", ["pair", "count"])
+        .edge("outer", "report")
+        .run("  hi  ")
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!("HI!HI?:2"));
+}
