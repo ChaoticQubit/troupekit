@@ -46,11 +46,18 @@ pub enum KitError {
     Failed { run_id: RunId, reason: String },
     #[error("run {run_id} paused: {reason:?}")]
     Paused { run_id: RunId, reason: PauseReason },
+    #[error("run {run_id} was cancelled; resume it from its last checkpoint")]
+    Cancelled { run_id: RunId },
     #[error("run {run_id}: gave up after {attempts} retries: {last_error}")]
     Retries {
         run_id: RunId,
         attempts: u32,
         last_error: String,
+    },
+    #[error("run {run_id}: {source}")]
+    InRun {
+        run_id: RunId,
+        source: Box<KitError>,
     },
 }
 
@@ -62,11 +69,29 @@ impl KitError {
         }
     }
 
+    /// Ties an execution failure to run `run_id`, so the caller can
+    /// resume or inspect it. Input: the run id and the failure.
+    /// Output: `InRun`, or `err` as is when it already names a run.
+    pub(crate) fn in_run(run_id: RunId, err: KitError) -> Self {
+        if err.run_id().is_some() {
+            return err;
+        }
+        KitError::InRun {
+            run_id,
+            source: Box::new(err),
+        }
+    }
+
+    /// Returns the run this error belongs to, for traces and callers.
+    /// Input: any error. Output: the run id of a failed, paused,
+    /// cancelled, retried or wrapped run; `None` for pre-run errors.
     pub(crate) fn run_id(&self) -> Option<RunId> {
         match self {
             KitError::Failed { run_id, .. }
             | KitError::Paused { run_id, .. }
-            | KitError::Retries { run_id, .. } => Some(*run_id),
+            | KitError::Cancelled { run_id }
+            | KitError::Retries { run_id, .. }
+            | KitError::InRun { run_id, .. } => Some(*run_id),
             _ => None,
         }
     }

@@ -6,7 +6,7 @@ use crate::tokens::{Delim, Error, Piece, SpanId, Tok};
 use crate::tool::crate_path;
 
 const WHAT: &str = "#[agent]";
-const KEYS: [&str; 25] = [
+const KEYS: [&str; 28] = [
     "model",
     "tools",
     "evals",
@@ -23,6 +23,9 @@ const KEYS: [&str; 25] = [
     "auto_laws",
     "memory",
     "knowledge",
+    "model_client",
+    "transport",
+    "events",
     "name",
     "crate",
     "trace",
@@ -386,6 +389,20 @@ mod tests {
     }
 
     #[test]
+    fn client_transport_and_events_keys_become_builder_calls() {
+        let a = parse(
+            "model = \"m/x\", model_client = host(), transport = http(1), events = sink()",
+            &format!("{DOC}fn calc() {{}}"),
+        )
+        .unwrap();
+        assert_eq!(
+            methods(&a),
+            ["model", "model_client", "transport", "events"]
+        );
+        assert_eq!(a.calls[2].value.len(), 2);
+    }
+
+    #[test]
     fn memory_and_knowledge_keys_become_builder_calls() {
         let a = parse(
             "model = \"m/x\", memory = mem(1), knowledge = \"docs\"",
@@ -594,7 +611,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_key() {
-        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, name, crate, trace, trace_content, local, download, route, private, tier");
+        rejects("x = 1", &format!("{DOC}fn calc() {{}}"), "unknown #[agent] key `x`; known keys: model, tools, evals, limits, checkpoints, max_turns, max_tokens, retries, role, goal, display_name, instructions, laws, auto_laws, memory, knowledge, model_client, transport, events, name, crate, trace, trace_content, local, download, route, private, tier");
     }
 
     #[test]

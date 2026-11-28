@@ -14,8 +14,15 @@ use troupekit_agent::{
 };
 use troupekit_core::message::{Message, Role};
 use troupekit_core::secret::Secret;
+use troupekit_providers::catalog::VendorSpec;
 use troupekit_providers::{Catalog, Model, Price, Transport};
 use troupekit_tools::{Tool, ToolRegistry, Toolkit};
+
+mod from_toml;
+mod start;
+mod stream;
+
+pub use from_toml::MAX_PERSONA_BYTES;
 
 const MAX_RETRIES: u32 = 32;
 
@@ -67,6 +74,7 @@ pub struct Agent {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    persona_source: Option<from_toml::PersonaSource>,
     pub(crate) trace: crate::trace::TraceConfig,
     pub(crate) route: crate::route::RouteConfig,
     #[cfg(feature = "local")]
@@ -110,6 +118,7 @@ impl Agent {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            persona_source: None,
             trace: crate::trace::TraceConfig::default(),
             route: crate::route::RouteConfig::default(),
             #[cfg(feature = "local")]
@@ -378,7 +387,7 @@ impl Agent {
 
     pub(crate) fn trace_secret(&self) -> Option<Secret> {
         crate::model::trace_secret(
-            self.model.as_deref().unwrap_or_default(),
+            &self.selector().unwrap_or_default(),
             self.api_key.clone(),
             self.api_key_env.as_deref(),
         )
@@ -497,6 +506,7 @@ impl Agent {
             && self.api_key == other.api_key
             && self.api_key_env == other.api_key_env
             && self.catalog == other.catalog
+            && self.persona_source == other.persona_source
             && self.route.same(&other.route)
     }
 
@@ -529,7 +539,11 @@ impl Agent {
         }
         crate::model::default_embedder(ModelChoice {
             agent: &self.name,
-            selector: self.model.as_deref().unwrap_or_default(),
+            selector: &self
+                .model
+                .clone()
+                .or_else(|| self.toml_selector())
+                .unwrap_or_default(),
             catalog: self.catalog.as_ref().unwrap_or_else(|| builtin_catalog()),
             client: None,
             price: None,
@@ -539,12 +553,32 @@ impl Agent {
         })
     }
 
+    /// Returns the model selector: `.model(..)`, else a TOML persona's
+    /// `model`. Output: `None` when neither is set.
+    pub(crate) fn selector(&self) -> Option<String> {
+        self.model.clone().or_else(|| self.toml_selector())
+    }
+
+    /// Returns the catalog vendor the model selector names, from the
+    /// builder's catalog or the built-in one, reading a TOML persona's
+    /// model when no `.model(..)` is set. Output: `None` for an alias or
+    /// a vendor the catalog does not list.
+    pub(crate) fn vendor_spec(&self) -> Option<VendorSpec> {
+        let selector = self.selector()?;
+        let (vendor, _) = selector.split_once('/')?;
+        let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
+        let spec = catalog.vendor(vendor)?.clone();
+        assert_eq!(spec.id, vendor);
+        Some(spec)
+    }
+
+    #[cfg(any(feature = "knowledge", feature = "local"))]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
     #[cfg(feature = "local")]
-    pub(crate) fn selector(&self) -> Option<&str> {
+    pub(crate) fn explicit_selector(&self) -> Option<&str> {
         self.model.as_deref()
     }
 
@@ -570,23 +604,17 @@ impl Agent {
         ledger: &Arc<dyn UsageLedger>,
     ) -> Result<Prepared, KitError> {
         let name = self.name.as_str();
-        let Some(instructions) = self.instructions.as_deref() else {
+        let toml = self.toml_source()?;
+        if toml.is_none() && self.instructions.is_none() {
             return Err(KitError::config(
                 name,
                 "needs instructions: call .instructions(..) or add a /// doc comment",
             ));
-        };
-        let Some(selector) = self.model.as_deref() else {
+        }
+        if toml.is_none() && self.model.is_none() {
             return Err(KitError::config(
                 name,
                 "needs a model: call .model(\"vendor/model\")",
-            ));
-        };
-        #[cfg(not(feature = "local"))]
-        if selector.starts_with("local/") {
-            return Err(KitError::config(
-                name,
-                format!("model `{selector}` needs the `local` feature"),
             ));
         }
         self.check_private_knowledge()?;
@@ -595,15 +623,30 @@ impl Agent {
             registry.register(tool.clone())?;
         }
         let tool_names: Vec<String> = registry.specs().into_iter().map(|s| s.name).collect();
-        let (persona, persona_text) =
-            self.persona(instructions, model_key.unwrap_or(selector), &tool_names)?;
+        let (persona, persona_text, selector) = match toml {
+            Some((source, table)) => self.toml_persona(&source, table, model_key, &tool_names)?,
+            None => {
+                let instructions = self.instructions.as_deref().expect("checked above");
+                let selector = self.model.clone().expect("checked above");
+                let (persona, text) =
+                    self.persona(instructions, model_key.unwrap_or(&selector), &tool_names)?;
+                (persona, text, selector)
+            }
+        };
+        #[cfg(not(feature = "local"))]
+        if selector.starts_with("local/") {
+            return Err(KitError::config(
+                name,
+                format!("model `{selector}` needs the `local` feature"),
+            ));
+        }
         self.route.check_judges(name, &persona)?;
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
         let handle = self.route.handle(name, ledger, || {
             resolve(ModelChoice {
                 agent: name,
-                selector,
+                selector: &selector,
                 catalog,
                 client: self.model_client.clone(),
                 price: self.price,

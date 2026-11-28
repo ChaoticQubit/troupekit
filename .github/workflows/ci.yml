@@ -65,7 +65,7 @@ jobs:
         run: cargo build --workspace --locked
       - name: build workspace for target
         if: matrix.cross
-        run: cargo build --workspace --locked --target ${{ matrix.target }}
+        run: cargo build --workspace --exclude troupekit-py --locked --target ${{ matrix.target }}
       - name: build without the TLS stack
         if: matrix.phone
         run: cargo build -p troupekit --no-default-features --features sqlite --locked --target ${{ matrix.target }}
@@ -244,7 +244,7 @@ jobs:
         run: cargo build --workspace --locked
       - name: build workspace for ios
         if: ${{ !cancelled() }}
-        run: cargo build --workspace --exclude troupekit-cli --locked --target aarch64-apple-ios
+        run: cargo build --workspace --exclude troupekit-py --exclude troupekit-cli --locked --target aarch64-apple-ios
       - name: build ios without the TLS stack
         if: ${{ !cancelled() }}
         run: cargo build -p troupekit --no-default-features --features sqlite --locked --target aarch64-apple-ios
@@ -293,6 +293,15 @@ jobs:
         run: cargo install cargo-deny --version 0.22.1 --locked
       - name: check
         run: cargo deny check
+      - name: binding crates stay outside the core
+        shell: bash
+        run: |
+          for crate in troupekit troupekit-kit troupekit-ffi-core; do
+            if cargo tree -p "$crate" -e normal --locked | grep -E 'uniffi|pyo3'; then
+              echo "$crate depends on a binding crate"
+              exit 1
+            fi
+          done
 
   proofs:
     runs-on: ubuntu-latest

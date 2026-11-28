@@ -23,9 +23,11 @@ use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::secret::Secret;
 use troupekit_core::store::CheckpointStore;
-use troupekit_graph::{GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
+use troupekit_graph::{GraphIo, GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSpec};
 use troupekit_trace::Trace;
+
+mod run_api;
 
 const MAX_NODES: usize = 64;
 const MAX_GRAPH_RETRIES: u32 = 50;
@@ -57,6 +59,7 @@ pub struct Graph {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    events: Option<Arc<dyn troupekit_agent::EventSink>>,
     pub(crate) trace: crate::trace::TraceConfig,
     pub(crate) private: bool,
 }
@@ -78,6 +81,7 @@ impl Graph {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            events: None,
             trace: crate::trace::TraceConfig::default(),
             private: false,
         }
@@ -228,7 +232,8 @@ impl Graph {
         }
         let order = self.chain().map_err(fail)?;
         let laws = Laws::check(&owner, &self.law_paths, &self.inline_laws, self.auto_laws)?;
-        let workflow = self.workflow(&order)?;
+        let (names, outputs) = self.persona_names(&order)?;
+        let workflow = self.workflow(&order, &names, &outputs)?;
         let mut registry = ToolRegistry::new();
         let mut agent_io = SimpleIo::new(ToolRegistry::new());
         let mut files: HashMap<String, String> = HashMap::new();
@@ -245,21 +250,25 @@ impl Graph {
                     if let Some(what) = agent.graph_conflict() {
                         return Err(fail(format!("agent node `{id}` sets its own {what}")));
                     }
-                    let key = match keys.get(agent.name()) {
+                    let name = &names[id];
+                    let key = match keys.get(name) {
                         Some((key, first)) if first.same_model(agent) => key.clone(),
                         Some(_) => {
-                            return Err(fail(format!(
-                                "two different agents are named `{}`",
-                                agent.name()
-                            )));
+                            return Err(fail(format!("two different agents are named `{name}`")));
                         }
                         None => {
                             let key = format!("agent-{}", keys.len());
-                            keys.insert(agent.name().to_string(), (key.clone(), agent));
+                            keys.insert(name.clone(), (key.clone(), agent));
                             key
                         }
                     };
                     let prepared = agent.prepare(Some(&key), &ledger)?;
+                    if prepared.persona.name != *name {
+                        return Err(fail(format!(
+                            "agent node `{id}` persona name changed from `{name}` to `{}` during build",
+                            prepared.persona.name
+                        )));
+                    }
                     for tool in &prepared.tools {
                         share(&mut registry, tool.clone()).map_err(fail)?;
                     }
@@ -293,6 +302,12 @@ impl Graph {
                     }
                 }
                 Node::Step(tool) => {
+                    if outputs.contains_key(feeder) {
+                        return Err(fail(format!(
+                            "step `{id}` is fed by agent node `{feeder}`, which has typed \
+                             output; steps take text, so feed it from an agent without [output]"
+                        )));
+                    }
                     let args = arg_names(tool.spec());
                     if args != [feeder] {
                         return Err(fail(format!(
@@ -310,7 +325,7 @@ impl Graph {
             }
         }
         agent_io.tools = registry;
-        agent_io.events = Arc::new(Discard);
+        agent_io.events = self.events.clone().unwrap_or_else(|| Arc::new(Discard));
         agent_io.ledger = ledger;
         let agent_io: Arc<dyn AgentIo> = Arc::new(agent_io);
         let loader = PersonaLoader::new(vec![Arc::new(MemorySource::new("graph", files))]);
@@ -421,18 +436,42 @@ impl Graph {
         Ok(order)
     }
 
-    fn workflow(&self, order: &[String]) -> Result<Workflow, KitError> {
+    fn persona_names(&self, order: &[String]) -> Result<(Names, Outputs), KitError> {
+        let mut names = HashMap::with_capacity(order.len());
+        let mut outputs = HashMap::new();
+        for id in order {
+            if let Node::Agent(agent) = self.node(id) {
+                let (name, output) = agent.persona_identity()?;
+                names.insert(id.clone(), name);
+                if let Some(output) = output.as_ref().and_then(object_type) {
+                    outputs.insert(id.clone(), output);
+                }
+            }
+        }
+        assert!(names.len() <= order.len());
+        assert!(outputs.keys().all(|id| names.contains_key(id)));
+        Ok((names, outputs))
+    }
+
+    fn workflow(
+        &self,
+        order: &[String],
+        names: &Names,
+        outputs: &Outputs,
+    ) -> Result<Workflow, KitError> {
         let mut state = toml::Table::new();
         state.insert(INPUT.into(), Toml::String("string".into()));
         let mut nodes = Vec::with_capacity(order.len() + 1);
         for (i, id) in order.iter().enumerate() {
-            state.insert(id.clone(), Toml::String("string".into()));
+            let kind = outputs.get(id).map_or("string", String::as_str);
+            state.insert(id.clone(), Toml::String(kind.into()));
             let mut node = toml::Table::new();
             node.insert("id".into(), Toml::String(id.clone()));
             match self.node(id) {
-                Node::Agent(agent) => {
+                Node::Agent(_) => {
                     node.insert("kind".into(), Toml::String("agent".into()));
-                    node.insert("persona".into(), Toml::String(agent.name().to_string()));
+                    let name = names.get(id).expect("every agent node has a persona name");
+                    node.insert("persona".into(), Toml::String(name.clone()));
                 }
                 Node::Step(_) => {
                     node.insert("kind".into(), Toml::String("tool".into()));
@@ -625,7 +664,7 @@ impl BuiltGraph {
             Some(store) => store.clone(),
             None => Arc::new(InMemCheckpoints::default()),
         };
-        self.finish(&mut run, store.as_ref()).await
+        self.finish(&self.inner.io, &mut run, store.as_ref()).await
     }
 
     /// Continues graph run `run_id` from its latest checkpoint and returns
@@ -659,7 +698,10 @@ impl BuiltGraph {
                 ),
             ));
         }
-        Ok(self.finish(&mut run, store.as_ref()).await?.output)
+        Ok(self
+            .finish(&self.inner.io, &mut run, store.as_ref())
+            .await?
+            .output)
     }
 
     /// Returns the validated workflow this graph runs.
@@ -678,25 +720,28 @@ impl BuiltGraph {
 
     async fn finish(
         &self,
+        io: &dyn GraphIo,
         run: &mut GraphRun,
         store: &dyn CheckpointStore,
     ) -> Result<GraphReport, KitError> {
         let inner = &self.inner;
-        if store.latest(run.run_id()).await?.is_none() {
-            store.save(run.checkpoint()).await?;
+        let run_id = run.run_id();
+        let in_run = |e: troupekit_core::error::CoreError| KitError::in_run(run_id, e.into());
+        if store.latest(run_id).await.map_err(in_run)?.is_none() {
+            store.save(run.checkpoint()).await.map_err(in_run)?;
         }
         let cap =
             2 * u64::from(inner.workflow.max_steps) + u64::from(inner.workflow.max_retries) + 8;
         for _ in 0..cap {
             let before = run.steps();
-            let outcome = run.step(&inner.io).await;
+            let outcome = run.step(io).await;
             if run.steps() != before {
-                store.save(run.checkpoint()).await?;
+                store.save(run.checkpoint()).await.map_err(in_run)?;
             }
             match outcome {
                 GraphOutcome::Continue => {}
                 GraphOutcome::RetryAt { at_ms, .. } => {
-                    wait_until(inner.io.agent.clock(), at_ms, RETRY_WAIT_CHUNK_MS).await;
+                    wait_until(io.agent().clock(), at_ms, RETRY_WAIT_CHUNK_MS).await;
                 }
                 GraphOutcome::Waiting(reason) => {
                     return Err(KitError::Paused {
@@ -805,6 +850,21 @@ fn input_state(text: &str) -> Map<String, Value> {
     let mut state = Map::new();
     state.insert(INPUT.into(), Value::String(text.to_string()));
     state
+}
+
+type Names = HashMap<String, String>;
+type Outputs = HashMap<String, String>;
+
+/// Writes a persona `[output]` table as one workflow state type, the
+/// object form `{field: type, ..}`. Returns `None` when a field type is
+/// not text, so the persona check at `prepare` reports it instead.
+fn object_type(output: &toml::Table) -> Option<String> {
+    let mut fields = Vec::with_capacity(output.len());
+    for (field, kind) in output {
+        fields.push(format!("{field}: {}", kind.as_str()?));
+    }
+    assert_eq!(fields.len(), output.len());
+    Some(format!("{{{}}}", fields.join(", ")))
 }
 
 fn takes_text(schema: &Value) -> bool {

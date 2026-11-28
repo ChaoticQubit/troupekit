@@ -178,6 +178,29 @@ async fn api_key_is_scrubbed_from_spans() {
 }
 
 #[tokio::test]
+async fn toml_persona_env_key_is_scrubbed_from_spans() {
+    let key = "sk-kit-toml-trace-canary-8830";
+    let var = "TROUPEKIT_TEST_TOML_TRACE_KEY";
+    std::env::set_var(var, key);
+    let sink = Arc::new(MemorySink::default());
+    Agent::from_toml(
+        "name = \"echo\"\ndisplay_name = \"Echo\"\nrole = \"Echoes.\"\ngoal = \"Echo.\"\n\
+         instructions = \"Echo the user.\"\nmodel = \"anthropic/claude-haiku-5-5\"\n",
+    )
+    .model_client(echo_model())
+    .api_key_env(var)
+    .tracing(true)
+    .trace_content(true)
+    .trace_to(sink.clone())
+    .run(format!("my key is {key}"))
+    .await
+    .unwrap();
+    let lines = sink.lines();
+    assert!(lines.iter().all(|l| !l.contains(key)), "key leaked");
+    assert!(lines.iter().any(|l| l.contains("[redacted]")));
+}
+
+#[tokio::test]
 async fn graph_tracing_covers_agent_nodes() {
     let sink = Arc::new(MemorySink::default());
     Graph::new("pipe")

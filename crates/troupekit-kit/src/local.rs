@@ -214,7 +214,7 @@ impl Agent {
             return Ok(self);
         }
         let from_selector = self
-            .selector()
+            .explicit_selector()
             .and_then(|s| s.strip_prefix("local/"))
             .filter(|_| !self.has_client())
             .map(str::to_string);
@@ -230,16 +230,19 @@ impl Agent {
             (None, None) => return Ok(self),
         };
         let local_only =
-            !self.has_client() && (self.selector().is_none() || from_selector.is_some());
+            !self.has_client() && (self.explicit_selector().is_none() || from_selector.is_some());
         let model = load(&choice, &self.fetch(), loads, false).await?;
-        if self.selector().is_none() {
+        if self.explicit_selector().is_none() {
             self.set_selector(choice.chat_id());
         }
         let chat = LocalChat::new(model.clone(), choice.chat_id());
         self.route.on_device = Some((Arc::new(chat), Price::FREE));
         self.route.local_model = Some(model);
         self.route.local_only = local_only;
-        assert!(self.selector().is_some(), "a loaded agent has a selector");
+        assert!(
+            self.explicit_selector().is_some(),
+            "a loaded agent has a selector"
+        );
         Ok(self)
     }
 

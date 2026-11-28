@@ -1,0 +1,20 @@
+[package]
+name = "troupekit-py"
+description = "PyO3 adapter over troupekit-ffi-core: the Python bindings of Troupekit."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version = "1.89"
+publish = false
+
+[lib]
+name = "_troupekit"
+crate-type = ["cdylib"]
+
+[dependencies]
+troupekit-ffi-core = { path = "../troupekit-ffi-core", version = "0.3.0" }
+pyo3 = { version = "=0.30.1", features = ["abi3-py311"] }
