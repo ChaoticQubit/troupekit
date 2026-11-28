@@ -7,6 +7,7 @@ on:
       - 'bindings/swift/**'
       - 'examples/ios/**'
       - 'examples/android/**'
+      - 'Package.swift'
       - '.github/workflows/mobile.yml'
 
 concurrency:
@@ -51,3 +52,51 @@ jobs:
           name: android-adapter-test-reports
           path: bindings/kotlin/troupekit-android/build/reports/tests/
           if-no-files-found: warn
+
+  android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c
+      - name: dependency checksums for review
+        shell: bash
+        working-directory: examples/android
+        run: |
+          set -euo pipefail
+          ../../bindings/kotlin/gradlew --no-daemon --dry-run --write-verification-metadata sha256 :app:assembleDebug
+          test -f gradle/verification-metadata.dryrun.xml
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: example-android-verification-metadata-dryrun
+          path: examples/android/gradle/verification-metadata.dryrun.xml
+          if-no-files-found: warn
+      - name: debug APK against troupekit-android
+        shell: bash
+        working-directory: examples/android
+        run: |
+          set -euo pipefail
+          ../../bindings/kotlin/gradlew --no-daemon :app:assembleDebug
+          test -f app/build/outputs/apk/debug/app-debug.apk
+
+  ios-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: build the XCFramework
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          sh scripts/build-xcframework.sh
+      - name: build the demo app and its UI tests
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing \
+            -project examples/ios/TroupekitDemo.xcodeproj \
+            -scheme TroupekitDemo \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/ios-demo \
+            CODE_SIGNING_ALLOWED=NO
