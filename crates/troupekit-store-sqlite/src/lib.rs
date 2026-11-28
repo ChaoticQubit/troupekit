@@ -341,29 +341,41 @@ impl SqliteStore {
         F: FnOnce(&mut Connection) -> Result<T, CoreError> + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            let mut conn = match inner.conn.lock() {
-                Ok(conn) => conn,
-                Err(poisoned) => {
-                    let conn = poisoned.into_inner();
-                    if !conn.is_autocommit() {
-                        conn.execute_batch("ROLLBACK").map_err(db)?;
-                    }
-                    inner.conn.clear_poison();
-                    conn
-                }
-            };
-            assert!(
-                conn.is_autocommit(),
-                "a store call starts outside a transaction"
-            );
-            let out = f(&mut conn);
-            assert!(conn.is_autocommit(), "a store call left a transaction open");
-            out
+        let scope = troupekit_trace::current();
+        tokio::task::spawn_blocking(move || match scope {
+            Some(scope) => scope.enter(|| run_locked(&inner, f)),
+            None => run_locked(&inner, f),
         })
         .await
         .unwrap_or_else(|e| join_failed(e))
     }
+}
+
+/// Runs `f` on the locked connection of `inner`, on the calling thread.
+/// A poisoned lock is taken and any open transaction is rolled back first.
+/// Input: the shared state and the work. Output: what `f` returns.
+fn run_locked<T, F>(inner: &Inner, f: F) -> Result<T, CoreError>
+where
+    F: FnOnce(&mut Connection) -> Result<T, CoreError>,
+{
+    let mut conn = match inner.conn.lock() {
+        Ok(conn) => conn,
+        Err(poisoned) => {
+            let conn = poisoned.into_inner();
+            if !conn.is_autocommit() {
+                conn.execute_batch("ROLLBACK").map_err(db)?;
+            }
+            inner.conn.clear_poison();
+            conn
+        }
+    };
+    assert!(
+        conn.is_autocommit(),
+        "a store call starts outside a transaction"
+    );
+    let out = f(&mut conn);
+    assert!(conn.is_autocommit(), "a store call left a transaction open");
+    out
 }
 
 #[cfg(test)]
@@ -537,3 +549,4 @@ mod tests {
         assert_eq!(pragma(&store, "user_version").await, i64::from(SCHEMA_VERSION));
     }
 }
+

@@ -1,9 +1,15 @@
 use std::path::PathBuf;
 
+use troupekit_trace::{Trace, TraceSet};
+
 /// Usage line printed for any bad call, with exit code 2.
 /// Lists every flag; the key is read from the variable named by
 /// `--key-env`, never from a flag.
 pub const USAGE: &str = "usage: troupekit ingest <dir> [--db FILE] [--index NAME] [--scope NAME] --embedder SELECTOR [--catalog FILE] [--key-env VAR] [--chunk-tokens N] [--overlap-tokens N] [--kind brute|hnsw] [--quant f32|f16|i8]";
+
+/// Usage line of `troupekit trace`, printed after `USAGE` for a bad call.
+/// `--html` without a value writes `<file>.html` next to the trace.
+pub const TRACE_USAGE: &str = "usage: troupekit trace <file> [--html [OUT]] [--only CATS] [--no-color]";
 
 const MAX_DIMS: usize = 65_536;
 const MAX_TOKENS: usize = 1_000_000;
@@ -159,6 +165,85 @@ pub fn parse(args: &[String]) -> Result<IngestArgs, String> {
     })
 }
 
+/// A parsed `troupekit trace` call. `html` is the page to write, or
+/// `None` to print the tree; `color` is false after `--no-color`, and the
+/// runner also turns it off when stdout is not a terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceArgs {
+    pub file: PathBuf,
+    pub html: Option<PathBuf>,
+    pub only: TraceSet,
+    pub color: bool,
+}
+
+/// One parsed command line: `ingest` exactly as `parse` returns it, or `trace`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Ingest(IngestArgs),
+    Trace(TraceArgs),
+}
+
+/// Parses the arguments after the program name into a command.
+/// Input: e.g. `["trace", "run.jsonl", "--html"]`. Output: the command,
+/// or a message for exit code 2. Anything but `trace` goes to `parse`.
+pub fn command(args: &[String]) -> Result<Command, String> {
+    match args.first().map(String::as_str) {
+        Some("trace") => trace(&args[1..]).map(Command::Trace),
+        _ => parse(args).map(Command::Ingest),
+    }
+}
+
+fn categories(value: &str) -> Result<TraceSet, String> {
+    let names: Vec<&str> = value.split(',').collect();
+    if names.len() > Trace::ALL.len() {
+        return Err(format!("--only takes at most {} names", Trace::ALL.len()));
+    }
+    let mut only = TraceSet::none();
+    for name in names {
+        only = only.with(name.parse::<Trace>().map_err(|e| format!("--only: {e}"))?);
+    }
+    assert!(!only.is_empty());
+    Ok(only)
+}
+
+fn trace(args: &[String]) -> Result<TraceArgs, String> {
+    let mut file = None;
+    let mut html: Option<Option<PathBuf>> = None;
+    let mut only = None;
+    let mut color = true;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        i += 1;
+        let repeated = match arg {
+            "--html" => {
+                let out = args.get(i).filter(|next| !next.starts_with("--")).map(PathBuf::from);
+                let takes_value = out.is_some() && (file.is_some() || args.len() - i > 1);
+                if takes_value {
+                    i += 1;
+                    html.replace(out).is_some()
+                } else {
+                    html.replace(None).is_some()
+                }
+            }
+            "--only" => {
+                let value = args.get(i).ok_or("--only needs a value")?;
+                i += 1;
+                only.replace(categories(value)?).is_some()
+            }
+            "--no-color" => !std::mem::replace(&mut color, false),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag {flag}")),
+            path => file.replace(PathBuf::from(path)).is_some(),
+        };
+        if repeated {
+            return Err(format!("{arg} given twice"));
+        }
+    }
+    let file: PathBuf = file.ok_or("missing <file>")?;
+    let html = html.map(|out| out.unwrap_or_else(|| file.with_extension("html")));
+    Ok(TraceArgs { file, html, only: only.unwrap_or(TraceSet::all()), color })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +319,26 @@ mod tests {
         assert_eq!((a.chunk_tokens, a.overlap_tokens), (None, None));
         assert_eq!(a.db, PathBuf::from("./troupekit.db"));
         assert!(parse(&args(&["ingest", "d"])).is_err(), "no default embedder: a run must name one");
+    }
+
+    #[test]
+    fn trace_unknown_category_exits_2() {
+        assert!(command(&args(&["trace", "t.jsonl", "--only", "tools,bogus"])).is_err());
+        assert!(command(&args(&["trace"])).is_err());
+        assert!(command(&args(&["trace", "a.jsonl", "b.jsonl"])).is_err());
+        assert!(command(&args(&["trace", "a.jsonl", "--colour"])).is_err());
+        let only = TraceSet::none().with(Trace::Tools).with(Trace::Laws);
+        assert_eq!(
+            command(&args(&["trace", "t.jsonl", "--only", "tools,laws", "--no-color"])).unwrap(),
+            Command::Trace(TraceArgs { file: "t.jsonl".into(), html: None, only, color: false })
+        );
+        let html = command(&args(&["trace", "dir/t.jsonl", "--html"])).unwrap();
+        assert_eq!(
+            html,
+            Command::Trace(TraceArgs { file: "dir/t.jsonl".into(), html: Some("dir/t.html".into()), only: TraceSet::all(), color: true })
+        );
+        let ingest = command(&args(&["ingest", "d", "--embedder", "hashing:8"])).unwrap();
+        assert_eq!(ingest, Command::Ingest(parse(&args(&["ingest", "d", "--embedder", "hashing:8"])).unwrap()));
     }
 
     #[test]

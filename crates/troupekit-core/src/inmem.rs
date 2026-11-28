@@ -5,6 +5,7 @@ use crate::store::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+use troupekit_trace::{trace_span, Trace};
 
 /// In-memory `CheckpointStore` for tests and examples.
 /// Keeps only the latest checkpoint per run and enforces the same
@@ -15,9 +16,11 @@ pub struct InMemCheckpoints(Mutex<HashMap<RunId, Checkpoint>>);
 #[async_trait]
 impl CheckpointStore for InMemCheckpoints {
     async fn save(&self, cp: Checkpoint) -> Result<(), CoreError> {
+        let mut span = trace_span!(Trace::Store, "checkpoint.save", store = "memory", run = cp.run_id.to_string(), step = cp.step);
         let mut map = self.0.lock().await;
         let expected = map.get(&cp.run_id).map_or(0, |c| c.step + 1);
         if cp.step != expected {
+            span.fail("step conflict");
             return Err(CoreError::Conflict { expected, actual: cp.step });
         }
         map.insert(cp.run_id, cp);
@@ -25,6 +28,7 @@ impl CheckpointStore for InMemCheckpoints {
     }
 
     async fn latest(&self, run_id: RunId) -> Result<Option<Checkpoint>, CoreError> {
+        let _span = trace_span!(Trace::Store, "checkpoint.latest", store = "memory", run = run_id.to_string());
         Ok(self.0.lock().await.get(&run_id).cloned())
     }
 }

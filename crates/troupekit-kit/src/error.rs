@@ -37,6 +37,11 @@ pub enum KitError {
     #[cfg(feature = "knowledge")]
     #[error(transparent)]
     Context(#[from] troupekit_context::ContextError),
+    #[error(transparent)]
+    Route(troupekit_providers::route::RouteError),
+    #[cfg(feature = "local")]
+    #[error(transparent)]
+    Local(#[from] troupekit_local::LocalError),
     #[error("run {run_id} failed: {reason}")]
     Failed { run_id: RunId, reason: String },
     #[error("run {run_id} paused: {reason:?}")]
@@ -54,6 +59,15 @@ impl KitError {
         KitError::Config {
             agent: agent.to_string(),
             message: message.into(),
+        }
+    }
+
+    pub(crate) fn run_id(&self) -> Option<RunId> {
+        match self {
+            KitError::Failed { run_id, .. }
+            | KitError::Paused { run_id, .. }
+            | KitError::Retries { run_id, .. } => Some(*run_id),
+            _ => None,
         }
     }
 }

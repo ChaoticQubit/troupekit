@@ -332,6 +332,9 @@ pub struct Knowledge {
     pub(crate) index: String,
     pub(crate) store: Option<PathBuf>,
     pub(crate) embedder: Option<Arc<dyn Embedder>>,
+    pub(crate) on_device: bool,
+    #[cfg(feature = "local")]
+    pub(crate) local: Option<crate::local::LocalChoice>,
     pub(crate) load: LoadSettings,
     pub(crate) chunk: ChunkConfig,
     pub(crate) allow_failed: bool,
@@ -348,6 +351,9 @@ impl Knowledge {
             index: defaults.scope().to_string(),
             store: None,
             embedder: None,
+            on_device: false,
+            #[cfg(feature = "local")]
+            local: None,
             load: defaults.load().clone(),
             chunk: defaults.chunk(),
             allow_failed: false,
@@ -376,8 +382,39 @@ impl Knowledge {
     /// Returns the settings.
     pub fn embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
+        self.on_device = false;
+        self.clear_local();
         self
     }
+
+    /// Sets an embedder that runs on the device, with no network, and
+    /// marks it so: a private agent accepts only such an embedder.
+    /// Otherwise the same as `embedder`.
+    pub fn on_device_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self.on_device = true;
+        self.clear_local();
+        self
+    }
+
+    /// Embeds on the device with a local model: a catalog id, a GGUF
+    /// file or a loaded `Arc<dyn LocalModel>`, loaded at `build` like
+    /// `Agent::local`. Marks the embedder on-device for private agents.
+    #[cfg(feature = "local")]
+    pub fn local_embedder(mut self, choice: impl Into<crate::local::LocalChoice>) -> Self {
+        self.embedder = None;
+        self.local = Some(choice.into());
+        self.on_device = true;
+        self
+    }
+
+    #[cfg(feature = "local")]
+    fn clear_local(&mut self) {
+        self.local = None;
+    }
+
+    #[cfg(not(feature = "local"))]
+    fn clear_local(&mut self) {}
 
     /// Sets the folder walk bounds and filters.
     /// Default `LoadSettings::default()`.
@@ -431,6 +468,7 @@ impl fmt::Debug for Knowledge {
             .field("index", &self.index)
             .field("store", &self.store)
             .field("embedder", &self.embedder.is_some())
+            .field("on_device", &self.on_device)
             .field("allow_failed", &self.allow_failed)
             .finish_non_exhaustive()
     }

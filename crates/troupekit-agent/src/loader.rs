@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use troupekit_trace::TraceSpec;
 
 /// A place persona files live: a folder, a database-backed virtual folder
 /// or the built-in set. `read` takes a relative path (`<name>.toml` or an
@@ -161,6 +162,28 @@ impl PersonaLoader {
                 PersonaError::new(&file, "instructions_file", format!("`{rel}` not found"))
             })?;
             return Ok(persona.with_instructions(text)?);
+        }
+        Err(AgentError::NotFound(name.to_string()))
+    }
+
+    /// Returns the trace settings of persona `name` from the first source
+    /// that has it, `None` when the file sets no tracing. Returns
+    /// `NotFound` when no source has it, or the trace key error.
+    pub async fn trace_spec(&self, name: &str) -> Result<Option<TraceSpec>, AgentError> {
+        if !valid_name(name) {
+            return Err(PersonaError::new(
+                name,
+                "name",
+                "must be 1 to 64 of [a-z0-9-], not starting with `-`",
+            )
+            .into());
+        }
+        let path = format!("{name}.toml");
+        for source in &self.sources {
+            if let Some(text) = source.read(&path).await? {
+                let file = format!("{}/{path}", source.label());
+                return Ok(crate::persona::trace_spec(&file, &text)?);
+            }
         }
         Err(AgentError::NotFound(name.to_string()))
     }

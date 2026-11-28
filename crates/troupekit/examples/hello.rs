@@ -1,4 +1,3 @@
-extern crate troupekit_kit as troupekit;
 use troupekit::prelude::*;
 
 /// Greet the user by name.

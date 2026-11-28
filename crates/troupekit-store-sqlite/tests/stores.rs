@@ -585,3 +585,76 @@ async fn message_too_deep_to_read_back_is_rejected() {
     assert_eq!(m.append("log", 1, vec![deepest.clone()]).await.unwrap(), 2);
     assert_eq!(m.read("log").await.unwrap(), vec![first, deepest]);
 }
+
+fn trace_records(sink: &troupekit_trace::MemorySink) -> Vec<serde_json::Value> {
+    sink.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect()
+}
+
+fn named<'a>(records: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
+    let found: Vec<&serde_json::Value> = records.iter().filter(|r| r["t"] != "end" && r["name"] == name).collect();
+    assert_eq!(found.len(), 1, "{name}: {records:?}");
+    found[0]
+}
+
+#[tokio::test]
+async fn checkpoint_save_emits_store_span() {
+    use std::sync::Arc;
+    use troupekit_trace::{MemorySink, Tracer};
+    let t = temp();
+    let s = t.open().await;
+    let run = RunId::new();
+    let sink = Arc::new(MemorySink::default());
+    let tracer = Tracer::builder().sink(sink.clone()).build().unwrap();
+    tracer
+        .in_scope(async {
+            s.save(cp(run, 0)).await.unwrap();
+            assert!(s.save(cp(run, 3)).await.is_err());
+            assert_eq!(s.latest(run).await.unwrap().unwrap().step, 0);
+        })
+        .await;
+    s.save(cp(run, 1)).await.unwrap();
+    drop(tracer);
+    let records = trace_records(&sink);
+    let saves: Vec<&serde_json::Value> = records.iter().filter(|r| r["t"] == "start" && r["name"] == "checkpoint.save").collect();
+    assert_eq!(saves.len(), 2, "the untraced save records nothing");
+    assert_eq!(saves[0]["cat"], "store");
+    assert_eq!(saves[0]["fields"]["run"], run.to_string().as_str());
+    assert_eq!(saves[0]["fields"]["step"], 0);
+    assert!(saves[0]["fields"]["bytes"].as_u64().unwrap() > 0);
+    let latest = named(&records, "checkpoint.latest");
+    let end = records.iter().find(|r| r["t"] == "end" && r["span"] == latest["span"]).unwrap();
+    assert_eq!(end["fields"]["found_step"], 0);
+    let failed = records.iter().filter(|r| r["t"] == "end" && r["ok"] == false).count();
+    assert_eq!(failed, 1);
+}
+
+#[tokio::test]
+async fn blocking_store_call_keeps_parent_span() {
+    use std::sync::Arc;
+    use troupekit_core::store::{Filter, VectorRecord, VectorStore};
+    use troupekit_store_sqlite::VectorSettings;
+    use troupekit_trace::{trace_span, MemorySink, Trace, Tracer};
+    let t = temp();
+    let s = t.open().await;
+    let vectors = s.vectors("docs", VectorSettings::new(4)).await.unwrap();
+    let sink = Arc::new(MemorySink::default());
+    let tracer = Tracer::builder().sink(sink.clone()).build().unwrap();
+    let outer_id = tracer
+        .in_scope(async {
+            let outer = trace_span!(Trace::Knowledge, "test.outer");
+            let record = VectorRecord { id: "a".into(), vector: vec![1.0, 0.0, 0.0, 0.0], text: "a".into(), meta: Default::default() };
+            outer.instrument(vectors.upsert(vec![record])).await.unwrap();
+            let hits = outer.instrument(vectors.search(&[1.0, 0.0, 0.0, 0.0], 3, &Filter::default())).await.unwrap();
+            assert_eq!(hits.len(), 1);
+            outer.id()
+        })
+        .await;
+    drop(tracer);
+    let records = trace_records(&sink);
+    let upsert = named(&records, "vectors.upsert");
+    assert_eq!(upsert["parent"], outer_id);
+    assert_eq!(upsert["fields"]["records"], 1);
+    let search = named(&records, "index.search");
+    assert_eq!(search["parent"], outer_id, "the span from inside spawn_blocking keeps the caller as parent");
+    assert_eq!(search["cat"], "knowledge");
+}

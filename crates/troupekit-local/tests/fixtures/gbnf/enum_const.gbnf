@@ -1,0 +1,10 @@
+root ::= r0
+r0 ::= "{" ws "\"kind\"" ws ":" ws "\"tool\"" ws "," ws "\"level\"" ws ":" ws r1 ws "}"
+r1 ::= "\"low\"" | "\"high\"" | "3" | "null"
+ws ::= ( " " | "\n" [ \t]{0,20} )?
+null ::= "null"
+boolean ::= "true" | "false"
+char ::= [^"\\\x7F\x00-\x1F] | [\\] (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+string ::= "\"" char* "\""
+integer ::= "-"? ( "0" | [1-9] [0-9]{0,15} )
+number ::= integer ( "." [0-9]{1,16} )? ( [eE] [-+]? [0-9]{1,3} )?

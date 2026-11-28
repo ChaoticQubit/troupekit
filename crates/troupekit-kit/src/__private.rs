@@ -6,3 +6,4 @@ pub use schemars;
 pub use serde;
 pub use serde_json;
 pub use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolSpec};
+pub use troupekit_trace as trace;

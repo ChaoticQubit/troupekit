@@ -1,4 +1,3 @@
-extern crate troupekit_kit as troupekit;
 mod tools;
 use tools::add;
 use troupekit::prelude::*;

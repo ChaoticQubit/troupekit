@@ -2,6 +2,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
 
 use crate::quant::Slots;
+use troupekit_trace::{trace_span, Trace};
 use crate::{check_k, check_vector, IndexError, Neighbor, PageChange, PageKey, Quantization, VectorIndex};
 
 /// A search candidate ordered so that greater means closer.
@@ -173,6 +174,7 @@ impl VectorIndex for BruteForce {
     fn search(&self, query: &[f32], k: usize, allow: Option<&dyn Fn(u64) -> bool>) -> Result<Vec<Neighbor>, IndexError> {
         check_vector(self.dims, query)?;
         check_k(k)?;
+        let mut span = trace_span!(Trace::Knowledge, "index.search", kind = "brute", k = k);
         let qn = norm(query);
         let mut top = TopK::new(k);
         let mut allowed = 0usize;
@@ -187,6 +189,8 @@ impl VectorIndex for BruteForce {
         }
         let hits = top.into_sorted();
         assert_result_law(&hits, k.min(allowed));
+        span.record("candidates", allowed);
+        span.record("hits", hits.len());
         Ok(hits)
     }
 

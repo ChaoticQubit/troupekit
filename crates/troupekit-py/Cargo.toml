@@ -16,5 +16,5 @@ name = "_troupekit"
 crate-type = ["cdylib"]
 
 [dependencies]
-troupekit-ffi-core = { path = "../troupekit-ffi-core", version = "0.2.0" }
+troupekit-ffi-core = { path = "../troupekit-ffi-core", version = "0.3.0" }
 pyo3 = { version = "=0.30.1", features = ["abi3-py311"] }
