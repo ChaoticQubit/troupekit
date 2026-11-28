@@ -10,10 +10,10 @@ const TROUPEKIT_PDF_ICON =
     '<span class="label">PDF</span>';
 
 /**
- * Puts one of the two site themes on the page and saves it under the
- * mdbook-theme key, the key the stock head script and book.js read.
- * Input: 'rust-dark' or 'rust'. Output: none; the html class and the
- * button label change.
+ * Puts one of the two site themes on the page. Light saves 'rust' under
+ * mdbook-theme; dark clears the key, since book.js only accepts saved
+ * themes that have a stock menu button and dark is the default anyway.
+ * Input: 'rust-dark' or 'rust'. Output: none; html class and label change.
  */
 function troupekitApplyTheme(theme, button) {
     console.assert(TROUPEKIT_THEMES.includes(theme), 'unknown theme ' + theme);
@@ -28,7 +28,11 @@ function troupekitApplyTheme(theme, button) {
         meta.content = getComputedStyle(html).backgroundColor;
     }
     try {
-        localStorage.setItem('mdbook-theme', theme);
+        if (theme === 'rust') {
+            localStorage.setItem('mdbook-theme', theme);
+        } else {
+            localStorage.removeItem('mdbook-theme');
+        }
     } catch (e) {
         console.debug('theme not saved', e);
     }
