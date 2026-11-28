@@ -6,14 +6,14 @@ mod from_toml;
 mod graph;
 #[cfg(feature = "knowledge")]
 mod knowledge;
-#[cfg(feature = "knowledge")]
-mod memory;
 mod laws;
-mod macros_agent;
-mod macros_tool;
-mod model;
 #[cfg(feature = "local")]
 mod local;
+mod macros_agent;
+mod macros_tool;
+#[cfg(feature = "knowledge")]
+mod memory;
+mod model;
 mod output;
 mod route;
 mod start;

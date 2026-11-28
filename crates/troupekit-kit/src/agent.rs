@@ -572,6 +572,7 @@ impl Agent {
         Some(spec)
     }
 
+    #[cfg(any(feature = "knowledge", feature = "local"))]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
