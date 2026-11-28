@@ -714,6 +714,16 @@ public protocol AgentBuilderProtocol: AnyObject, Sendable {
     
     func tool(tool: HostTool)  -> AgentBuilder
     
+    func trace(categories: [String])  -> AgentBuilder
+    
+    func traceContent(on: Bool)  -> AgentBuilder
+    
+    func traceJsonl(path: String)  -> AgentBuilder
+    
+    func traceListener(listener: TraceListener)  -> AgentBuilder
+    
+    func tracing(on: Bool)  -> AgentBuilder
+    
 }
 /**
  * Builds one agent in code or from a persona TOML, as the kit builder does.
@@ -1035,6 +1045,56 @@ open func tool(tool: HostTool) -> AgentBuilder  {
     uniffi_troupekit_ffi_fn_method_agentbuilder_tool(
             self.uniffiCloneHandle(),
         FfiConverterTypeHostTool_lower(tool),uniffiCallStatus
+    )
+})
+}
+    
+open func trace(categories: [String]) -> AgentBuilder  {
+    return try!  FfiConverterTypeAgentBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_agentbuilder_trace(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(categories),uniffiCallStatus
+    )
+})
+}
+    
+open func traceContent(on: Bool) -> AgentBuilder  {
+    return try!  FfiConverterTypeAgentBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_agentbuilder_trace_content(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(on),uniffiCallStatus
+    )
+})
+}
+    
+open func traceJsonl(path: String) -> AgentBuilder  {
+    return try!  FfiConverterTypeAgentBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_agentbuilder_trace_jsonl(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
+open func traceListener(listener: TraceListener) -> AgentBuilder  {
+    return try!  FfiConverterTypeAgentBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_agentbuilder_trace_listener(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeTraceListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+open func tracing(on: Bool) -> AgentBuilder  {
+    return try!  FfiConverterTypeAgentBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_agentbuilder_tracing(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(on),uniffiCallStatus
     )
 })
 }
@@ -1550,6 +1610,16 @@ public protocol GraphBuilderProtocol: AnyObject, Sendable {
     
     func step(id: String, tool: HostTool)  -> GraphBuilder
     
+    func trace(categories: [String])  -> GraphBuilder
+    
+    func traceContent(on: Bool)  -> GraphBuilder
+    
+    func traceJsonl(path: String)  -> GraphBuilder
+    
+    func traceListener(listener: TraceListener)  -> GraphBuilder
+    
+    func tracing(on: Bool)  -> GraphBuilder
+    
 }
 /**
  * Builds a graph of agents and tool steps, as the kit's `Graph` does.
@@ -1723,6 +1793,56 @@ open func step(id: String, tool: HostTool) -> GraphBuilder  {
             self.uniffiCloneHandle(),
         FfiConverterString.lower(id),
         FfiConverterTypeHostTool_lower(tool),uniffiCallStatus
+    )
+})
+}
+    
+open func trace(categories: [String]) -> GraphBuilder  {
+    return try!  FfiConverterTypeGraphBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_graphbuilder_trace(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(categories),uniffiCallStatus
+    )
+})
+}
+    
+open func traceContent(on: Bool) -> GraphBuilder  {
+    return try!  FfiConverterTypeGraphBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_graphbuilder_trace_content(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(on),uniffiCallStatus
+    )
+})
+}
+    
+open func traceJsonl(path: String) -> GraphBuilder  {
+    return try!  FfiConverterTypeGraphBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_graphbuilder_trace_jsonl(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
+open func traceListener(listener: TraceListener) -> GraphBuilder  {
+    return try!  FfiConverterTypeGraphBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_graphbuilder_trace_listener(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeTraceListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+open func tracing(on: Bool) -> GraphBuilder  {
+    return try!  FfiConverterTypeGraphBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_graphbuilder_tracing(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(on),uniffiCallStatus
     )
 })
 }
@@ -3513,6 +3633,218 @@ public func FfiConverterTypeTokenSink_lift(_ handle: UInt64) throws -> TokenSink
 #endif
 @Sendable public func FfiConverterTypeTokenSink_lower(_ value: TokenSink) -> UInt64 {
     return FfiConverterTypeTokenSink.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Receives every trace record of a traced build or run, implemented in
+ * Swift or Kotlin: the callback form of `trace_jsonl`. Called on the
+ * thread that writes the record; keys are scrubbed before the call.
+ * Input: one JSON object on one line, no newline. Output: none.
+ */
+public protocol TraceListener: AnyObject, Sendable {
+    
+    func onRecord(line: String) 
+    
+}
+/**
+ * Receives every trace record of a traced build or run, implemented in
+ * Swift or Kotlin: the callback form of `trace_jsonl`. Called on the
+ * thread that writes the record; keys are scrubbed before the call.
+ * Input: one JSON object on one line, no newline. Output: none.
+ */
+open class TraceListenerImpl: TraceListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_troupekit_ffi_fn_clone_tracelistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_troupekit_ffi_fn_free_tracelistener(handle, $0) }
+    }
+
+    
+
+    
+open func onRecord(line: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_troupekit_ffi_fn_method_tracelistener_on_record(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(line),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceTraceListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceTraceListener = UniffiVTableCallbackInterfaceTraceListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeTraceListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface TraceListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeTraceListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface TraceListener: handle missing in uniffiClone")
+            }
+        },
+        onRecord: { (
+            uniffiHandle: UInt64,
+            line: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            nonisolated(unsafe) let line = line
+
+            let makeCall: @Sendable () throws -> () = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeTraceListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onRecord(
+                     line: try FfiConverterString.lift(line)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceTraceListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceTraceListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitTraceListener() {
+    uniffi_troupekit_ffi_fn_init_callback_vtable_tracelistener(UniffiCallbackInterfaceTraceListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTraceListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<TraceListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = TraceListener
+
+    public static func lift(_ handle: UInt64) throws -> TraceListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return TraceListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: TraceListener) -> UInt64 {
+         if let rustImpl = value as? TraceListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TraceListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: TraceListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTraceListener_lift(_ handle: UInt64) throws -> TraceListener {
+    return try FfiConverterTypeTraceListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+@Sendable public func FfiConverterTypeTraceListener_lower(_ value: TraceListener) -> UInt64 {
+    return FfiConverterTypeTraceListener.lower(value)
 }
 
 
@@ -5463,6 +5795,21 @@ private let initializationResult: InitializationResult = {
     if (uniffi_troupekit_ffi_checksum_method_agentbuilder_tool() != 46265) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_troupekit_ffi_checksum_method_agentbuilder_trace() != 38041) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_troupekit_ffi_checksum_method_agentbuilder_trace_content() != 6696) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_troupekit_ffi_checksum_method_agentbuilder_trace_jsonl() != 51096) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_troupekit_ffi_checksum_method_agentbuilder_trace_listener() != 2047) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_troupekit_ffi_checksum_method_agentbuilder_tracing() != 23094) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_troupekit_ffi_checksum_method_agenthandle_resume() != 4536) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5509,6 +5856,21 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_troupekit_ffi_checksum_method_graphbuilder_step() != 59390) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_troupekit_ffi_checksum_method_graphbuilder_trace() != 53077) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_troupekit_ffi_checksum_method_graphbuilder_trace_content() != 6451) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_troupekit_ffi_checksum_method_graphbuilder_trace_jsonl() != 48268) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_troupekit_ffi_checksum_method_graphbuilder_trace_listener() != 11169) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_troupekit_ffi_checksum_method_graphbuilder_tracing() != 9274) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_troupekit_ffi_checksum_method_graphhandle_resume() != 46745) {
@@ -5571,6 +5933,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_troupekit_ffi_checksum_method_tokensink_delta() != 59874) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_troupekit_ffi_checksum_method_tracelistener_on_record() != 25040) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_troupekit_ffi_checksum_method_runstream_cancel() != 63943) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5607,6 +5972,7 @@ private let initializationResult: InitializationResult = {
     uniffiCallbackInitHostModel()
     uniffiCallbackInitHostTool()
     uniffiCallbackInitHostTransport()
+    uniffiCallbackInitTraceListener()
     return InitializationResult.ok
 }()
 
