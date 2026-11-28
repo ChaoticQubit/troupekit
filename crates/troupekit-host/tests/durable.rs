@@ -11,6 +11,7 @@ use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
 use troupekit_core::store::{BranchWrite, Checkpoint, CheckpointStore, ForkLink};
 use troupekit_graph::testing::FnTool;
+use troupekit_agent::Limits;
 use troupekit_graph::GraphStatus;
 use troupekit_host::{HostError, JobQueue, JobState, Processed, Runner, TickOptions};
 use troupekit_tools::{ToolOutput, ToolRegistry};
@@ -183,6 +184,36 @@ async fn process_after_crash_applies_pending_writes() {
     let slow = slow.lock().unwrap().clone();
     assert_eq!(slow.len(), 2);
     assert_eq!(slow[0], slow[1], "the re-run keeps its idempotency key");
+}
+
+#[tokio::test]
+async fn budget_raise_after_crash_keeps_the_finished_branch() {
+    let (tools, fast, slow) = fork_tools(first_call_waits_on(Arc::new(Notify::new())));
+    let s = stack_on(planner_model(), tools, InMemCheckpoints::with_history());
+    let id = s.start(FORK, "g").await;
+    let crashed = s.runner().with_lease_ms(1_000);
+    let hung = tokio::time::timeout(Duration::from_millis(200), crashed.tick(TickOptions::default())).await;
+    assert!(hung.is_err(), "the fan-out step hangs in the slow tool");
+    drop(crashed);
+    let writes = wait_for_write(&s, id, "left").await;
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    let held = s.checkpoints.latest(id).await.unwrap().unwrap().step;
+    let fresh = s.runner();
+    fresh.raise_budget(id, Limits::default()).await.unwrap();
+    assert_eq!(s.checkpoints.latest(id).await.unwrap().unwrap().step, held + 1);
+    assert_eq!(s.checkpoints.branch_writes(id, held + 1).await.unwrap(), writes, "the bump keeps the carried write");
+    s.clock.advance(1_000);
+    let report = fresh.tick(TickOptions::default()).await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(s.queue.job(id), Some(JobState::Done));
+    let done = s.saved(id).await;
+    assert_eq!(done.status(), &GraphStatus::Done);
+    assert_joined(done.state());
+    assert_eq!(fast.lock().unwrap().len(), 1, "the finished branch never runs again");
+    assert_eq!(slow.lock().unwrap().len(), 2);
+    for step in 0..=done.steps() + 1 {
+        assert!(s.checkpoints.branch_writes(id, step).await.unwrap().is_empty(), "step {step}");
+    }
 }
 
 #[tokio::test]

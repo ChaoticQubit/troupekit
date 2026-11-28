@@ -17,7 +17,7 @@ pub struct InMemCheckpoints {
 }
 
 /// Everything one `InMemCheckpoints` holds, behind one lock so a save and
-/// the branch writes it drops change together. Branch writes are keyed by
+/// the next-step check on branch writes see one state. Branch writes are keyed by
 /// step then branch index; `forks` lists links by child id, as SQLite does.
 #[derive(Default)]
 struct CheckpointMaps {
@@ -27,8 +27,8 @@ struct CheckpointMaps {
 }
 
 impl InMemCheckpoints {
-    /// Builds a store that keeps every saved step of every run, the branch
-    /// writes of the step in flight and fork links, like a durable store.
+    /// Builds a store that keeps every saved step of every run, branch
+    /// writes until `drop_branch_writes` and fork links, like a durable store.
     /// Memory grows with the steps saved; `prune` or the run's step cap bound it.
     /// Returns the empty store.
     pub fn with_history() -> Self {
@@ -51,16 +51,12 @@ impl CheckpointStore for InMemCheckpoints {
         if cp.step != expected {
             return Err(CoreError::Conflict { expected, actual: cp.step });
         }
-        let (run_id, step) = (cp.run_id, cp.step);
-        let kept = maps.runs.entry(run_id).or_default();
+        let kept = maps.runs.entry(cp.run_id).or_default();
         if !self.keep_history {
             kept.clear();
         }
         kept.push(cp);
         assert!(kept.windows(2).all(|w| w[0].step + 1 == w[1].step));
-        if let Some(writes) = maps.writes.get_mut(&run_id) {
-            writes.retain(|&(write_step, _), _| write_step > step);
-        }
         Ok(())
     }
 
@@ -115,6 +111,17 @@ impl CheckpointStore for InMemCheckpoints {
         let out: Vec<BranchWrite> = writes.range((step, 0)..=(step, u32::MAX)).map(|(_, w)| w.clone()).collect();
         assert!(out.windows(2).all(|w| w[0].branch() < w[1].branch()));
         Ok(out)
+    }
+
+    async fn drop_branch_writes(&self, run_id: RunId, below: u64) -> Result<u64, CoreError> {
+        let mut maps = self.inner.lock().await;
+        let Some(writes) = maps.writes.get_mut(&run_id) else {
+            return Ok(0);
+        };
+        let before = writes.len();
+        writes.retain(|&(write_step, _), _| write_step >= below);
+        assert!(writes.keys().all(|&(write_step, _)| write_step >= below));
+        Ok((before - writes.len()) as u64)
     }
 
     async fn link_fork(&self, link: ForkLink) -> Result<bool, CoreError> {

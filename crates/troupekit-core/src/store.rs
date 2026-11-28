@@ -61,6 +61,15 @@ pub trait CheckpointStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Deletes the kept branch writes of `run_id` at steps below `below` and
+    /// returns how many it deleted. `save` and `prune` never delete a write,
+    /// since a checkpoint can still carry an earlier step's writes; the caller
+    /// passes the lowest step its saved run still reads. The default keeps none.
+    async fn drop_branch_writes(&self, run_id: RunId, below: u64) -> Result<u64, CoreError> {
+        let _ = (run_id, below);
+        Ok(0)
+    }
+
     /// Records that `link.child` was forked from `link.parent`.
     /// Returns true when the link is kept. The default keeps no lineage
     /// and returns false.

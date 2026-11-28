@@ -87,13 +87,13 @@ fn max_step(tx: &Transaction<'_>, run: &str) -> Result<Option<u64>, CoreError> {
     max.map(|m| from_sql_int("step", m)).transpose()
 }
 
-/// Counts the branch writes of `run` at or below `step`.
+/// Counts the branch writes of `run` below step `below`.
 /// Input: the open transaction, the run and the step. Output: the count;
-/// `save` asserts it is zero after dropping the writes its step settled.
-fn branch_writes_up_to(tx: &Transaction<'_>, run: &str, step: i64) -> Result<i64, CoreError> {
+/// `drop_branch_writes` asserts it is zero after its delete.
+fn branch_writes_below(tx: &Transaction<'_>, run: &str, below: i64) -> Result<i64, CoreError> {
     tx.query_row(
-        "SELECT COUNT(*) FROM branch_write WHERE run_id = ?1 AND step <= ?2",
-        params![run, step],
+        "SELECT COUNT(*) FROM branch_write WHERE run_id = ?1 AND step < ?2",
+        params![run, below],
         |row| row.get(0),
     )
     .map_err(db)
@@ -162,12 +162,6 @@ impl CheckpointStore for SqliteStore {
                 .map_err(db)?;
             assert_eq!(inserted, 1);
             assert_eq!(max_step(&tx, &run)?, Some(actual));
-            tx.execute(
-                "DELETE FROM branch_write WHERE run_id = ?1 AND step <= ?2",
-                params![run, step],
-            )
-            .map_err(db)?;
-            assert_eq!(branch_writes_up_to(&tx, &run, step)?, 0);
             tx.commit().map_err(db)
         })
         .await
@@ -252,11 +246,6 @@ impl CheckpointStore for SqliteStore {
                     params![run, cutoff],
                 )
                 .map_err(db)?;
-            tx.execute(
-                "DELETE FROM branch_write WHERE run_id = ?1 AND step < ?2",
-                params![run, cutoff],
-            )
-            .map_err(db)?;
             assert_eq!(max_step(&tx, &run)?, Some(max));
             tx.commit().map_err(db)?;
             Ok(deleted as u64)
@@ -347,6 +336,24 @@ impl CheckpointStore for SqliteStore {
             }
             assert!(out.windows(2).all(|w| w[0].branch() < w[1].branch()));
             Ok(out)
+        })
+        .await
+    }
+
+    async fn drop_branch_writes(&self, run_id: RunId, below: u64) -> Result<u64, CoreError> {
+        let below = to_sql_int("step", below)?;
+        let run = run_id.to_string();
+        self.call(move |conn| {
+            let tx = immediate(conn)?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM branch_write WHERE run_id = ?1 AND step < ?2",
+                    params![run, below],
+                )
+                .map_err(db)?;
+            assert_eq!(branch_writes_below(&tx, &run, below)?, 0);
+            tx.commit().map_err(db)?;
+            Ok(deleted as u64)
         })
         .await
     }

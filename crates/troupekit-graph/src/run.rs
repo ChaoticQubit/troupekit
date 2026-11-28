@@ -812,6 +812,17 @@ impl GraphRun {
         self.parent
     }
 
+    /// Returns the lowest step whose kept branch writes this run still reads
+    /// on its next `restore`: the first carried step, else the next step.
+    /// After saving this run's checkpoint, pass it to `drop_branch_writes`;
+    /// every write below it is settled in the saved state.
+    pub fn kept_writes_from(&self) -> u64 {
+        let next = self.steps + 1;
+        let from = self.recovered.first().copied().unwrap_or(next);
+        assert!(from <= next, "carried steps precede the next step");
+        from
+    }
+
     /// Walks the parent links of run `run_id` through the latest checkpoint
     /// of each run in `store`, nearest parent first, at most 64 hops. A
     /// parent whose checkpoints are gone ends the walk. Returns the links,

@@ -183,7 +183,7 @@ async fn with_history_lists_every_step() {
 }
 
 #[tokio::test]
-async fn branch_writes_are_dropped_by_the_next_save() {
+async fn branch_writes_outlive_save_until_dropped() {
     let s = InMemCheckpoints::with_history();
     let run = RunId::new();
     save_steps(&s, run, 1).await;
@@ -194,11 +194,22 @@ async fn branch_writes_are_dropped_by_the_next_save() {
     let order: Vec<(u32, &str)> = writes.iter().map(|w| (w.branch(), w.node())).collect();
     assert_eq!(order, vec![(0, "a"), (1, "b")]);
     s.save(Checkpoint { run_id: run, step: 1, state: json!(1) }).await.unwrap();
-    assert!(s.branch_writes(run, 1).await.unwrap().is_empty());
-    assert_eq!(s.branch_writes(run, 2).await.unwrap(), vec![BranchWrite::new(0, "a", json!("a2"))]);
+    assert_eq!(s.branch_writes(run, 1).await.unwrap().len(), 2);
+    assert_eq!(s.prune(run, 1).await.unwrap(), 1);
+    assert_eq!(s.branch_writes(run, 1).await.unwrap().len(), 2);
     let err = s.save_branch(run, 1, BranchWrite::new(0, "a", json!("a1"))).await.unwrap_err();
     assert_eq!(err, CoreError::Conflict { expected: 2, actual: 1 });
-    assert!(s.branch_writes(RunId::new(), 0).await.unwrap().is_empty());
+    assert_eq!(s.drop_branch_writes(run, 1).await.unwrap(), 0);
+    assert_eq!(s.drop_branch_writes(run, 2).await.unwrap(), 2);
+    assert!(s.branch_writes(run, 1).await.unwrap().is_empty());
+    assert_eq!(s.branch_writes(run, 2).await.unwrap(), vec![BranchWrite::new(0, "a", json!("a2"))]);
+    assert_eq!(s.drop_branch_writes(RunId::new(), 9).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn default_drop_branch_writes_drops_nothing() {
+    let s = InMemCheckpoints::default();
+    assert_eq!(s.drop_branch_writes(RunId::new(), 5).await.unwrap(), 0);
 }
 
 #[tokio::test]

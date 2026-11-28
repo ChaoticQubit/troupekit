@@ -277,16 +277,24 @@ async fn wait_for_kill_point(store: &SqliteStore, id: RunId, kind: Kind) {
 }
 
 /// Runs one kill round on a fresh file: worker one stalls in tool B and
-/// is killed at the kill point, worker two resumes with the gate open.
-/// Returns the call logs of tool A and tool B.
-async fn kill_round(dir: &Path, round: usize, kind: Kind) -> (Vec<String>, Vec<String>) {
-    let path = dir.join(format!("parallel-{round}-{}.db", kind.name()));
-    let gate = dir.join(format!("gate-{round}-{}", kind.name()));
+/// is killed at the kill point; with `bump`, the parent then raises the
+/// run's budget through the runner, a step bump that saves a checkpoint.
+/// Worker two resumes with the gate open. Returns tool A's and B's logs.
+async fn kill_round(dir: &Path, round: usize, kind: Kind, bump: bool) -> (Vec<String>, Vec<String>) {
+    let tag = format!("{round}-{}-{bump}", kind.name());
+    let path = dir.join(format!("parallel-{tag}.db"));
+    let gate = dir.join(format!("gate-{tag}"));
     let id = new_run(&path, &gate).await;
     let watcher = SqliteStore::open(&path).await.unwrap();
     let first = Worker::spawn(&path, id, kind, &gate);
     wait_for_kill_point(&watcher, id, kind).await;
     first.kill();
+    if bump {
+        let troupe = troupe_on(&path).await;
+        let before = watcher.latest(id).await.unwrap().unwrap().step;
+        runner(&troupe, kind, &gate).raise_budget(id, Limits::default()).await.unwrap();
+        assert_eq!(watcher.latest(id).await.unwrap().unwrap().step, before + 1);
+    }
     std::fs::write(&gate, b"open").unwrap();
     Worker::spawn(&path, id, kind, &gate).finish().await;
     assert_eq!(watcher.job(id).await.unwrap(), Some(JobState::Done));
@@ -303,7 +311,7 @@ async fn kill_round(dir: &Path, round: usize, kind: Kind) -> (Vec<String>, Vec<S
 async fn kill_after_branch_a_resume_reruns_only_b() {
     let dir = tempfile::tempdir().unwrap();
     for round in 0..runs() {
-        let (a, b) = kill_round(dir.path(), round, Kind::Durable).await;
+        let (a, b) = kill_round(dir.path(), round, Kind::Durable, false).await;
         assert_eq!(a.len(), 1, "round {round}: tool A ran again: {a:?}");
         assert_eq!(b.len(), 2, "round {round}: {b:?}");
         assert_eq!(b[0], b[1], "round {round}: tool B kept its idempotency key");
@@ -311,10 +319,20 @@ async fn kill_after_branch_a_resume_reruns_only_b() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_then_budget_raise_reruns_only_b() {
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..runs() {
+        let (a, b) = kill_round(dir.path(), round, Kind::Durable, true).await;
+        assert_eq!(a.len(), 1, "round {round}: the step bump dropped A's kept write: {a:?}");
+        assert_eq!(b.len(), 2, "round {round}: {b:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_with_whole_step_store_reruns_both() {
     let dir = tempfile::tempdir().unwrap();
     for round in 0..runs() {
-        let (a, b) = kill_round(dir.path(), round, Kind::WholeSteps).await;
+        let (a, b) = kill_round(dir.path(), round, Kind::WholeSteps, false).await;
         assert_eq!(a.len(), 2, "round {round}: a whole-step store reruns A: {a:?}");
         assert_eq!(a[0], a[1], "round {round}");
         assert_eq!(b.len(), 2, "round {round}: {b:?}");

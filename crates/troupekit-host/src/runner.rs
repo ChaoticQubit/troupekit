@@ -166,7 +166,7 @@ impl Runner {
         };
         let moved = run.steps() != before;
         if moved {
-            match self.checkpoints.save(run.checkpoint()).await {
+            match self.save_run(&run).await {
                 Ok(()) => {}
                 Err(CoreError::Conflict { .. }) => return Ok(Processed::Lost),
                 Err(e) => return Err(self.store_failed(lease, e).await),
@@ -296,17 +296,30 @@ impl Runner {
         Ok(child.run_id())
     }
 
+    /// Loads run `run_id` with `GraphRun::restore`, so the branch writes
+    /// its latest checkpoint carries stay pending across the change the
+    /// caller makes next. Returns `NoCheckpoint` for an unknown run.
     async fn load(&self, run_id: RunId) -> Result<GraphRun, HostError> {
-        let cp = self
+        if self.checkpoints.latest(run_id).await?.is_none() {
+            return Err(HostError::NoCheckpoint(run_id));
+        }
+        Ok(GraphRun::restore(self.checkpoints.as_ref(), run_id).await?)
+    }
+
+    /// Saves `run`'s checkpoint, then drops the branch writes below the
+    /// lowest step the saved run still reads. Input: a run between steps.
+    /// Output: the save error, or the drop error after a durable save.
+    async fn save_run(&self, run: &GraphRun) -> Result<(), CoreError> {
+        self.checkpoints.save(run.checkpoint()).await?;
+        let _dropped = self
             .checkpoints
-            .latest(run_id)
-            .await?
-            .ok_or(HostError::NoCheckpoint(run_id))?;
-        Ok(GraphRun::from_checkpoint(&cp)?)
+            .drop_branch_writes(run.run_id(), run.kept_writes_from())
+            .await?;
+        Ok(())
     }
 
     async fn save_and_enqueue(&self, run: &GraphRun) -> Result<(), HostError> {
-        self.checkpoints.save(run.checkpoint()).await?;
+        self.save_run(run).await?;
         self.queue.enqueue(run.run_id(), self.now()).await?;
         Ok(())
     }

@@ -33,6 +33,7 @@ fn cp(run_id: RunId, step: u64) -> Checkpoint {
 async fn save_steps(s: &SqliteStore, run: RunId, steps: u64) {
     for step in 0..steps {
         s.save(cp(run, step)).await.unwrap();
+        s.drop_branch_writes(run, step + 1).await.unwrap();
     }
 }
 
@@ -64,7 +65,7 @@ async fn branch_write_round_trips() {
 }
 
 #[tokio::test]
-async fn save_deletes_branch_writes_of_that_step() {
+async fn save_keeps_branch_writes_until_dropped() {
     let t = temp();
     let s = SqliteStore::open(&t.path).await.unwrap();
     let run = RunId::new();
@@ -73,11 +74,16 @@ async fn save_deletes_branch_writes_of_that_step() {
     assert!(s.save_branch(run, 1, BranchWrite::new(1, "b", json!(2))).await.unwrap());
     assert!(s.save_branch(run, 2, BranchWrite::new(0, "a", json!(3))).await.unwrap());
     s.save(cp(run, 1)).await.unwrap();
-    assert!(s.branch_writes(run, 1).await.unwrap().is_empty());
-    assert_eq!(s.branch_writes(run, 2).await.unwrap(), vec![BranchWrite::new(0, "a", json!(3))]);
-    assert_eq!(rows(&t.path, "SELECT COUNT(*) FROM branch_write"), 1);
     s.save(cp(run, 2)).await.unwrap();
+    assert_eq!(s.branch_writes(run, 1).await.unwrap().len(), 2);
+    assert_eq!(s.prune(run, 1).await.unwrap(), 2);
+    assert_eq!(rows(&t.path, "SELECT COUNT(*) FROM branch_write"), 3);
+    assert_eq!(s.drop_branch_writes(run, 1).await.unwrap(), 0);
+    assert_eq!(s.drop_branch_writes(run, 2).await.unwrap(), 2);
+    assert_eq!(s.branch_writes(run, 2).await.unwrap(), vec![BranchWrite::new(0, "a", json!(3))]);
+    assert_eq!(s.drop_branch_writes(run, 3).await.unwrap(), 1);
     assert_eq!(rows(&t.path, "SELECT COUNT(*) FROM branch_write"), 0);
+    assert_eq!(s.drop_branch_writes(RunId::new(), 9).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -205,8 +211,10 @@ async fn killed_between_branch_write_and_save_keeps_both_consistent() {
     assert!(!status.success(), "a killed child does not exit cleanly");
     let s = SqliteStore::open(&t.path).await.unwrap();
     let latest = s.latest(run).await.unwrap().unwrap().step;
-    let stale = format!("SELECT COUNT(*) FROM branch_write WHERE run_id = '{run}' AND step <= {latest}");
-    assert_eq!(rows(&t.path, &stale), 0, "no branch write at or below the saved step");
+    let stale = format!("SELECT COUNT(*) FROM branch_write WHERE run_id = '{run}' AND step < {latest}");
+    assert_eq!(rows(&t.path, &stale), 0, "every write below the saved step was dropped");
+    let undropped = format!("SELECT COUNT(*) FROM branch_write WHERE run_id = '{run}' AND step = {latest}");
+    assert!(rows(&t.path, &undropped) <= 2, "a kill between save and drop leaves the saved step's writes");
     let ahead = format!("SELECT COUNT(*) FROM branch_write WHERE run_id = '{run}' AND step > {}", latest + 1);
     assert_eq!(rows(&t.path, &ahead), 0, "writes exist only for the step in flight");
     let pending = s.branch_writes(run, latest + 1).await.unwrap();
@@ -216,7 +224,9 @@ async fn killed_between_branch_write_and_save_keeps_both_consistent() {
         assert_eq!(write.write(), &json!({ "step": latest + 1, "branch": index }));
     }
     s.save(cp(run, latest + 1)).await.unwrap();
-    assert!(s.branch_writes(run, latest + 1).await.unwrap().is_empty());
+    assert_eq!(s.branch_writes(run, latest + 1).await.unwrap(), pending, "a save keeps the writes");
+    s.drop_branch_writes(run, latest + 2).await.unwrap();
+    assert_eq!(rows(&t.path, &format!("SELECT COUNT(*) FROM branch_write WHERE run_id = '{run}'")), 0);
 }
 
 #[tokio::test]
@@ -234,5 +244,6 @@ async fn child_writes_branches_until_killed() {
             assert!(s.save_branch(run, step, write).await.unwrap());
         }
         s.save(cp(run, step)).await.unwrap();
+        s.drop_branch_writes(run, step + 1).await.unwrap();
     }
 }
