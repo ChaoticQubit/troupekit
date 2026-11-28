@@ -22,12 +22,12 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * A LiteRT-LM model file on the device as a troupekit `HostModel`.
  * Tools are emulated by the Rust side, so the tool loop and every checkpoint stay in troupekit.
- * Input: the `.litertlm` path, the backend, the context size and the reply timeout, which bounds one
- * generate call after the engine is loaded. Safe to create anywhere; it reports unavailable.
+ * Input: the `.litertlm` path, the backend (null means CPU), the context size and the reply timeout,
+ * which bounds one generate call after the engine is loaded. Creating it loads no LiteRT-LM class.
  */
 class OnDeviceModel(
     private val modelPath: String,
-    private val backend: Backend = Backend.CPU(),
+    private val backend: Backend? = null,
     private val maxNumTokens: Int = 4096,
     private val cacheDir: String? = null,
     private val replyTimeoutMs: Long = DEFAULT_REPLY_TIMEOUT_MS,
@@ -101,7 +101,7 @@ class OnDeviceModel(
 
     private fun loaded(): Engine {
         engine?.let { return it }
-        val created = Engine(EngineConfig(modelPath = modelPath, backend = backend, maxNumTokens = maxNumTokens, cacheDir = cacheDir))
+        val created = Engine(EngineConfig(modelPath = modelPath, backend = backend ?: Backend.CPU(), maxNumTokens = maxNumTokens, cacheDir = cacheDir))
         try {
             created.initialize()
         } catch (error: Exception) {
