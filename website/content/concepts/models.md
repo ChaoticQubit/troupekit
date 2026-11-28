@@ -45,7 +45,7 @@ The catalog also has `[[embedding]]` rows for the embedding models used by [Know
 
 ## API keys
 
-The key is read from `<VENDOR>_API_KEY` at `build`, with the vendor id upper-cased and `-` read as `_`: `OPENAI_API_KEY`, `LM_STUDIO_API_KEY`.
+The key is read from `<VENDOR>_API_KEY` at `build`, with the vendor id upper-cased and `-` read as `_`: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`. Vendors with `auth = "none"` need no key.
 
 - `.api_key(secret)` sets the key directly and beats any environment variable.
 - `.api_key_env(name)` reads another variable.

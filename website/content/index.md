@@ -34,7 +34,7 @@ The [Quick start](quick-start.md) runs this program and adds a tool.
 ## What 0.3 does
 
 - Agents from a macro, a builder or a persona TOML file, with tools, typed output, evals and spend limits.
-- Hosted models from nine catalog vendors, plus any OpenAI-compatible server.
+- Hosted models from seven catalog vendors, local servers through Ollama and LM Studio, and any OpenAI-compatible server through your own catalog.
 - Local GGUF models through llama.cpp, and a route that picks local or cloud by policy.
 - Folder search by keyword, vector or both, and long-term memory per user and session.
 - Durable TOML workflows that survive a crash and resume from SQLite.

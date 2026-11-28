@@ -48,7 +48,7 @@ Source: `crates/troupekit-kit/tests/agent.rs`, test `run_with_returns_usage_call
 | Setting | Rule | Default |
 |---|---|---|
 | `name` | 1 to 64 of `[a-z0-9-]` | required |
-| `model` | `vendor/model` from the catalog, or an alias served by `model_client` | required |
+| `model` | `vendor/model` from the catalog, or an alias served by `model_client` | required, unless `.local(..)` is set: the agent is then local only |
 | `instructions` | kept exactly, never parsed as TOML | required |
 | `display_name` | shown in the system prompt | the agent name |
 | `role` | role line of the system prompt | `"An assistant."` |
@@ -117,6 +117,6 @@ See [Configuration](../reference/configuration.md) for every persona key.
 
 ## Laws
 
-`.laws(path)`, `.law(text)` and `.auto_laws(on)` are checked at `build` and stored with the agent. No run proves them yet. Coming in 0.7: proving workflow properties with Bend.
+`.laws(path)` adds a `.bend` law file, at most 1 MiB of UTF-8. `.law(text)` adds one inline law, at most 64 KiB. `.auto_laws(on)` records whether laws should also be derived from the code. `build` checks each one, stores it with the agent and traces a `law.load` span under `Trace::Laws`. A run does not prove your laws; it traces only the built-in `law.check` of its own invariants, such as staying within `max_turns`. Coming in 0.7: proving workflow properties with Bend.
 
-Source: `crates/troupekit-kit/src/agent.rs`
+Source: `crates/troupekit-kit/src/laws.rs`, `crates/troupekit-agent/src/run.rs`

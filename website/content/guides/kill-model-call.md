@@ -31,6 +31,13 @@ Source: `crates/troupekit/examples/kill_model_call.rs`
 - `start` runs a fresh story and prints `RUN <id>` on the first event, then `GENERATING` when the local model call starts.
 - `resume` continues that run id from its checkpoint and prints `RESUMED <bytes>`.
 
+```sh
+cargo run -p troupekit --features llama,sqlite --example kill_model_call -- start kill.db <path to the gguf>
+cargo run -p troupekit --features llama,sqlite --example kill_model_call -- resume kill.db <path to the gguf> <run id>
+```
+
+Source: `crates/troupekit/Cargo.toml` `[[example]]`, `required-features = ["llama", "sqlite"]`
+
 The integration test `crates/troupekit/tests/kill_model_call.rs` drives both halves and kills the first process.
 
 ## The agent
@@ -41,11 +48,15 @@ async fn agent(db: &Path, gguf: &Path) -> Result<BuiltAgent, Box<dyn Error>> {
     let settings = LocalChatSettings::default().with_ban_eos(true);
     let chat = LocalChat::new(Arc::new(model), "local/test").with_settings(settings);
     let store = SqliteStore::open(db).await?;
-```
-
-Source: `crates/troupekit/examples/kill_model_call.rs`
-
-```rust
+    let said = AtomicBool::new(false);
+    let sink = CallbackSink::new(move |line| {
+        let local_start =
+            line.contains("\"t\":\"start\"") && line.contains("\"name\":\"model.local\"");
+        if local_start && !said.swap(true, Ordering::SeqCst) {
+            println!("GENERATING");
+            std::io::stdout().flush().expect("stdout flushes");
+        }
+    });
     let built = Agent::new("storyteller")
         .instructions("Write a very long story.")
         .model("local/test")
