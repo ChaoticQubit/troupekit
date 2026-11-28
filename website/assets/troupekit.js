@@ -8,6 +8,8 @@ const TROUPEKIT_THEME_ICONS =
 const TROUPEKIT_PDF_ICON =
     '<span class="fa-svg"><svg viewBox="0 0 384 512"><path d="M64 0C28.7 0 0 28.7 0 64V448c0 35.3 28.7 64 64 64H320c35.3 0 64-28.7 64-64V160H256c-17.7 0-32-14.3-32-32V0H64zM256 0V128H384L256 0zM216 232V334.1l31-31c9.4-9.4 24.6-9.4 33.9 0s9.4 24.6 0 33.9l-72 72c-9.4 9.4-24.6 9.4-33.9 0l-72-72c-9.4-9.4-9.4-24.6 0-33.9s24.6-9.4 33.9 0l31 31V232c0-13.3 10.7-24 24-24s24 10.7 24 24z"/></svg></span>' +
     '<span class="label">PDF</span>';
+const TROUPEKIT_CLOSE_ICON =
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 
 /**
  * Puts one of the two site themes on the page. Light saves 'rust' under
@@ -93,5 +95,77 @@ function troupekitPdfLink() {
     }
 }
 
+/**
+ * Copies the theme class from html onto body and keeps it in step, so the
+ * page stays themed when a host document replaces or wraps the html element.
+ * Input: none. Output: none; body carries the same theme class as html.
+ */
+function troupekitMirrorTheme() {
+    const html = document.documentElement;
+    const all = [...TROUPEKIT_THEMES, ...TROUPEKIT_STOCK_THEMES];
+    function sync() {
+        const theme = all.find((name) => html.classList.contains(name)) ?? 'rust-dark';
+        if (!document.body.classList.contains(theme)) {
+            document.body.classList.remove(...all);
+            document.body.classList.add(theme);
+        }
+    }
+    sync();
+    new MutationObserver(sync).observe(html, { attributes: true, attributeFilter: ['class'] });
+}
+
+/**
+ * Opens the sidebar at every width unless the reader closed it, which
+ * book.js saves as mdbook-sidebar = hidden. Adds a close button in the
+ * sidebar header and a backdrop that closes it; both show only on narrow
+ * screens, where the sidebar lies over the page. Input: none. Output: none.
+ */
+function troupekitSidebar() {
+    const html = document.documentElement;
+    const box = document.getElementById('mdbook-sidebar-toggle-anchor');
+    const sidebar = document.getElementById('mdbook-sidebar');
+    const toggle = document.getElementById('mdbook-sidebar-toggle');
+    console.assert(box !== null && sidebar !== null && toggle !== null, 'mdBook 0.5 sidebar');
+    let saved = null;
+    try {
+        saved = localStorage.getItem('mdbook-sidebar');
+    } catch (e) {
+        console.debug('sidebar state not read', e);
+    }
+    if (saved !== 'hidden' && !(box.checked && html.classList.contains('sidebar-visible') && sidebar.style.display !== 'none')) {
+        html.classList.add('troupekit-no-motion');
+        box.checked = true;
+        html.classList.add('sidebar-visible');
+        sidebar.style.display = '';
+        sidebar.setAttribute('aria-hidden', 'false');
+        toggle.setAttribute('aria-expanded', 'true');
+        sidebar.querySelectorAll('a').forEach((link) => link.setAttribute('tabIndex', 0));
+        requestAnimationFrame(() => requestAnimationFrame(() => html.classList.remove('troupekit-no-motion')));
+    }
+    function close() {
+        if (box.checked) {
+            toggle.click();
+        }
+    }
+    const head = document.createElement('div');
+    head.className = 'troupekit-sidebar-head';
+    head.innerHTML = '<span>Contents</span>';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.id = 'troupekit-sidebar-close';
+    button.title = 'Close table of contents';
+    button.setAttribute('aria-label', 'Close table of contents');
+    button.innerHTML = TROUPEKIT_CLOSE_ICON;
+    button.addEventListener('click', close);
+    head.append(button);
+    sidebar.prepend(head);
+    const backdrop = document.createElement('div');
+    backdrop.id = 'troupekit-backdrop';
+    backdrop.addEventListener('click', close);
+    sidebar.after(backdrop);
+}
+
+troupekitMirrorTheme();
 troupekitThemeSwitch();
 troupekitPdfLink();
+troupekitSidebar();
