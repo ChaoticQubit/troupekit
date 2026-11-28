@@ -19,7 +19,7 @@ Every page is tool-neutral Markdown with front matter `title` and `description` 
 
 | Page | File | Sources |
 |---|---|---|
-| Agents and personas | `concepts/agents.md` | `crates/troupekit-kit/src/agent.rs`, `crates/troupekit-macros/src/agent.rs`, `crates/troupekit-agent/` |
+| Agents and personas | `concepts/agents-and-personas.md` | `crates/troupekit-kit/src/agent.rs`, `crates/troupekit-macros/src/agent.rs`, `crates/troupekit-agent/` |
 | Tools | `concepts/tools.md` | `crates/troupekit-kit/src/tool.rs`, `crates/troupekit-macros/src/tool.rs`, `crates/troupekit-tools/` |
 | Models and providers | `concepts/models.md` | `catalog/providers.toml`, `crates/troupekit-providers/`, `crates/troupekit-kit/src/model.rs` |
 | Local models and routing | `concepts/local.md` | `crates/troupekit-local/`, `crates/troupekit-kit/src/local.rs`, `crates/troupekit-kit/src/route.rs` |

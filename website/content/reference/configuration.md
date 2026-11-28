@@ -44,7 +44,7 @@ Source: `crates/troupekit-agent/src/persona.rs`, unit test constant `FULL`
 | `tools` | tool names, 1 to 64 of `[A-Za-z0-9_-]`, no repeats | none |
 | `guardrails` | rules added to the system prompt, not blank | none |
 | `evals` | eval calls such as `min_items(sources, 1)` or `judge('Plan is safe', 7)` | none |
-| `[output]` | typed output fields, see [Agents and personas](../concepts/agents.md) | plain text |
+| `[output]` | typed output fields, see [Agents and personas](../concepts/agents-and-personas.md) | plain text |
 | `max_turns` | 2 to 50 | 8 |
 | `max_tokens` | 1 to 200 000 | 4096 |
 | `budget` | `{ call_usd, run_usd }` in dollars | no budget |

@@ -107,6 +107,6 @@ cargo run -p troupekit --example tool_agent
 
 ## Next
 
-- [Agents and personas](concepts/agents.md): every agent setting.
+- [Agents and personas](concepts/agents-and-personas.md): every agent setting.
 - [Tools](concepts/tools.md): tool fns, the `tool(..)` form, web and HTTP tools.
 - [Guides](guides/hello.md): one page per example.

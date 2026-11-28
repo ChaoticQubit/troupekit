@@ -15,7 +15,7 @@ Yes, with the `llama` feature: give it a local model with `.local(..)` and leave
 
 ## Can I test an agent without an API key?
 
-Yes. `.model_client(m)` serves the model selector from any `Arc<dyn Model>`, such as the scripted `FnModel` in `troupekit_graph::testing`. It needs no key and no network. See [Agents and personas](concepts/agents.md).
+Yes. `.model_client(m)` serves the model selector from any `Arc<dyn Model>`, such as the scripted `FnModel` in `troupekit_graph::testing`. It needs no key and no network. See [Agents and personas](concepts/agents-and-personas.md).
 
 ## Where does my data go?
 
