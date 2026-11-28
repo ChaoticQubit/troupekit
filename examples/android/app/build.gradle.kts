@@ -31,5 +31,6 @@ kotlin {
 }
 
 dependencies {
+    implementation("dev.troupekit:troupekit-android")
     testImplementation(kotlin("test"))
 }

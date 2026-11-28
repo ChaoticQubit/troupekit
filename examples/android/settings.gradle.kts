@@ -15,4 +15,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "troupekit-demo"
+includeBuild("../../bindings/kotlin")
 include(":app", ":e2e")

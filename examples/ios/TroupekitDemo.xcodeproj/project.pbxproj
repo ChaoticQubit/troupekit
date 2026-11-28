@@ -20,10 +20,15 @@
 		B42F27334969C573275632F9 = {isa = PBXFileSystemSynchronizedRootGroup; path = TroupekitDemo; sourceTree = "<group>"; };
 		40997D56D89FBB34C6712A37 = {isa = PBXFileSystemSynchronizedRootGroup; path = TroupekitDemoUITests; sourceTree = "<group>"; };
 
+		82EDB8A8B7FD94EEC69AF1E1 = {isa = PBXBuildFile; productRef = 8D4D4BCD43775579F0874160; };
+		30836ED93C0234470A4E02D2 = {isa = PBXBuildFile; productRef = CA1191D92C99E1B5D5D1336D; };
+
 		3029F5EB943F994734CBE700 = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				82EDB8A8B7FD94EEC69AF1E1,
+				30836ED93C0234470A4E02D2,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -72,6 +77,8 @@
 			);
 			name = TroupekitDemo;
 			packageProductDependencies = (
+				8D4D4BCD43775579F0874160,
+				CA1191D92C99E1B5D5D1336D,
 			);
 			productName = TroupekitDemo;
 			productReference = 900D9B32875B79D8C7CA1434;
@@ -126,6 +133,9 @@
 			);
 			mainGroup = 499AD7F59543D813A40ABFFF;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E6EAA1008C78DCE4D0DBB8A9,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 4B9A73BB92F52BF2B2858ECE;
 			projectDirPath = "";
@@ -313,6 +323,22 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
+		};
+
+		E6EAA1008C78DCE4D0DBB8A9 = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../..;
+		};
+
+		8D4D4BCD43775579F0874160 = {
+			isa = XCSwiftPackageProductDependency;
+			package = E6EAA1008C78DCE4D0DBB8A9;
+			productName = Troupekit;
+		};
+		CA1191D92C99E1B5D5D1336D = {
+			isa = XCSwiftPackageProductDependency;
+			package = E6EAA1008C78DCE4D0DBB8A9;
+			productName = TroupekitApple;
 		};
 	};
 	rootObject = BFC72D182AEA9C081839521B;
