@@ -1,0 +1,37 @@
+name: repo
+
+on:
+  pull_request:
+
+concurrency:
+  group: repo-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  leaks:
+    name: leaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: guard test
+        run: sh scripts/check-leaks-test.sh
+      - name: no internal files
+        run: sh scripts/check-leaks.sh
+
+  commits:
+    name: commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: check test
+        run: sh scripts/check-commits-test.sh
+      - name: conventional commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: sh scripts/check-commits.sh "$BASE" "$HEAD"
