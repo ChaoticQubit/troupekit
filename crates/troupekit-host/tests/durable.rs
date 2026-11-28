@@ -248,8 +248,9 @@ async fn fork_enqueues_a_new_run_from_any_step() {
     assert_eq!(runner.fork(unknown, 0).await.unwrap_err(), HostError::NoCheckpoint(unknown));
 }
 
-/// Wraps an in-memory store and fails every `save_branch` with a store
-/// error, like a full disk. Every other call goes to the wrapped store.
+/// Wraps an in-memory store and fails the `save_branch` of nodes `left`
+/// and `right` with a store error, like a full disk. Every other call,
+/// the engine's own seq reserve included, goes to the wrapped store.
 /// Used to prove a failed branch write reschedules without a save.
 struct FailingBranches(Arc<InMemCheckpoints>);
 
@@ -264,8 +265,11 @@ impl CheckpointStore for FailingBranches {
     async fn history(&self, run_id: RunId) -> Result<Vec<Checkpoint>, CoreError> {
         self.0.history(run_id).await
     }
-    async fn save_branch(&self, _run_id: RunId, _step: u64, _write: BranchWrite) -> Result<bool, CoreError> {
-        Err(CoreError::Store("disk full".into()))
+    async fn save_branch(&self, run_id: RunId, step: u64, write: BranchWrite) -> Result<bool, CoreError> {
+        if matches!(write.node(), "left" | "right") {
+            return Err(CoreError::Store("disk full".into()));
+        }
+        self.0.save_branch(run_id, step, write).await
     }
     async fn branch_writes(&self, run_id: RunId, step: u64) -> Result<Vec<BranchWrite>, CoreError> {
         self.0.branch_writes(run_id, step).await
@@ -286,7 +290,8 @@ async fn branch_write_error_reschedules_without_saving() {
     assert_ne!(saved.state().get("a"), Some(&json!("A")), "no checkpoint holds the failed step");
     assert_ne!(saved.state().get("b"), Some(&json!("B")));
     let ran = (fast.lock().unwrap().len(), slow.lock().unwrap().len());
-    assert!(ran.0 <= 1 && ran.1 <= 1, "{ran:?}");
+    assert_eq!(ran.0, 1, "the fan-out step ran and its first branch write failed");
+    assert!(ran.1 <= 1, "{ran:?}");
     s.clock.advance(1_000);
     let report = s.runner().tick(TickOptions::default()).await.unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
