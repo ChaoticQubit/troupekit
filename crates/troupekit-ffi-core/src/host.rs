@@ -45,8 +45,7 @@ pub trait TraceListener: Send + Sync {
 /// Input: the host listener. Output: the sink for `trace_to`.
 pub(crate) fn trace_sink(listener: Arc<dyn TraceListener>) -> Arc<dyn TraceSink> {
     Arc::new(CallbackSink::new(move |line: &str| {
-        assert!(!line.contains('\n'), "a trace record is one line");
-        listener.on_record(line.to_owned());
+        listener.on_record(line.to_owned())
     }))
 }
 
