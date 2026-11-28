@@ -23,6 +23,7 @@ pub mod __private;
 pub use agent::Agent;
 pub use built::{BuiltAgent, Input, RunOutcome};
 pub use error::KitError;
+pub use flow::Trigger;
 pub use graph::{BuiltGraph, Graph, GraphReport};
 #[cfg(feature = "knowledge")]
 pub use knowledge::Knowledge;

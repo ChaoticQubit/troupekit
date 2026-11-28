@@ -1,5 +1,5 @@
 use crate::common::echo_model;
-use troupekit::{tool, Agent, Graph};
+use troupekit::{tool, Agent, Graph, Trigger};
 use troupekit_graph::Workflow;
 
 /// The workflow a two-node chain built at 2343a4f, frozen as TOML.
@@ -137,4 +137,72 @@ async fn join_of_unknown_branch_fails_build() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("unknown node `ghost`"), "{err}");
+}
+
+/// Shows which branch reached an any-join; a dropped branch reads null.
+#[tool]
+fn pick_first(upper: Option<String>, count: Option<String>) -> String {
+    let show = |v: Option<String>| v.unwrap_or_else(|| "-".into());
+    format!("{}|{}", show(upper), show(count))
+}
+
+#[tokio::test]
+async fn join_any_takes_first() {
+    let built = Graph::new("race")
+        .step("clean", trim_input)
+        .step("upper", upper_clean)
+        .step("count", count_clean)
+        .step("pick", pick_first)
+        .parallel("clean", ["upper", "count"])
+        .join_any("first", ["upper", "count"])
+        .edge("first", "pick")
+        .build()
+        .await
+        .unwrap();
+    let report = built.run_with("  hi  ").await.unwrap();
+    assert_eq!(
+        report.output(),
+        &serde_json::json!("HI|-"),
+        "the lowest branch continues"
+    );
+    assert!(
+        report.state().get("count").is_none_or(|v| v.is_null()),
+        "{:?}",
+        report.state()
+    );
+    let pick = built
+        .workflow()
+        .nodes
+        .iter()
+        .find(|n| n.id == "pick")
+        .unwrap();
+    assert_eq!(pick.reads, ["upper", "count"]);
+}
+
+#[tokio::test]
+async fn after_names_the_trigger() {
+    let all = Graph::new("all")
+        .step("clean", trim_input)
+        .step("upper", upper_clean)
+        .step("count", count_clean)
+        .step("report", report_both)
+        .parallel("clean", ["upper", "count"])
+        .after("both", ["upper", "count"], Trigger::All)
+        .edge("both", "report")
+        .run("  hi  ")
+        .await
+        .unwrap();
+    assert_eq!(all, serde_json::json!("HI:2"));
+    let any = Graph::new("any")
+        .step("clean", trim_input)
+        .step("upper", upper_clean)
+        .step("count", count_clean)
+        .step("pick", pick_first)
+        .parallel("clean", ["upper", "count"])
+        .after("first", ["upper", "count"], Trigger::Any)
+        .edge("first", "pick")
+        .run("  hi  ")
+        .await
+        .unwrap();
+    assert_eq!(any, serde_json::json!("HI|-"));
 }

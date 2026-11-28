@@ -20,13 +20,25 @@ pub(crate) enum Part {
     },
 }
 
+/// When the node after `Graph::after` runs: `All` once every listed
+/// branch arrives (`join`), `Any` as soon as the first one does
+/// (`join_any`). The default is `All`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Trigger {
+    #[default]
+    All,
+    Any,
+}
+
 /// The checked shape of a graph with parts: every node and join in
 /// topological order, the keys each agent or step node reads, the edges
-/// (the last node's edge goes to `end`) and the node whose output is the
-/// answer. Built by `Graph::topology`.
+/// (the last node's edge goes to `end`), the keys an any-join may leave
+/// unset, and the node whose output is the answer. Built by `topology`.
 pub(crate) struct Topology {
     pub(crate) order: Vec<String>,
     pub(crate) reads: BTreeMap<String, Vec<String>>,
+    pub(crate) nullable: BTreeSet<String>,
     pub(crate) edges: Vec<(String, String)>,
     pub(crate) last: String,
 }
@@ -63,6 +75,38 @@ impl Graph {
             any: false,
         });
         self
+    }
+
+    /// Adds any-join `id`: the first branch in `from` to arrive continues
+    /// on its one `.edge` and the others are dropped (on a tie, the branch
+    /// listed first in `parallel` wins). The node after it reads each branch
+    /// by node id; a dropped branch reads null, so steps take `Option`.
+    pub fn join_any<I, S>(mut self, id: impl Into<String>, from: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let from = from.into_iter().map(Into::into).collect();
+        self.parts.push(Part::Join {
+            id: id.into(),
+            from,
+            any: true,
+        });
+        self
+    }
+
+    /// Adds join `id` over the branches `from` that fires on `trigger`:
+    /// `Trigger::All` is `join`, `Trigger::Any` is `join_any`.
+    /// Returns the builder.
+    pub fn after<I, S>(self, id: impl Into<String>, from: I, trigger: Trigger) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        match trigger {
+            Trigger::All => self.join(id, from),
+            Trigger::Any => self.join_any(id, from),
+        }
     }
 
     /// Checks the nodes, joins and edges of a graph with parts and orders
@@ -181,6 +225,14 @@ impl Graph {
             }
             reads.insert(id.to_string(), keys);
         }
+        let mut nullable = BTreeSet::new();
+        for part in &self.parts {
+            if let Part::Join { id, any: true, .. } = part {
+                let mut keys = Vec::new();
+                expand(id, &joins, &mut keys, 0);
+                nullable.extend(keys);
+            }
+        }
         edges.push((last.clone(), END.to_string()));
         assert_eq!(
             order.len(),
@@ -190,6 +242,7 @@ impl Graph {
         Ok(Topology {
             order,
             reads,
+            nullable,
             edges,
             last,
         })
@@ -225,7 +278,12 @@ impl Graph {
                         .collect();
                     node.insert("reads".into(), Toml::Array(reads));
                     node.insert("writes".into(), Toml::String(id.clone()));
-                    state.insert(id.clone(), Toml::String("string".into()));
+                    let kind = if topo.nullable.contains(id) {
+                        "string?"
+                    } else {
+                        "string"
+                    };
+                    state.insert(id.clone(), Toml::String(kind.into()));
                 }
             }
             nodes.push(Toml::Table(node));
