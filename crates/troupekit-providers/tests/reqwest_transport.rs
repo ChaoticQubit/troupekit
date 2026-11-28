@@ -124,3 +124,25 @@ async fn honours_the_request_method() {
         .unwrap()
         .starts_with("PUT /v1/messages HTTP/1.1\r\n"));
 }
+
+#[tokio::test]
+async fn a_cross_origin_redirect_is_returned_not_followed() {
+    let other = TcpListener::bind("127.0.0.1:0").unwrap();
+    other.set_nonblocking(true).unwrap();
+    let reply = format!(
+        "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://{}/steal\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        other.local_addr().unwrap()
+    );
+    let (url, server) = serve_once(Box::leak(reply.into_boxed_str()), Duration::ZERO);
+    let t = ReqwestTransport::new().unwrap();
+    let reply = t.send(post(&url)).await.unwrap();
+    assert_eq!(reply.status, 307);
+    assert!(reply.url.ends_with("/v1/messages"), "{}", reply.url);
+    server.join().unwrap();
+    let err = other.accept().unwrap_err();
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock,
+        "the redirect was followed"
+    );
+}

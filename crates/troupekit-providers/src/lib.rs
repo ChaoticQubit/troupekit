@@ -9,6 +9,7 @@ pub mod fold;
 pub mod middleware;
 pub mod model;
 pub mod request;
+pub mod route;
 #[cfg(feature = "reqwest")]
 pub mod reqwest_transport;
 pub mod sse;
@@ -23,3 +24,5 @@ pub use middleware::{FallbackModel, MeteredModel, RetryModel, RetryPolicy};
 pub use model::{Endpoint, HttpModel, Model};
 pub use request::{CompletionRequest, CompletionResponse, Delta, StopReason};
 pub use transport::Transport;
+
+use troupekit_trace as _;

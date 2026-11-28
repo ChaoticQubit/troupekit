@@ -67,6 +67,12 @@ pub struct Agent {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    pub(crate) trace: crate::trace::TraceConfig,
+    pub(crate) route: crate::route::RouteConfig,
+    #[cfg(feature = "local")]
+    pub(crate) local: Option<crate::local::LocalChoice>,
+    #[cfg(feature = "local")]
+    pub(crate) download: bool,
 }
 
 impl Agent {
@@ -104,6 +110,12 @@ impl Agent {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            trace: crate::trace::TraceConfig::default(),
+            route: crate::route::RouteConfig::default(),
+            #[cfg(feature = "local")]
+            local: None,
+            #[cfg(feature = "local")]
+            download: false,
         }
     }
 
@@ -309,9 +321,9 @@ impl Agent {
         self
     }
 
-    /// Records usage in `ledger` for period limits.
-    /// Defaults to an in-memory ledger per built agent.
-    /// Returns the builder.
+    /// Records usage in `ledger` for period limits and a route's daily
+    /// cloud spend. Default: in memory per built agent, lost on restart;
+    /// pass one durable ledger to agents that share a route's cap.
     pub fn ledger(mut self, ledger: Arc<dyn UsageLedger>) -> Self {
         self.ledger = Some(ledger);
         self
@@ -353,6 +365,26 @@ impl Agent {
     /// Fails with the first problem: settings, tools, persona, laws,
     /// evals, model, key or storage. Makes no model call.
     pub async fn build(self) -> Result<BuiltAgent, KitError> {
+        let secrets: Vec<Secret> = self.trace_secret().into_iter().collect();
+        let traced = self.trace.open(&self.name, &self.name, &secrets)?;
+        match traced {
+            Some(t) => {
+                let tracer = t.tracer.clone();
+                tracer.in_scope(self.build_in(Some(t))).await
+            }
+            None => self.build_in(None).await,
+        }
+    }
+
+    pub(crate) fn trace_secret(&self) -> Option<Secret> {
+        crate::model::trace_secret(
+            self.model.as_deref().unwrap_or_default(),
+            self.api_key.clone(),
+            self.api_key_env.as_deref(),
+        )
+    }
+
+    async fn build_in(self, traced: Option<crate::trace::Traced>) -> Result<BuiltAgent, KitError> {
         if self.retries > MAX_RETRIES {
             return Err(KitError::config(
                 &self.name,
@@ -362,14 +394,20 @@ impl Agent {
                 ),
             ));
         }
+        #[cfg(feature = "local")]
+        let this = self.load_local(&mut crate::local::Loads::new()).await?;
+        #[cfg(not(feature = "local"))]
+        let this = self;
+        let ledger = this
+            .ledger
+            .clone()
+            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
         #[cfg(feature = "knowledge")]
         let (this, preamble) = {
-            self.prepare(None)?;
-            crate::memory::attach(self).await?
+            this.prepare(None, &ledger)?;
+            crate::memory::attach(this).await?
         };
-        #[cfg(not(feature = "knowledge"))]
-        let this = self;
-        let prepared = this.prepare(None)?;
+        let prepared = this.prepare(None, &ledger)?;
         let mut io = SimpleIo::new(prepared.registry);
         io.models
             .insert(prepared.persona.model.clone(), prepared.handle);
@@ -377,10 +415,7 @@ impl Agent {
             io.evals.register(eval, f.clone())?;
         }
         io.events = this.events.clone().unwrap_or_else(|| Arc::new(Discard));
-        io.ledger = this
-            .ledger
-            .clone()
-            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
+        io.ledger = ledger;
         let probe = vec![Message::text(Role::User, "build check")];
         AgentRun::new(&prepared.persona, probe, this.limits.clone(), &io).await?;
         let store = this.storage.open().await?;
@@ -391,7 +426,8 @@ impl Agent {
             store,
             this.retries,
             prepared.laws,
-        );
+        )
+        .with_trace(traced);
         #[cfg(feature = "knowledge")]
         let built = built.with_preamble(preamble);
         Ok(built)
@@ -404,11 +440,36 @@ impl Agent {
             Some("laws; set them on the graph")
         } else if self.ledger.is_some() {
             Some("ledger; set it on the graph")
+        } else if self.trace.is_on() {
+            Some("tracing; set it on the graph")
         } else if self.has_context() {
             Some("memory or knowledge; graphs do not take them in 0.2")
         } else {
             None
         }
+    }
+
+    #[cfg(feature = "knowledge")]
+    fn check_private_knowledge(&self) -> Result<(), KitError> {
+        match &self.knowledge {
+            Some(k)
+                if self.route.private
+                    && !k.on_device
+                    && !(k.embedder.is_none() && self.route.local_only) =>
+            {
+                Err(KitError::config(
+                    &self.name,
+                    "a private agent cannot send documents to a cloud embedder: \
+                 use Knowledge::dir(..).on_device_embedder(..)",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    #[cfg(not(feature = "knowledge"))]
+    fn check_private_knowledge(&self) -> Result<(), KitError> {
+        Ok(())
     }
 
     #[cfg(feature = "knowledge")]
@@ -436,12 +497,36 @@ impl Agent {
             && self.api_key == other.api_key
             && self.api_key_env == other.api_key_env
             && self.catalog == other.catalog
+            && self.route.same(&other.route)
+    }
+
+    #[cfg(all(feature = "knowledge", feature = "local"))]
+    pub(crate) async fn knowledge_embedder(
+        &self,
+        k: &crate::knowledge::Knowledge,
+    ) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
+        match &k.local {
+            Some(choice) => self.local_embedder(choice).await,
+            None => self.default_embedder(),
+        }
+    }
+
+    #[cfg(all(feature = "knowledge", not(feature = "local")))]
+    pub(crate) async fn knowledge_embedder(
+        &self,
+        _k: &crate::knowledge::Knowledge,
+    ) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
+        self.default_embedder()
     }
 
     #[cfg(feature = "knowledge")]
     pub(crate) fn default_embedder(
         &self,
     ) -> Result<Arc<dyn troupekit_context::embed::Embedder>, KitError> {
+        #[cfg(feature = "local")]
+        if let (true, Some(model)) = (self.route.local_only, &self.route.local_model) {
+            return crate::local::embedder_of(&self.name, model);
+        }
         crate::model::default_embedder(ModelChoice {
             agent: &self.name,
             selector: self.model.as_deref().unwrap_or_default(),
@@ -458,7 +543,32 @@ impl Agent {
         &self.name
     }
 
-    pub(crate) fn prepare(&self, model_key: Option<&str>) -> Result<Prepared, KitError> {
+    #[cfg(feature = "local")]
+    pub(crate) fn selector(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn set_selector(&mut self, selector: String) {
+        assert!(self.model.is_none(), "an explicit .model(..) is kept");
+        self.model = Some(selector);
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn has_client(&self) -> bool {
+        self.model_client.is_some()
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn transport_handle(&self) -> Option<Arc<dyn Transport>> {
+        self.transport.clone()
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        model_key: Option<&str>,
+        ledger: &Arc<dyn UsageLedger>,
+    ) -> Result<Prepared, KitError> {
         let name = self.name.as_str();
         let Some(instructions) = self.instructions.as_deref() else {
             return Err(KitError::config(
@@ -472,6 +582,14 @@ impl Agent {
                 "needs a model: call .model(\"vendor/model\")",
             ));
         };
+        #[cfg(not(feature = "local"))]
+        if selector.starts_with("local/") {
+            return Err(KitError::config(
+                name,
+                format!("model `{selector}` needs the `local` feature"),
+            ));
+        }
+        self.check_private_knowledge()?;
         let mut registry = ToolRegistry::new();
         for tool in &self.tools {
             registry.register(tool.clone())?;
@@ -479,17 +597,20 @@ impl Agent {
         let tool_names: Vec<String> = registry.specs().into_iter().map(|s| s.name).collect();
         let (persona, persona_text) =
             self.persona(instructions, model_key.unwrap_or(selector), &tool_names)?;
+        self.route.check_judges(name, &persona)?;
         let laws = Laws::check(name, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let catalog = self.catalog.as_ref().unwrap_or_else(|| builtin_catalog());
-        let handle = resolve(ModelChoice {
-            agent: name,
-            selector,
-            catalog,
-            client: self.model_client.clone(),
-            price: self.price,
-            api_key: self.api_key.clone(),
-            api_key_env: self.api_key_env.as_deref(),
-            transport: self.transport.clone(),
+        let handle = self.route.handle(name, ledger, || {
+            resolve(ModelChoice {
+                agent: name,
+                selector,
+                catalog,
+                client: self.model_client.clone(),
+                price: self.price,
+                api_key: self.api_key.clone(),
+                api_key_env: self.api_key_env.as_deref(),
+                transport: self.transport.clone(),
+            })
         })?;
         Ok(Prepared {
             persona,
@@ -569,6 +690,10 @@ impl fmt::Debug for Agent {
             .field("api_key_env", &self.api_key_env)
             .field("model_client", &self.model_client.is_some())
             .field("retries", &self.retries)
+            .field("private", &self.route.private)
+            .field("tier", &self.route.tier)
+            .field("route", &self.route.has_route())
+            .field("local_only", &self.route.local_only)
             .finish_non_exhaustive()
     }
 }

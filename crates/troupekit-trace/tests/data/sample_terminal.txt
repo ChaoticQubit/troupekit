@@ -1,0 +1,9 @@
+trace demo 00000000000000ab
+agent.run [agents] ok 1.000ms run=r1
+  agent.step [agents] err 400us err=bad
+    law.check [laws] event held=false
+  tool.call [tools] open
+
+agent.run                |#############|
+  agent.step             | #####       |
+  tool.call              |       ######|

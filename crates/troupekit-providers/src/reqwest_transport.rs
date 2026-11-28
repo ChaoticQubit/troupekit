@@ -5,8 +5,10 @@ use troupekit_core::error::ProviderError;
 
 /// The default HTTP transport for model providers, on reqwest with rustls.
 /// A connect timeout and a per-read timeout turn a silent server into
-/// `Timeout`; other failures are `Network`, with URLs stripped. It does not
-/// guard addresses: give tools a guarded transport instead.
+/// `Timeout`; other failures are `Network`, with URLs stripped. Redirects
+/// are never followed, so a key header never reaches another host; a 3xx
+/// comes back as the reply. It does not guard addresses: give tools a
+/// guarded transport instead.
 #[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
@@ -21,12 +23,13 @@ impl ReqwestTransport {
     }
 
     /// Builds a transport with the given `connect` timeout and per-read
-    /// `read` timeout.
+    /// `read` timeout, with redirect following off.
     /// Returns `Network` when the HTTP client cannot start.
     pub fn with_timeouts(connect: Duration, read: Duration) -> Result<Self, ProviderError> {
         let client = reqwest::Client::builder()
             .connect_timeout(connect)
             .read_timeout(read)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(map_error)?;
         Ok(Self { client })

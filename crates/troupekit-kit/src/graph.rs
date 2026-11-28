@@ -4,10 +4,12 @@ use crate::error::KitError;
 use crate::laws::Laws;
 use crate::storage::Storage;
 use crate::tool::AsTool;
+use crate::trace::root_span;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,9 +21,11 @@ use troupekit_core::clock::Clock;
 use troupekit_core::event::Usage;
 use troupekit_core::ids::RunId;
 use troupekit_core::inmem::InMemCheckpoints;
+use troupekit_core::secret::Secret;
 use troupekit_core::store::CheckpointStore;
 use troupekit_graph::{GraphOutcome, GraphRun, SimpleGraphIo, Workflow};
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSpec};
+use troupekit_trace::Trace;
 
 const MAX_NODES: usize = 64;
 const MAX_GRAPH_RETRIES: u32 = 50;
@@ -53,6 +57,8 @@ pub struct Graph {
     law_paths: Vec<PathBuf>,
     inline_laws: Vec<String>,
     auto_laws: bool,
+    pub(crate) trace: crate::trace::TraceConfig,
+    pub(crate) private: bool,
 }
 
 impl Graph {
@@ -72,6 +78,8 @@ impl Graph {
             law_paths: Vec::new(),
             inline_laws: Vec::new(),
             auto_laws: true,
+            trace: crate::trace::TraceConfig::default(),
+            private: false,
         }
     }
 
@@ -117,9 +125,10 @@ impl Graph {
         self
     }
 
-    /// Sets the usage ledger that period limits (`scope`, `user`) count in.
-    /// Defaults to a fresh in-memory ledger per build; pass a durable one
-    /// so period caps survive rebuilds and restarts.
+    /// Sets the usage ledger that period limits (`scope`, `user`) and the
+    /// agent nodes' route daily cloud spend count in. Defaults to a fresh
+    /// in-memory ledger per build; pass a durable one so caps survive
+    /// rebuilds and restarts.
     pub fn ledger(mut self, ledger: Arc<dyn UsageLedger>) -> Self {
         self.ledger = Some(ledger);
         self
@@ -170,6 +179,46 @@ impl Graph {
     /// Fails with the first problem found.
     pub async fn build(self) -> Result<BuiltGraph, KitError> {
         let owner = format!("graph:{}", self.name);
+        let secrets: Vec<Secret> = self
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| match node {
+                Node::Agent(agent) => agent.trace_secret(),
+                Node::Step(_) => None,
+            })
+            .collect();
+        let traced = self.trace.open(&owner, &self.name, &secrets)?;
+        match traced {
+            Some(t) => {
+                let tracer = t.tracer.clone();
+                tracer.in_scope(self.build_in(owner, Some(t))).await
+            }
+            None => self.build_in(owner, None).await,
+        }
+    }
+
+    async fn build_in(
+        mut self,
+        owner: String,
+        traced: Option<crate::trace::Traced>,
+    ) -> Result<BuiltGraph, KitError> {
+        if self.private {
+            for (_, node) in &mut self.nodes {
+                if let Node::Agent(agent) = node {
+                    agent.route.private = true;
+                }
+            }
+        }
+        #[cfg(feature = "local")]
+        {
+            let mut loads = crate::local::Loads::new();
+            for (_, node) in &mut self.nodes {
+                if let Node::Agent(agent) = node {
+                    let loaded = agent.as_ref().clone().load_local(&mut loads).await?;
+                    **agent = loaded;
+                }
+            }
+        }
         let fail = |m: String| KitError::config(&owner, m);
         if self.retries > MAX_GRAPH_RETRIES {
             return Err(fail(format!(
@@ -185,6 +234,10 @@ impl Graph {
         let mut files: HashMap<String, String> = HashMap::new();
         let mut keys: HashMap<String, (String, &Agent)> = HashMap::new();
         let mut evals: HashMap<String, EvalFn> = HashMap::new();
+        let ledger: Arc<dyn UsageLedger> = self
+            .ledger
+            .clone()
+            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
         for (i, id) in order.iter().enumerate() {
             let feeder = feeder(&order, i);
             match self.node(id) {
@@ -206,7 +259,7 @@ impl Graph {
                             key
                         }
                     };
-                    let prepared = agent.prepare(Some(&key))?;
+                    let prepared = agent.prepare(Some(&key), &ledger)?;
                     for tool in &prepared.tools {
                         share(&mut registry, tool.clone()).map_err(fail)?;
                     }
@@ -258,10 +311,7 @@ impl Graph {
         }
         agent_io.tools = registry;
         agent_io.events = Arc::new(Discard);
-        agent_io.ledger = self
-            .ledger
-            .clone()
-            .unwrap_or_else(|| Arc::new(InMemoryLedger::default()));
+        agent_io.ledger = ledger;
         let agent_io: Arc<dyn AgentIo> = Arc::new(agent_io);
         let loader = PersonaLoader::new(vec![Arc::new(MemorySource::new("graph", files))]);
         let io = SimpleGraphIo::new(agent_io, loader);
@@ -283,6 +333,7 @@ impl Graph {
                 store,
                 last,
                 laws,
+                trace: traced,
             }),
         })
     }
@@ -435,6 +486,7 @@ impl fmt::Debug for Graph {
             .field("storage", &self.storage)
             .field("retries", &self.retries)
             .field("ledger", &self.ledger.is_some())
+            .field("private", &self.private)
             .finish_non_exhaustive()
     }
 }
@@ -450,6 +502,7 @@ pub struct GraphReport {
     usage: Usage,
     steps: u64,
     run_id: RunId,
+    trace_path: Option<PathBuf>,
 }
 
 impl GraphReport {
@@ -487,6 +540,13 @@ impl GraphReport {
     pub fn run_id(&self) -> RunId {
         self.run_id
     }
+
+    /// Returns the trace file this run was written to.
+    /// `None` when tracing is off or goes to a custom sink.
+    /// Every run of one built graph shares the file.
+    pub fn trace_path(&self) -> Option<&Path> {
+        self.trace_path.as_deref()
+    }
 }
 
 /// A graph that passed every `build` check, ready to run many times.
@@ -505,9 +565,37 @@ struct Inner {
     store: Option<Arc<dyn CheckpointStore>>,
     last: String,
     laws: Laws,
+    trace: Option<crate::trace::Traced>,
 }
 
 impl BuiltGraph {
+    /// Returns the trace file this graph writes, one root span per run.
+    /// `None` when tracing is off or goes to a custom sink.
+    /// The file is created at `build`.
+    pub fn trace_path(&self) -> Option<&Path> {
+        crate::trace::path_of(&self.inner.trace)
+    }
+
+    async fn traced<T>(
+        &self,
+        run_id: Option<RunId>,
+        work: impl Future<Output = Result<T, KitError>>,
+        id_of: impl Fn(&T) -> RunId,
+    ) -> Result<T, KitError> {
+        let owner = self.inner.workflow.name.as_str();
+        let traced = self.inner.trace.as_ref();
+        root_span(
+            traced,
+            Trace::Graphs,
+            "graph.run",
+            owner,
+            run_id,
+            work,
+            id_of,
+        )
+        .await
+    }
+
     /// Runs the graph once on `input` and returns the last node's output.
     /// Fails with `Failed` or `Paused` when the run ends without one.
     /// Transient failures are retried by the graph engine.
@@ -519,10 +607,16 @@ impl BuiltGraph {
     /// Same failures as `run`.
     /// The run id in the report works with `resume`.
     pub async fn run_with(&self, input: impl Into<String>) -> Result<GraphReport, KitError> {
+        let input = input.into();
+        self.traced(None, self.run_untraced(input), GraphReport::run_id)
+            .await
+    }
+
+    async fn run_untraced(&self, input: String) -> Result<GraphReport, KitError> {
         let inner = &self.inner;
         let mut run = GraphRun::new(
             inner.workflow.clone(),
-            input_state(&input.into()),
+            input_state(&input),
             inner.limits.clone(),
             &inner.io,
         )
@@ -538,6 +632,11 @@ impl BuiltGraph {
     /// the last node's output; a finished run returns it again. Needs
     /// durable storage and a run this same workflow started.
     pub async fn resume(&self, run_id: RunId) -> Result<Value, KitError> {
+        self.traced(Some(run_id), self.resume_untraced(run_id), |_| run_id)
+            .await
+    }
+
+    async fn resume_untraced(&self, run_id: RunId) -> Result<Value, KitError> {
         let inner = &self.inner;
         let Some(store) = &inner.store else {
             return Err(KitError::config(
@@ -622,6 +721,7 @@ impl BuiltGraph {
                         usage: run.usage(),
                         steps: run.steps(),
                         run_id: run.run_id(),
+                        trace_path: self.trace_path().map(Path::to_path_buf),
                     });
                 }
             }

@@ -143,3 +143,29 @@ async fn keyword_store_is_object_safe() {
     assert_eq!(hits[0].meta, f.0);
     assert!(s.search_text("refund", 0, &f).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn inmem_checkpoints_emit_store_spans() {
+    use troupekit_trace::{MemorySink, Trace, TraceSet, Tracer};
+    let sink = Arc::new(MemorySink::default());
+    let tracer = Tracer::builder().categories(TraceSet::none().with(Trace::Store)).sink(sink.clone()).build().unwrap();
+    let s = InMemCheckpoints::default();
+    let run = RunId::new();
+    s.save(Checkpoint { run_id: run, step: 0, state: json!({}) }).await.unwrap();
+    tracer
+        .in_scope(async {
+            s.save(Checkpoint { run_id: run, step: 1, state: json!({}) }).await.unwrap();
+            assert!(s.save(Checkpoint { run_id: run, step: 5, state: json!({}) }).await.is_err());
+            s.latest(run).await.unwrap();
+        })
+        .await;
+    drop(tracer);
+    let records: Vec<serde_json::Value> = sink.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let starts: Vec<&serde_json::Value> = records.iter().filter(|r| r["t"] == "start").collect();
+    let names: Vec<&str> = starts.iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["checkpoint.save", "checkpoint.save", "checkpoint.latest"]);
+    assert!(starts.iter().all(|r| r["cat"] == "store" && r["fields"]["run"] == run.to_string().as_str()));
+    assert_eq!(starts[0]["fields"]["step"], 1);
+    let oks: Vec<bool> = records.iter().filter(|r| r["t"] == "end").map(|r| r["ok"].as_bool().unwrap()).collect();
+    assert_eq!(oks, [true, false, true]);
+}

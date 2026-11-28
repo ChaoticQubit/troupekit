@@ -16,8 +16,9 @@ name = "troupekit"
 path = "src/main.rs"
 
 [dependencies]
-troupekit = { path = "../troupekit", version = "0.2.0", features = ["knowledge"] }
-troupekit-providers = { path = "../troupekit-providers", version = "0.2.0", features = ["embeddings", "reqwest"] }
+troupekit-trace = { path = "../troupekit-trace", version = "0.3.0" }
+troupekit = { path = "../troupekit", version = "0.3.0", features = ["knowledge"] }
+troupekit-providers = { path = "../troupekit-providers", version = "0.3.0", features = ["embeddings", "reqwest"] }
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]

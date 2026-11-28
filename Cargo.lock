@@ -2745,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "troupekit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -2757,14 +2757,16 @@ dependencies = [
  "troupekit-graph",
  "troupekit-host",
  "troupekit-kit",
+ "troupekit-local",
  "troupekit-providers",
  "troupekit-store-sqlite",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-agent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2777,21 +2779,23 @@ dependencies = [
  "troupekit-core",
  "troupekit-providers",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tempfile",
  "tokio",
  "troupekit",
  "troupekit-providers",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-context"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "fastembed",
@@ -2803,23 +2807,25 @@ dependencies = [
  "troupekit-core",
  "troupekit-store-sqlite",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "troupekit-trace",
  "uuid",
 ]
 
 [[package]]
 name = "troupekit-graph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2833,11 +2839,12 @@ dependencies = [
  "troupekit-core",
  "troupekit-providers",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-host"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2849,18 +2856,20 @@ dependencies = [
  "troupekit-graph",
  "troupekit-providers",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-index"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-kit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "schemars",
@@ -2874,19 +2883,38 @@ dependencies = [
  "troupekit-context",
  "troupekit-core",
  "troupekit-graph",
+ "troupekit-local",
  "troupekit-macros",
  "troupekit-providers",
  "troupekit-store-sqlite",
  "troupekit-tools",
+ "troupekit-trace",
+]
+
+[[package]]
+name = "troupekit-local"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "troupekit-context",
+ "troupekit-core",
+ "troupekit-providers",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-macros"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "troupekit-providers"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "reqwest 0.13.5",
@@ -2897,11 +2925,12 @@ dependencies = [
  "toml",
  "troupekit-context",
  "troupekit-core",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-store-sqlite"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "rusqlite",
@@ -2910,11 +2939,12 @@ dependencies = [
  "tokio",
  "troupekit-core",
  "troupekit-index",
+ "troupekit-trace",
 ]
 
 [[package]]
 name = "troupekit-tools"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2927,7 +2957,15 @@ dependencies = [
  "tokio",
  "toml",
  "troupekit-core",
+ "troupekit-trace",
  "url",
+]
+
+[[package]]
+name = "troupekit-trace"
+version = "0.3.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

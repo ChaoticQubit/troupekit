@@ -1,0 +1,1 @@
+{"title": "Person", "description": "A person.", "type": "object", "additionalProperties": false, "properties": {"name": {"type": "string"}, "age": {"type": "integer"}, "ok": {"type": "boolean"}}, "required": ["name", "age", "ok"]}
