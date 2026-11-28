@@ -110,13 +110,21 @@ fn first_call_waits_on(notify: Arc<Notify>) -> impl Fn() -> Option<Arc<Notify>> 
     move || first.swap(false, Ordering::SeqCst).then(|| notify.clone())
 }
 
+/// Returns the node branch writes of step `step` of `id`, leaving out
+/// the engine's event seq reserve, which is kept as a write of node `#seq`.
+/// Lowest branch index first, as the store lists them.
+async fn node_writes(s: &Stack, id: RunId, step: u64) -> Vec<BranchWrite> {
+    let writes = s.checkpoints.branch_writes(id, step).await.unwrap();
+    writes.into_iter().filter(|w| w.node() != "#seq").collect()
+}
+
 /// Waits until the step in flight of `id` holds a branch write from node
-/// `node`, failing after `WAIT`. Returns the branch writes of that step.
+/// `node`, failing after `WAIT`. Returns the node writes of that step.
 async fn wait_for_write(s: &Stack, id: RunId, node: &str) -> Vec<BranchWrite> {
     tokio::time::timeout(WAIT, async {
         loop {
             let step = s.checkpoints.latest(id).await.unwrap().unwrap().step + 1;
-            let writes = s.checkpoints.branch_writes(id, step).await.unwrap();
+            let writes = node_writes(s, id, step).await;
             if writes.iter().any(|w| w.node() == node) {
                 return writes;
             }
@@ -201,7 +209,7 @@ async fn budget_raise_after_crash_keeps_the_finished_branch() {
     let fresh = s.runner();
     fresh.raise_budget(id, Limits::default()).await.unwrap();
     assert_eq!(s.checkpoints.latest(id).await.unwrap().unwrap().step, held + 1);
-    assert_eq!(s.checkpoints.branch_writes(id, held + 1).await.unwrap(), writes, "the bump keeps the carried write");
+    assert_eq!(node_writes(&s, id, held + 1).await, writes, "the bump keeps the carried write");
     s.clock.advance(1_000);
     let report = fresh.tick(TickOptions::default()).await.unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
