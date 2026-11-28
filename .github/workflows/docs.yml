@@ -56,7 +56,6 @@ jobs:
           out="$GITHUB_WORKSPACE/website/build/html"
           google-chrome --headless=new --no-sandbox --disable-gpu \
             --no-pdf-header-footer --run-all-compositor-stages-before-draw \
-            --virtual-time-budget=20000 \
             --print-to-pdf="$out/troupekit.pdf" "file://$out/print.html"
           test -s "$out/troupekit.pdf"
           head -c 5 "$out/troupekit.pdf" | grep -q '%PDF-'
