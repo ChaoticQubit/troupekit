@@ -4,11 +4,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use toml::Value as Toml;
 use troupekit_graph::Flow;
 
-/// One flow part added by a builder method: a fan-out from one node into
-/// parallel branches, or a join that merges branches. Parts turn the
-/// chain into a flow; a graph without parts builds the 0.2 workflow.
+/// One flow part added by a builder method: a fan-out into parallel
+/// branches, a join that merges them, or a human node (an approval when
+/// `routes` is empty, else a question). Parts turn the chain into a flow.
 #[derive(Clone, Debug)]
 pub(crate) enum Part {
+    Human {
+        id: String,
+        prompt: String,
+        routes: Vec<(String, String)>,
+    },
     Parallel {
         from: String,
         to: Vec<String>,
@@ -31,17 +36,22 @@ pub enum Trigger {
     Any,
 }
 
-/// The checked shape of a graph with parts: every node and join in
-/// topological order, the keys each agent or step node reads, the edges
-/// (the last node's edge goes to `end`), the keys an any-join may leave
-/// unset, and the node whose output is the answer. Built by `topology`.
+/// The checked shape of a graph with parts: every node, join and human
+/// node in topological order, the keys each one reads, the edges (each
+/// last node's edge goes to `end`), the keys an any-join may leave unset
+/// and the nodes whose output is the answer. Built by `topology`.
 pub(crate) struct Topology {
     pub(crate) order: Vec<String>,
     pub(crate) reads: BTreeMap<String, Vec<String>>,
+    pub(crate) human_reads: BTreeMap<String, Vec<String>>,
     pub(crate) nullable: BTreeSet<String>,
     pub(crate) edges: Vec<(String, String)>,
-    pub(crate) last: String,
+    pub(crate) lasts: Vec<String>,
 }
+
+const GATE: &str = "__gate";
+const ROUTE: &str = "__route";
+const MAX_ID: usize = 64;
 
 impl Graph {
     /// Fans node `from` out into the parallel branches `to`, which run in
@@ -109,15 +119,67 @@ impl Graph {
         }
     }
 
-    /// Checks the nodes, joins and edges of a graph with parts and orders
-    /// them. A node fans out only through `parallel` and merges only at a
-    /// `join`; there is one start and one last node. Returns the shape or
-    /// the first problem found.
+    /// Adds approval node `id`: the run pauses with `prompt`, and
+    /// `BuiltGraph::answer(run, id, true)` continues on its one `.edge`;
+    /// `false` ends the run, which then fails as declined. The node after
+    /// it reads what fed the approval. Returns the builder.
+    pub fn approval(mut self, id: impl Into<String>, prompt: impl Into<String>) -> Self {
+        self.parts.push(Part::Human {
+            id: id.into(),
+            prompt: prompt.into(),
+            routes: Vec::new(),
+        });
+        self
+    }
+
+    /// Adds question node `id`: the run pauses with `prompt`, and
+    /// `BuiltGraph::answer(run, id, label)` continues at the target of
+    /// that label in `routes`. A question has no `.edge`; each target reads
+    /// what fed the question. Returns the builder.
+    pub fn question<I, L, T>(
+        mut self,
+        id: impl Into<String>,
+        prompt: impl Into<String>,
+        routes: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = (L, T)>,
+        L: Into<String>,
+        T: Into<String>,
+    {
+        let routes = routes
+            .into_iter()
+            .map(|(l, t)| (l.into(), t.into()))
+            .collect();
+        self.parts.push(Part::Human {
+            id: id.into(),
+            prompt: prompt.into(),
+            routes,
+        });
+        self
+    }
+
+    /// Checks the nodes, joins, human nodes and edges of a graph with parts
+    /// and orders them. A node fans out only through `parallel`, merges only
+    /// at a `join` and branches only at a `question`; one node starts it.
+    /// Returns the shape or the first problem found.
     pub(crate) fn topology(&self) -> Result<Topology, String> {
         let nodes = self.ids()?;
         let mut joins: BTreeMap<&str, &[String]> = BTreeMap::new();
+        let mut humans: BTreeMap<&str, &[(String, String)]> = BTreeMap::new();
         let mut edges: Vec<(String, String)> = self.edges.clone();
         let mut sources: BTreeSet<&str> = BTreeSet::new();
+        let taken = |id: &str,
+                     joins: &BTreeMap<&str, &[String]>,
+                     humans: &BTreeMap<&str, &[(String, String)]>| {
+            id == INPUT
+                || id == END
+                || nodes.contains(&id)
+                || joins.contains_key(id)
+                || humans.contains_key(id)
+                || id.ends_with(GATE)
+                || id.ends_with(ROUTE)
+        };
         for part in &self.parts {
             match part {
                 Part::Parallel { from, to } => {
@@ -132,8 +194,7 @@ impl Graph {
                     edges.extend(to.iter().map(|t| (from.clone(), t.clone())));
                 }
                 Part::Join { id, from, .. } => {
-                    let taken = id == INPUT || id == END || nodes.contains(&id.as_str());
-                    if taken || joins.contains_key(id.as_str()) {
+                    if taken(id, &joins, &humans) {
                         return Err(format!("join id `{id}` is taken"));
                     }
                     if from.len() < 2 {
@@ -142,12 +203,42 @@ impl Graph {
                     joins.insert(id, from);
                     edges.extend(from.iter().map(|f| (f.clone(), id.clone())));
                 }
+                Part::Human { id, routes, .. } => {
+                    if taken(id, &joins, &humans) || id.len() + GATE.len().max(ROUTE.len()) > MAX_ID
+                    {
+                        return Err(format!("human node id `{id}` is taken or too long"));
+                    }
+                    let mut labels = BTreeSet::new();
+                    let mut targets = BTreeSet::new();
+                    for (label, target) in routes {
+                        if !labels.insert(label) || !targets.insert(target) {
+                            return Err(format!(
+                                "question `{id}` repeats label `{label}` or target `{target}`"
+                            ));
+                        }
+                    }
+                    if routes.len() == 1 {
+                        return Err(format!("question `{id}` needs at least two routes"));
+                    }
+                    if !routes.is_empty() && self.edges.iter().any(|e| e.0 == *id) {
+                        return Err(format!(
+                            "question `{id}` routes by its answers; give it no .edge"
+                        ));
+                    }
+                    humans.insert(id, routes);
+                    edges.extend(routes.iter().map(|(_, t)| (id.clone(), t.clone())));
+                }
             }
         }
-        let all: Vec<&str> = nodes.iter().copied().chain(joins.keys().copied()).collect();
+        let all: Vec<&str> = nodes
+            .iter()
+            .copied()
+            .chain(joins.keys().copied())
+            .chain(humans.keys().copied())
+            .collect();
         if all.len() > MAX_NODES {
             return Err(format!(
-                "takes at most {MAX_NODES} nodes and joins, got {}",
+                "takes at most {MAX_NODES} nodes, joins and human nodes, got {}",
                 all.len()
             ));
         }
@@ -202,106 +293,169 @@ impl Graph {
             return Err("edges form a cycle".into());
         }
         let sinks: Vec<&str> = all.iter().copied().filter(|id| outs(id) == 0).collect();
-        let last = match sinks[..] {
-            [one] if joins.contains_key(one) => {
-                return Err(format!("join `{one}` needs an .edge to the node after it"))
-            }
-            [one] => one.to_string(),
-            _ => {
-                return Err(format!(
-                    "nodes {} end the graph; join their branches",
-                    sinks.join(", ")
-                ))
-            }
-        };
-        let mut reads = BTreeMap::new();
-        for id in &nodes {
+        if let Some(open) = sinks
+            .iter()
+            .find(|id| joins.contains_key(*id) || humans.contains_key(*id))
+        {
+            return Err(format!("`{open}` needs an .edge to the node after it"));
+        }
+        let questions = humans.values().any(|r| !r.is_empty());
+        if sinks.len() > 1 && !questions {
+            return Err(format!(
+                "nodes {} end the graph; join their branches",
+                sinks.join(", ")
+            ));
+        }
+        assert!(!sinks.is_empty(), "an acyclic graph has a last node");
+        let mut pass: BTreeMap<&str, Vec<String>> =
+            joins.iter().map(|(j, b)| (*j, b.to_vec())).collect();
+        for h in humans.keys() {
+            let feeds: Vec<String> = edges
+                .iter()
+                .filter(|e| e.1 == *h)
+                .map(|e| e.0.clone())
+                .collect();
+            pass.insert(
+                h,
+                if feeds.is_empty() {
+                    vec![INPUT.to_string()]
+                } else {
+                    feeds
+                },
+            );
+        }
+        let reads_of = |id: &str| {
             let mut keys = Vec::new();
-            for (from, _) in edges.iter().filter(|e| e.1 == *id) {
-                expand(from, &joins, &mut keys, 0);
+            for (from, _) in edges.iter().filter(|e| e.1 == id) {
+                expand(from, &pass, &mut keys, 0);
             }
             if keys.is_empty() {
                 keys.push(INPUT.to_string());
             }
-            reads.insert(id.to_string(), keys);
-        }
+            keys
+        };
+        let reads = nodes
+            .iter()
+            .map(|id| (id.to_string(), reads_of(id)))
+            .collect();
+        let human_reads = humans
+            .keys()
+            .map(|id| (id.to_string(), reads_of(id)))
+            .collect();
         let mut nullable = BTreeSet::new();
         for part in &self.parts {
             if let Part::Join { id, any: true, .. } = part {
                 let mut keys = Vec::new();
-                expand(id, &joins, &mut keys, 0);
+                expand(id, &pass, &mut keys, 0);
                 nullable.extend(keys);
             }
         }
-        edges.push((last.clone(), END.to_string()));
-        assert_eq!(
-            order.len(),
-            all.len(),
-            "every node and join is ordered once"
-        );
+        let lasts: Vec<String> = sinks.iter().map(|s| s.to_string()).collect();
+        edges.extend(lasts.iter().map(|l| (l.clone(), END.to_string())));
+        assert_eq!(order.len(), all.len(), "every node is ordered once");
         Ok(Topology {
             order,
             reads,
+            human_reads,
             nullable,
             edges,
-            last,
+            lasts,
         })
     }
 
     /// Serializes the graph with parts as flow TOML and parses it, so the
-    /// engine checks fan-outs, joins and state. Each node writes its own
-    /// id as a string key and reads `topo.reads`. Returns the flow.
+    /// engine checks fan-outs, joins, routes and state. Each node writes
+    /// its own id; an approval gates on a router, a question on a switch.
+    /// Returns the flow.
     pub(crate) fn flow(&self, topo: &Topology) -> Result<Flow, KitError> {
         let owner = format!("graph:{}", self.name);
         let mut state = toml::Table::new();
-        state.insert(INPUT.into(), Toml::String("string".into()));
+        state.insert(INPUT.into(), text(INPUT));
         let mut nodes = Vec::with_capacity(topo.order.len() + 1);
-        for id in &topo.order {
-            let mut node = toml::Table::new();
-            node.insert("id".into(), Toml::String(id.clone()));
-            let join = self.parts.iter().find_map(|p| match p {
+        let mut edges = Vec::with_capacity(topo.edges.len());
+        let human = |id: &str| {
+            self.parts.iter().find_map(|p| match p {
+                Part::Human {
+                    id: h,
+                    prompt,
+                    routes,
+                } if h == id => Some((prompt, routes)),
+                _ => None,
+            })
+        };
+        let join = |id: &str| {
+            self.parts.iter().find_map(|p| match p {
                 Part::Join { id: j, any, .. } if j == id => Some(*any),
                 _ => None,
-            });
-            match join {
-                Some(any) => {
-                    node.insert("kind".into(), Toml::String("join".into()));
-                    if any {
-                        node.insert("mode".into(), Toml::String("any".into()));
-                    }
+            })
+        };
+        for id in &topo.order {
+            let mut node = toml::Table::new();
+            node.insert("id".into(), text(id));
+            if let Some(any) = join(id) {
+                node.insert("kind".into(), text("join"));
+                if any {
+                    node.insert("mode".into(), text("any"));
                 }
-                None => {
-                    self.node_table(id, &mut node);
-                    let reads = topo.reads[id]
-                        .iter()
-                        .map(|k| Toml::String(k.clone()))
-                        .collect();
-                    node.insert("reads".into(), Toml::Array(reads));
-                    node.insert("writes".into(), Toml::String(id.clone()));
-                    let kind = if topo.nullable.contains(id) {
-                        "string?"
-                    } else {
-                        "string"
-                    };
-                    state.insert(id.clone(), Toml::String(kind.into()));
+            } else if let Some((prompt, routes)) = human(id) {
+                node.insert("kind".into(), text("human"));
+                node.insert("prompt".into(), text(prompt));
+                node.insert("reads".into(), keys(&topo.human_reads[id]));
+                node.insert("writes".into(), text(id));
+                let mut next = toml::Table::new();
+                if routes.is_empty() {
+                    node.insert("ask".into(), text("approval"));
+                    state.insert(id.clone(), text("bool"));
+                    next.insert("id".into(), text(&format!("{id}{GATE}")));
+                    next.insert("kind".into(), text("router"));
+                    next.insert("condition".into(), text(&format!("flag({id})")));
+                    edges.push(edge(id, &format!("{id}{GATE}"), None));
+                    edges.push(edge(&format!("{id}{GATE}"), END, Some("false")));
+                } else {
+                    node.insert("ask".into(), text("question"));
+                    let labels: Vec<&str> = routes.iter().map(|(l, _)| l.as_str()).collect();
+                    state.insert(id.clone(), text(&format!("enum({})", labels.join(", "))));
+                    next.insert("id".into(), text(&format!("{id}{ROUTE}")));
+                    next.insert("kind".into(), text("switch"));
+                    next.insert("on".into(), text(id));
+                    edges.push(edge(id, &format!("{id}{ROUTE}"), None));
                 }
+                nodes.push(Toml::Table(node));
+                nodes.push(Toml::Table(next));
+                continue;
+            } else {
+                self.node_table(id, &mut node);
+                node.insert("reads".into(), keys(&topo.reads[id]));
+                node.insert("writes".into(), text(id));
+                let kind = if topo.nullable.contains(id) {
+                    "string?"
+                } else {
+                    "string"
+                };
+                state.insert(id.clone(), text(kind));
             }
             nodes.push(Toml::Table(node));
         }
         let mut end = toml::Table::new();
-        end.insert("id".into(), Toml::String(END.into()));
-        end.insert("kind".into(), Toml::String("end".into()));
+        end.insert("id".into(), text(END));
+        end.insert("kind".into(), text("end"));
         nodes.push(Toml::Table(end));
-        let edges = topo
-            .edges
-            .iter()
-            .map(|(from, to)| {
-                let mut edge = toml::Table::new();
-                edge.insert("from".into(), Toml::String(from.clone()));
-                edge.insert("to".into(), Toml::String(to.clone()));
-                Toml::Table(edge)
-            })
-            .collect();
+        for (from, to) in &topo.edges {
+            match human(from) {
+                Some((_, routes)) if routes.is_empty() => {
+                    edges.push(edge(&format!("{from}{GATE}"), to, Some("true")));
+                }
+                Some((_, routes)) => {
+                    let label = &routes
+                        .iter()
+                        .find(|(_, t)| t == to)
+                        .expect("route edges come from routes")
+                        .0;
+                    edges.push(edge(&format!("{from}{ROUTE}"), to, Some(label)));
+                }
+                None => edges.push(edge(from, to, None)),
+            }
+        }
         let table = self.file_table(&topo.order[0], state, nodes, edges);
         let text = toml::to_string(&table)
             .map_err(|e| KitError::config(&owner, format!("flow does not serialize: {e}")))?;
@@ -323,20 +477,38 @@ impl Graph {
 }
 
 /// Pushes the keys a node fed by `from` reads: `from` itself, or for a
-/// join each of its branches in order (nested joins expand in turn).
-/// A key already pushed is skipped. Depth is bounded by the node cap.
-fn expand(from: &str, joins: &BTreeMap<&str, &[String]>, keys: &mut Vec<String>, depth: usize) {
+/// join or human node what it passes through, in order (nested ones
+/// expand in turn). A key already pushed is skipped. Depth is bounded.
+fn expand(from: &str, pass: &BTreeMap<&str, Vec<String>>, keys: &mut Vec<String>, depth: usize) {
     assert!(
         depth <= MAX_NODES,
-        "join nesting is bounded by the node count"
+        "pass-through nesting is bounded by the node count"
     );
-    match joins.get(from) {
-        Some(branches) => {
-            for b in branches.iter() {
-                expand(b, joins, keys, depth + 1);
+    match pass.get(from) {
+        Some(through) => {
+            for t in through {
+                expand(t, pass, keys, depth + 1);
             }
         }
         None if !keys.iter().any(|k| k == from) => keys.push(from.to_string()),
         None => {}
     }
+}
+
+fn text(s: &str) -> Toml {
+    Toml::String(s.to_string())
+}
+
+fn keys(list: &[String]) -> Toml {
+    Toml::Array(list.iter().map(|k| text(k)).collect())
+}
+
+fn edge(from: &str, to: &str, when: Option<&str>) -> Toml {
+    let mut edge = toml::Table::new();
+    edge.insert("from".into(), text(from));
+    edge.insert("to".into(), text(to));
+    if let Some(when) = when {
+        edge.insert("when".into(), text(when));
+    }
+    Toml::Table(edge)
 }

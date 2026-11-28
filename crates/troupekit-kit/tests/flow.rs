@@ -206,3 +206,111 @@ async fn after_names_the_trigger() {
         .unwrap();
     assert_eq!(any, serde_json::json!("HI|-"));
 }
+
+fn paused(err: troupekit::KitError) -> troupekit_core::ids::RunId {
+    match err {
+        troupekit::KitError::Paused { run_id, .. } => run_id,
+        other => panic!("expected a pause, got {other}"),
+    }
+}
+
+fn kept() -> troupekit::Storage {
+    troupekit::Storage::custom(std::sync::Arc::new(
+        troupekit_core::inmem::InMemCheckpoints::default(),
+    ))
+}
+
+#[tokio::test]
+async fn approval_node_pauses_and_answer_resumes() {
+    let built = Graph::new("gate")
+        .step("clean", trim_input)
+        .approval("ok", "Ship it?")
+        .step("upper", upper_clean)
+        .edge("clean", "ok")
+        .edge("ok", "upper")
+        .checkpoints(kept())
+        .build()
+        .await
+        .unwrap();
+    let upper = built
+        .workflow()
+        .nodes
+        .iter()
+        .find(|n| n.id == "upper")
+        .unwrap();
+    assert_eq!(
+        upper.reads,
+        ["clean"],
+        "an approval passes its feeder through"
+    );
+    let run = paused(built.run_with("  hi  ").await.unwrap_err());
+    assert_eq!(
+        built
+            .answer(run, "ok", serde_json::json!(true))
+            .await
+            .unwrap(),
+        serde_json::json!("HI")
+    );
+    let declined = paused(built.run_with("  no  ").await.unwrap_err());
+    let err = built
+        .answer(declined, "ok", serde_json::json!(false))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, troupekit::KitError::Failed { .. }), "{err}");
+    assert!(err.to_string().contains("declined"), "{err}");
+}
+
+#[tokio::test]
+async fn question_node_routes_on_answer() {
+    let built = Graph::new("ask")
+        .step("clean", trim_input)
+        .question(
+            "how",
+            "Loud or count?",
+            [("loud", "upper"), ("count", "count")],
+        )
+        .step("upper", upper_clean)
+        .step("count", count_clean)
+        .edge("clean", "how")
+        .checkpoints(kept())
+        .build()
+        .await
+        .unwrap();
+    let run = paused(built.run_with("  hi  ").await.unwrap_err());
+    assert_eq!(
+        built
+            .answer(run, "how", serde_json::json!("count"))
+            .await
+            .unwrap(),
+        serde_json::json!("2")
+    );
+    let run = paused(built.run_with("  hi  ").await.unwrap_err());
+    let wrong = built.answer(run, "how", serde_json::json!("maybe")).await;
+    assert!(wrong.is_err(), "an answer outside the routes is refused");
+    assert_eq!(
+        built
+            .answer(run, "how", serde_json::json!("loud"))
+            .await
+            .unwrap(),
+        serde_json::json!("HI")
+    );
+}
+
+#[tokio::test]
+async fn answer_needs_kept_checkpoints() {
+    let built = Graph::new("gate")
+        .step("clean", trim_input)
+        .approval("ok", "Ship it?")
+        .step("upper", upper_clean)
+        .edge("clean", "ok")
+        .edge("ok", "upper")
+        .build()
+        .await
+        .unwrap();
+    let run = paused(built.run_with("hi").await.unwrap_err());
+    let err = built
+        .answer(run, "ok", serde_json::json!(true))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, troupekit::KitError::Config { .. }), "{err}");
+}

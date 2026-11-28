@@ -180,13 +180,13 @@ impl Graph {
                 self.retries
             )));
         }
-        let (order, reads, last, topo) = if self.parts.is_empty() {
+        let (order, reads, lasts, topo) = if self.parts.is_empty() {
             let order = self.chain().map_err(fail)?;
             let reads: BTreeMap<String, Vec<String>> = (0..order.len())
                 .map(|i| (order[i].clone(), vec![feeder(&order, i).to_string()]))
                 .collect();
             let last = order.last().expect("chain has a node").clone();
-            (order, reads, last, None)
+            (order, reads, vec![last], None)
         } else {
             let topo = self.topology().map_err(fail)?;
             let order: Vec<String> = topo
@@ -195,7 +195,7 @@ impl Graph {
                 .filter(|id| topo.reads.contains_key(*id))
                 .cloned()
                 .collect();
-            (order, topo.reads.clone(), topo.last.clone(), Some(topo))
+            (order, topo.reads.clone(), topo.lasts.clone(), Some(topo))
         };
         let laws = Laws::check(&owner, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let flow = match &topo {
@@ -315,7 +315,7 @@ impl Graph {
                 io,
                 limits: self.limits,
                 store,
-                last,
+                lasts,
                 laws,
             }),
         })
@@ -575,7 +575,7 @@ struct Inner {
     io: SimpleGraphIo,
     limits: Limits,
     store: Option<Arc<dyn CheckpointStore>>,
-    last: String,
+    lasts: Vec<String>,
     laws: Laws,
 }
 
@@ -611,11 +611,31 @@ impl BuiltGraph {
     /// the last node's output; a finished run returns it again. Needs
     /// durable storage and a run this same workflow started.
     pub async fn resume(&self, run_id: RunId) -> Result<Value, KitError> {
+        let (store, mut run) = self.load("resume", run_id).await?;
+        Ok(self.finish(&mut run, store.as_ref()).await?.output)
+    }
+
+    /// Answers human node `node` of paused run `run_id` with `value` (a
+    /// bool for an approval, a route label for a question), keeps it and
+    /// continues the run. Returns the output like `resume`; an answer that
+    /// does not fit returns the graph error. Needs kept checkpoints.
+    pub async fn answer(&self, run_id: RunId, node: &str, value: Value) -> Result<Value, KitError> {
+        let (store, mut run) = self.load("answer", run_id).await?;
+        run.resume(node, value)?;
+        store.save(run.checkpoint()).await?;
+        Ok(self.finish(&mut run, store.as_ref()).await?.output)
+    }
+
+    async fn load(
+        &self,
+        what: &str,
+        run_id: RunId,
+    ) -> Result<(Arc<dyn CheckpointStore>, GraphRun), KitError> {
         let inner = &self.inner;
         let Some(store) = &inner.store else {
             return Err(KitError::config(
                 &inner.owner,
-                "resume needs Storage::sqlite(..) or Storage::custom(..) checkpoints",
+                format!("{what} needs Storage::sqlite(..) or Storage::custom(..) checkpoints"),
             ));
         };
         let Some(checkpoint) = store.latest(run_id).await? else {
@@ -624,7 +644,7 @@ impl BuiltGraph {
                 format!("no checkpoint for run {run_id}"),
             ));
         };
-        let mut run = GraphRun::from_checkpoint(&checkpoint)?;
+        let run = GraphRun::from_checkpoint(&checkpoint)?;
         if run.workflow() != &inner.workflow {
             return Err(KitError::config(
                 &inner.owner,
@@ -633,7 +653,7 @@ impl BuiltGraph {
                 ),
             ));
         }
-        Ok(self.finish(&mut run, store.as_ref()).await?.output)
+        Ok((store.clone(), run))
     }
 
     /// Returns the validated workflow this graph runs: for a chain, built
@@ -685,10 +705,18 @@ impl BuiltGraph {
                     })
                 }
                 GraphOutcome::Done(state) => {
-                    let output = state
-                        .get(&inner.last)
-                        .cloned()
-                        .expect("a finished chain run wrote its last node");
+                    let found = inner.lasts.iter().find_map(|l| state.get(l));
+                    let Some(output) = found.cloned() else {
+                        assert!(
+                            inner.flow.is_some(),
+                            "a finished chain run wrote its last node"
+                        );
+                        return Err(KitError::Failed {
+                            run_id: run.run_id(),
+                            reason: "the run ended before its last node: an approval was declined"
+                                .into(),
+                        });
+                    };
                     return Ok(GraphReport {
                         output,
                         state,
