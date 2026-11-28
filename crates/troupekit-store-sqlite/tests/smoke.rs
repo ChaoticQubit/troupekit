@@ -38,3 +38,14 @@ async fn branch_writes_example_runs_small() {
         assert!(percentile(&m.checkpoint_saves, 50) <= percentile(&m.checkpoint_saves, 99));
     }
 }
+
+#[tokio::test]
+async fn fork_timing_runs_small() {
+    use crate::branch_writes_example::{measure_forks, percentile};
+    use troupekit_store_sqlite::Durability;
+    for durability in [Durability::Full, Durability::Normal] {
+        let forks = measure_forks(5, 3, durability).await;
+        assert_eq!(forks.len(), 3);
+        assert!(percentile(&forks, 50) <= percentile(&forks, 99));
+    }
+}
