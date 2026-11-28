@@ -1,5 +1,5 @@
 use crate::common::echo_model;
-use troupekit::{tool, Agent, Graph, Trigger};
+use troupekit::{tool, Agent, Graph, Reducer, Trigger};
 use troupekit_graph::Workflow;
 
 /// The workflow a two-node chain built at 2343a4f, frozen as TOML.
@@ -313,4 +313,79 @@ async fn answer_needs_kept_checkpoints() {
         .await
         .unwrap_err();
     assert!(matches!(err, troupekit::KitError::Config { .. }), "{err}");
+}
+
+/// Lowercases the cleaned text.
+#[tool]
+fn lower_clean(clean: String) -> String {
+    clean.to_lowercase()
+}
+
+/// Joins the reduced list of branch outputs.
+#[tool]
+fn glue(both: Vec<String>) -> String {
+    both.join("+")
+}
+
+#[tokio::test]
+async fn reducer_append_from_two_branches() {
+    let built = Graph::new("merge")
+        .step("clean", trim_input)
+        .step("upper", upper_clean)
+        .step("lower", lower_clean)
+        .step("glue", glue)
+        .parallel("clean", ["upper", "lower"])
+        .join("both", ["upper", "lower"])
+        .reducer("both", Reducer::Append)
+        .edge("both", "glue")
+        .build()
+        .await
+        .unwrap();
+    let report = built.run_with("  Hi  ").await.unwrap();
+    assert_eq!(
+        report.output(),
+        &serde_json::json!("HI+hi"),
+        "writes apply in branch order"
+    );
+    assert_eq!(report.state()["both"], serde_json::json!(["HI", "hi"]));
+    let after = built
+        .workflow()
+        .nodes
+        .iter()
+        .find(|n| n.id == "glue")
+        .unwrap();
+    assert_eq!(
+        after.reads,
+        ["both"],
+        "the node after a reducing join reads its one key"
+    );
+}
+
+#[tokio::test]
+async fn reducer_needs_a_join_and_a_text_reducer() {
+    let base = || {
+        Graph::new("merge")
+            .step("clean", trim_input)
+            .step("upper", upper_clean)
+            .step("lower", lower_clean)
+            .step("glue", glue)
+            .parallel("clean", ["upper", "lower"])
+            .join("both", ["upper", "lower"])
+            .edge("both", "glue")
+    };
+    let not_join = base()
+        .reducer("upper", Reducer::Append)
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        not_join.to_string().contains("`upper` is not a join"),
+        "{not_join}"
+    );
+    let sum = base()
+        .reducer("both", Reducer::Sum)
+        .build()
+        .await
+        .unwrap_err();
+    assert!(sum.to_string().contains("append or last"), "{sum}");
 }

@@ -2,13 +2,17 @@ use crate::error::KitError;
 use crate::graph::{step_name, Graph, Node, END, INPUT, MAX_NODES};
 use std::collections::{BTreeMap, BTreeSet};
 use toml::Value as Toml;
-use troupekit_graph::Flow;
+use troupekit_graph::{Flow, Reducer};
 
 /// One flow part added by a builder method: a fan-out into parallel
-/// branches, a join that merges them, or a human node (an approval when
-/// `routes` is empty, else a question). Parts turn the chain into a flow.
+/// branches, a join that merges them, a reducer on a join, or a human node
+/// (an approval when `routes` is empty, else a question).
 #[derive(Clone, Debug)]
 pub(crate) enum Part {
+    Reducer {
+        join: String,
+        reducer: Reducer,
+    },
     Human {
         id: String,
         prompt: String,
@@ -37,12 +41,14 @@ pub enum Trigger {
 }
 
 /// The checked shape of a graph with parts: every node, join and human
-/// node in topological order, the keys each one reads, the edges (each
-/// last node's edge goes to `end`), the keys an any-join may leave unset
-/// and the nodes whose output is the answer. Built by `topology`.
+/// node in topological order, the keys each one reads and writes, the
+/// edges (each last node's edge goes to `end`), reducing joins, the keys
+/// an any-join may leave unset and the answer nodes. Built by `topology`.
 pub(crate) struct Topology {
     pub(crate) order: Vec<String>,
     pub(crate) reads: BTreeMap<String, Vec<String>>,
+    pub(crate) writes: BTreeMap<String, String>,
+    pub(crate) reducers: BTreeMap<String, Reducer>,
     pub(crate) human_reads: BTreeMap<String, Vec<String>>,
     pub(crate) nullable: BTreeSet<String>,
     pub(crate) edges: Vec<(String, String)>,
@@ -117,6 +123,18 @@ impl Graph {
             Trigger::All => self.join(id, from),
             Trigger::Any => self.join_any(id, from),
         }
+    }
+
+    /// Makes the branches of join `join` write one shared key named after
+    /// the join through `reducer`, in branch order: `Append` collects a
+    /// list, `Last` keeps the last branch's text. The node after the join
+    /// reads that one key. Returns the builder.
+    pub fn reducer(mut self, join: impl Into<String>, reducer: Reducer) -> Self {
+        self.parts.push(Part::Reducer {
+            join: join.into(),
+            reducer,
+        });
+        self
     }
 
     /// Adds approval node `id`: the run pauses with `prompt`, and
@@ -228,6 +246,36 @@ impl Graph {
                     humans.insert(id, routes);
                     edges.extend(routes.iter().map(|(_, t)| (id.clone(), t.clone())));
                 }
+                Part::Reducer { .. } => {}
+            }
+        }
+        let mut reducers: BTreeMap<String, Reducer> = BTreeMap::new();
+        let mut writes: BTreeMap<String, String> = nodes
+            .iter()
+            .map(|n| (n.to_string(), n.to_string()))
+            .collect();
+        for part in &self.parts {
+            let Part::Reducer { join, reducer } = part else {
+                continue;
+            };
+            let Some(branches) = joins.get(join.as_str()) else {
+                return Err(format!("`{join}` is not a join; .reducer takes a join id"));
+            };
+            if !matches!(reducer, Reducer::Append | Reducer::Last) {
+                return Err(format!(
+                    "the reducer of `{join}` must be append or last; kit state is text"
+                ));
+            }
+            if reducers.insert(join.clone(), *reducer).is_some() {
+                return Err(format!("join `{join}` has two reducers"));
+            }
+            for b in branches.iter() {
+                let Some(key) = writes.get_mut(b) else {
+                    return Err(format!(
+                        "branch `{b}` of reducing join `{join}` must be an agent or step node"
+                    ));
+                };
+                *key = join.clone();
             }
         }
         let all: Vec<&str> = nodes
@@ -307,8 +355,11 @@ impl Graph {
             ));
         }
         assert!(!sinks.is_empty(), "an acyclic graph has a last node");
-        let mut pass: BTreeMap<&str, Vec<String>> =
-            joins.iter().map(|(j, b)| (*j, b.to_vec())).collect();
+        let mut pass: BTreeMap<&str, Vec<String>> = joins
+            .iter()
+            .filter(|(j, _)| !reducers.contains_key(**j))
+            .map(|(j, b)| (*j, b.to_vec()))
+            .collect();
         for h in humans.keys() {
             let feeds: Vec<String> = edges
                 .iter()
@@ -356,6 +407,8 @@ impl Graph {
         Ok(Topology {
             order,
             reads,
+            writes,
+            reducers,
             human_reads,
             nullable,
             edges,
@@ -426,13 +479,16 @@ impl Graph {
             } else {
                 self.node_table(id, &mut node);
                 node.insert("reads".into(), keys(&topo.reads[id]));
-                node.insert("writes".into(), text(id));
-                let kind = if topo.nullable.contains(id) {
-                    "string?"
-                } else {
-                    "string"
-                };
-                state.insert(id.clone(), text(kind));
+                let key = &topo.writes[id];
+                node.insert("writes".into(), text(key));
+                if key == id {
+                    let kind = if topo.nullable.contains(id) {
+                        "string?"
+                    } else {
+                        "string"
+                    };
+                    state.insert(id.clone(), text(kind));
+                }
             }
             nodes.push(Toml::Table(node));
         }
@@ -456,7 +512,20 @@ impl Graph {
                 None => edges.push(edge(from, to, None)),
             }
         }
-        let table = self.file_table(&topo.order[0], state, nodes, edges);
+        let mut reducers = toml::Table::new();
+        for (join, reducer) in &topo.reducers {
+            let (kind, name) = match reducer {
+                Reducer::Append => ("list", "append"),
+                Reducer::Last => ("string", "last"),
+                _ => unreachable!("topology keeps append and last only"),
+            };
+            state.insert(join.clone(), text(kind));
+            reducers.insert(join.clone(), text(name));
+        }
+        let mut table = self.file_table(&topo.order[0], state, nodes, edges);
+        if !reducers.is_empty() {
+            table.insert("reducers".into(), Toml::Table(reducers));
+        }
         let text = toml::to_string(&table)
             .map_err(|e| KitError::config(&owner, format!("flow does not serialize: {e}")))?;
         Ok(Flow::parse(&owner, &text)?)

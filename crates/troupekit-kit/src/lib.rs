@@ -33,6 +33,7 @@ pub use memory::AgentMemory;
 pub use output::{IntoToolOutput, Json};
 pub use storage::Storage;
 pub use tool::{tool, AsTool};
+pub use troupekit_graph::Reducer;
 pub use troupekit_macros::{agent, tool};
 pub use troupekit_tools::{Tool, ToolContext, ToolOutput};
 

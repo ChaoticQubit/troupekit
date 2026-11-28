@@ -197,6 +197,12 @@ impl Graph {
                 .collect();
             (order, topo.reads.clone(), topo.lasts.clone(), Some(topo))
         };
+        let lists: Vec<String> = topo
+            .iter()
+            .flat_map(|t| t.reducers.iter())
+            .filter(|(_, r)| **r == troupekit_graph::Reducer::Append)
+            .map(|(j, _)| j.clone())
+            .collect();
         let laws = Laws::check(&owner, &self.law_paths, &self.inline_laws, self.auto_laws)?;
         let flow = match &topo {
             Some(topo) => Some(self.flow(topo)?),
@@ -277,9 +283,18 @@ impl Graph {
                             feeds.join(", ")
                         )));
                     }
+                    let schema = |f: &str| &tool.spec().schema["properties"][f];
                     if let Some(feeder) = feeds
                         .iter()
-                        .find(|f| !takes_text(&tool.spec().schema["properties"][f.as_str()]))
+                        .find(|f| lists.contains(f) && !takes_list(schema(f)))
+                    {
+                        return Err(fail(format!(
+                            "step `{id}` argument `{feeder}` must accept a list; an append join passes a list"
+                        )));
+                    }
+                    if let Some(feeder) = feeds
+                        .iter()
+                        .find(|f| !lists.contains(f) && !takes_text(schema(f)))
                     {
                         return Err(fail(format!(
                             "step `{id}` argument `{feeder}` must accept a string; every graph node is fed text"
@@ -808,12 +823,20 @@ fn input_state(text: &str) -> Map<String, Value> {
     state
 }
 
+fn takes_list(schema: &Value) -> bool {
+    takes_type(schema, "array")
+}
+
 fn takes_text(schema: &Value) -> bool {
+    takes_type(schema, "string")
+}
+
+fn takes_type(schema: &Value, want: &str) -> bool {
     match schema {
         Value::Bool(any) => *any,
         Value::Object(map) => match map.get("type") {
-            Some(Value::String(t)) => t == "string",
-            Some(Value::Array(types)) => types.iter().any(|t| t == "string"),
+            Some(Value::String(t)) => t == want,
+            Some(Value::Array(types)) => types.iter().any(|t| t == want),
             Some(_) => false,
             None => !["$ref", "anyOf", "oneOf", "allOf", "enum", "const", "not"]
                 .iter()
