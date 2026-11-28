@@ -1,13 +1,18 @@
 package dev.troupekit.android
 
-import com.sun.net.httpserver.HttpServer
 import dev.troupekit.HostException
 import dev.troupekit.HostHeader
 import dev.troupekit.HostHttpRequest
 import dev.troupekit.HostMessage
 import dev.troupekit.HostRequest
+import java.io.BufferedInputStream
 import java.io.File
-import java.net.InetSocketAddress
+import java.io.InputStream
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketException
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -17,41 +22,30 @@ import kotlin.test.assertTrue
 
 /**
  * JVM tests of the Android platform adapters: request mapping, unavailable runtime, transport.
- * The transport runs against the JDK's built-in HTTP server on 127.0.0.1, no mock.
+ * The transport runs against a real HTTP/1.1 server on a 127.0.0.1 socket, no mock; the JDK's
+ * `com.sun.net.httpserver` is not on the Android unit-test compile classpath.
  * The on-device model itself needs a device or emulator and is tested in androidTest.
  */
 class AndroidAdapterTest {
-    private lateinit var server: HttpServer
-    private var hitsOnTarget = 0
+    private lateinit var server: TestHttpServer
+    @Volatile private var hitsOnTarget = 0
 
-    private fun base(): String = "http://127.0.0.1:${server.address.port}"
+    private fun base(): String = "http://127.0.0.1:${server.port}"
 
     @BeforeTest
     fun startServer() {
-        server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.createContext("/v1/chat") { exchange ->
-            val body = "data: hi\n\n".toByteArray()
-            exchange.responseHeaders.add("content-type", "text/event-stream")
-            exchange.sendResponseHeaders(200, body.size.toLong())
-            exchange.responseBody.use { it.write(body) }
-        }
-        server.createContext("/v1/redirect") { exchange ->
-            exchange.responseHeaders.add("location", "${base()}/target")
-            exchange.sendResponseHeaders(302, -1)
-            exchange.close()
-        }
-        server.createContext("/target") { exchange ->
+        server = TestHttpServer()
+        server.route("/v1/chat") { Reply(200, mapOf("content-type" to "text/event-stream"), "data: hi\n\n".toByteArray()) }
+        server.route("/v1/redirect") { Reply(302, mapOf("location" to "${base()}/target"), ByteArray(0)) }
+        server.route("/target") {
             hitsOnTarget += 1
-            val body = "leaked".toByteArray()
-            exchange.sendResponseHeaders(200, body.size.toLong())
-            exchange.responseBody.use { it.write(body) }
+            Reply(200, emptyMap(), "leaked".toByteArray())
         }
-        server.start()
     }
 
     @AfterTest
     fun stopServer() {
-        server.stop(0)
+        server.close()
     }
 
     @Test
@@ -160,14 +154,86 @@ class AndroidAdapterTest {
     @Test
     fun transportChunksAreAtMost16KiB() {
         val big = ByteArray(40 * 1024) { 'a'.code.toByte() }
-        server.createContext("/v1/big") { exchange ->
-            exchange.sendResponseHeaders(200, big.size.toLong())
-            exchange.responseBody.use { it.write(big) }
-        }
+        server.route("/v1/big") { Reply(200, emptyMap(), big) }
         val sizes = mutableListOf<Int>()
         val request = HostHttpRequest("GET", "${base()}/v1/big", emptyList(), ByteArray(0))
         HttpUrlConnectionTransport().perform(request, { _, _, _ -> }, { sizes.add(it.size) })
         assertEquals(big.size, sizes.sum())
         assertTrue(sizes.all { it in 1..16 * 1024 }, sizes.toString())
+    }
+}
+
+/** One canned HTTP response: status, headers and body. */
+private class Reply(val status: Int, val headers: Map<String, String>, val body: ByteArray)
+
+/**
+ * A minimal HTTP/1.1 server on an ephemeral 127.0.0.1 port, one request per connection.
+ * Input: routes from path to reply, registered before the request. Output: real socket replies;
+ * an unknown path gets 404. Closing stops the accept loop.
+ */
+private class TestHttpServer : AutoCloseable {
+    private val socket = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+    private val routes = ConcurrentHashMap<String, () -> Reply>()
+    val port: Int = socket.localPort
+
+    init {
+        Thread { serve() }.apply { isDaemon = true }.start()
+    }
+
+    fun route(path: String, reply: () -> Reply) {
+        routes[path] = reply
+    }
+
+    override fun close() {
+        socket.close()
+    }
+
+    private fun serve() {
+        while (true) {
+            val client = try {
+                socket.accept()
+            } catch (closed: SocketException) {
+                return
+            }
+            client.use { answer(it) }
+        }
+    }
+
+    private fun answer(client: Socket) {
+        val input = BufferedInputStream(client.getInputStream())
+        val path = line(input).split(" ")[1]
+        var length = 0
+        while (true) {
+            val header = line(input)
+            if (header.isEmpty()) {
+                break
+            }
+            val name = header.substringBefore(":").trim()
+            if (name.equals("content-length", ignoreCase = true)) {
+                length = header.substringAfter(":").trim().toInt()
+            }
+        }
+        repeat(length) { check(input.read() >= 0) { "request body ended early" } }
+        val reply = routes[path]?.invoke() ?: Reply(404, emptyMap(), ByteArray(0))
+        val head = StringBuilder("HTTP/1.1 ${reply.status} Status\r\n")
+        for ((name, value) in reply.headers) {
+            head.append("$name: $value\r\n")
+        }
+        head.append("content-length: ${reply.body.size}\r\nconnection: close\r\n\r\n")
+        val output = client.getOutputStream()
+        output.write(head.toString().toByteArray(Charsets.ISO_8859_1))
+        output.write(reply.body)
+        output.flush()
+    }
+
+    private fun line(input: InputStream): String {
+        val bytes = StringBuilder()
+        while (true) {
+            val next = input.read()
+            if (next < 0 || next == '\n'.code) {
+                return bytes.toString().trimEnd('\r')
+            }
+            bytes.append(next.toChar())
+        }
     }
 }
