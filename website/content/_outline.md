@@ -62,4 +62,4 @@ One page per example of the `troupekit` crate, plus one page for the benchmark e
 
 ## PDF
 
-The PDF holds the same pages in this order. The site links it from the landing page and the sidebar.
+The PDF holds the same pages in this order. Every page links it from the menu bar, next to the print button.
