@@ -1,6 +1,6 @@
 use crate::agent::AgentBuilder;
 use crate::error::TroupekitError;
-use crate::host::{HostTool, ToolBridge};
+use crate::host::{HostTool, ToolBridge, TraceBridge, TraceListener};
 use crate::records::{GraphResult, Progress};
 use crate::stream::RunStream;
 use std::sync::Arc;
@@ -47,6 +47,26 @@ impl GraphBuilder {
 
     pub fn retries(&self, retries: u32) -> Arc<Self> {
         Self::wrap(self.0.retries(retries))
+    }
+
+    pub fn tracing(&self, on: bool) -> Arc<Self> {
+        Self::wrap(self.0.tracing(on))
+    }
+
+    pub fn trace(&self, categories: Vec<String>) -> Arc<Self> {
+        Self::wrap(self.0.trace(categories))
+    }
+
+    pub fn trace_content(&self, on: bool) -> Arc<Self> {
+        Self::wrap(self.0.trace_content(on))
+    }
+
+    pub fn trace_jsonl(&self, path: String) -> Arc<Self> {
+        Self::wrap(self.0.trace_jsonl(path))
+    }
+
+    pub fn trace_listener(&self, listener: Arc<dyn TraceListener>) -> Arc<Self> {
+        Self::wrap(self.0.trace_listener(Arc::new(TraceBridge(listener))))
     }
 
     pub fn laws(&self, path: String) -> Arc<Self> {

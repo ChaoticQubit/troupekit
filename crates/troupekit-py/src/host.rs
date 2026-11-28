@@ -11,6 +11,12 @@ use troupekit_ffi_core as neutral;
 #[pyclass(subclass, module = "troupekit")]
 pub struct EventListener;
 
+/// Base class for a Python trace listener: subclass it, or pass any object
+/// with an `on_record(line)` method to `trace_listener`.
+/// Input: none. Output: an empty, subclassable base.
+#[pyclass(subclass, module = "troupekit")]
+pub struct TraceListener;
+
 /// Base class for a Python tool: subclass it, or pass any object with
 /// `name()`, `description()`, `schema_json()` and `call(args_json)`.
 /// Input: none. Output: an empty, subclassable base.
@@ -54,7 +60,13 @@ macro_rules! base_new {
     };
 }
 
-base_new!(EventListener, HostTool, HostModel, HostTransport);
+base_new!(
+    EventListener,
+    TraceListener,
+    HostTool,
+    HostModel,
+    HostTransport
+);
 #[cfg(feature = "knowledge")]
 base_new!(HostEmbedder);
 
@@ -99,6 +111,21 @@ impl neutral::EventListener for PyListener {
         Python::attach(|py| {
             let event = Event::from(event);
             if let Err(error) = self.0.call_method1(py, "on_event", (event,)) {
+                error.write_unraisable(py, Some(self.0.bind(py)));
+            }
+        })
+    }
+}
+
+/// Presents a Python trace listener object as the neutral trait.
+/// Input: the object. Output: a neutral listener that takes the GIL per
+/// record; an exception goes to `sys.unraisablehook`, as Python does.
+pub(crate) struct PyTraceListener(pub(crate) Py<PyAny>);
+
+impl neutral::TraceListener for PyTraceListener {
+    fn on_record(&self, line: String) {
+        Python::attach(|py| {
+            if let Err(error) = self.0.call_method1(py, "on_record", (line,)) {
                 error.write_unraisable(py, Some(self.0.bind(py)));
             }
         })

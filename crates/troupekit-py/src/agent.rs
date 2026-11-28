@@ -1,5 +1,5 @@
 use crate::block::wait;
-use crate::host::{PyModel, PyTool, PyTransport};
+use crate::host::{PyModel, PyTool, PyTraceListener, PyTransport};
 use crate::records::{Progress, RunResult};
 use crate::stream::RunStream;
 use pyo3::prelude::*;
@@ -113,6 +113,26 @@ impl AgentBuilder {
 
     fn host_transport(&self, transport: Py<PyAny>) -> Self {
         AgentBuilder(self.0.host_transport(Arc::new(PyTransport(transport))))
+    }
+
+    fn tracing(&self, on: bool) -> Self {
+        AgentBuilder(self.0.tracing(on))
+    }
+
+    fn trace(&self, categories: Vec<String>) -> Self {
+        AgentBuilder(self.0.trace(categories))
+    }
+
+    fn trace_content(&self, on: bool) -> Self {
+        AgentBuilder(self.0.trace_content(on))
+    }
+
+    fn trace_jsonl(&self, path: String) -> Self {
+        AgentBuilder(self.0.trace_jsonl(path))
+    }
+
+    fn trace_listener(&self, listener: Py<PyAny>) -> Self {
+        AgentBuilder(self.0.trace_listener(Arc::new(PyTraceListener(listener))))
     }
 
     fn laws(&self, path: String) -> Self {

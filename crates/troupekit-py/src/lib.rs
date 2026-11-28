@@ -41,6 +41,7 @@ fn _troupekit(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<graph::GraphHandle>()?;
     module.add_class::<stream::RunStream>()?;
     module.add_class::<host::EventListener>()?;
+    module.add_class::<host::TraceListener>()?;
     module.add_class::<host::HostTool>()?;
     module.add_class::<host::HostModel>()?;
     module.add_class::<host::HostTransport>()?;

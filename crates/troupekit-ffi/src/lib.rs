@@ -12,7 +12,9 @@ pub use error::{ErrorCode, HostError, TroupekitError};
 pub use graph::{GraphBuilder, GraphHandle};
 #[cfg(feature = "knowledge")]
 pub use host::HostEmbedder;
-pub use host::{EventListener, HostModel, HostTool, HostTransport, HttpSink, TokenSink};
+pub use host::{
+    EventListener, HostModel, HostTool, HostTransport, HttpSink, TokenSink, TraceListener,
+};
 pub use records::{
     Event, EventKind, GraphResult, HostHeader, HostHttpRequest, HostMessage, HostModelCaps,
     HostReply, HostRequest, Pause, Progress, RunResult, RuntimeSettings, Usage,

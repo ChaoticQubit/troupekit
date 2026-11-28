@@ -81,6 +81,26 @@ impl HttpSink {
     }
 }
 
+/// Receives every trace record of a traced build or run, implemented in
+/// Swift or Kotlin: the callback form of `trace_jsonl`. Called on the
+/// thread that writes the record; keys are scrubbed before the call.
+/// Input: one JSON object on one line, no newline. Output: none.
+#[uniffi::export(with_foreign)]
+pub trait TraceListener: Send + Sync {
+    fn on_record(&self, line: String);
+}
+
+/// Presents a foreign `TraceListener` as the neutral trait.
+/// Input: the foreign object. Output: a neutral listener that forwards
+/// each record unchanged.
+pub(crate) struct TraceBridge(pub(crate) Arc<dyn TraceListener>);
+
+impl neutral::TraceListener for TraceBridge {
+    fn on_record(&self, line: String) {
+        self.0.on_record(line)
+    }
+}
+
 /// Presents a foreign `EventListener` as the neutral trait.
 /// Input: the foreign object. Output: a neutral listener that converts
 /// each event and forwards it unchanged.

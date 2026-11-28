@@ -1,6 +1,6 @@
 use crate::agent::AgentBuilder;
 use crate::block::wait;
-use crate::host::PyTool;
+use crate::host::{PyTool, PyTraceListener};
 use crate::records::{GraphResult, Progress};
 use crate::stream::RunStream;
 use pyo3::prelude::*;
@@ -43,6 +43,26 @@ impl GraphBuilder {
 
     fn retries(&self, retries: u32) -> Self {
         GraphBuilder(self.0.retries(retries))
+    }
+
+    fn tracing(&self, on: bool) -> Self {
+        GraphBuilder(self.0.tracing(on))
+    }
+
+    fn trace(&self, categories: Vec<String>) -> Self {
+        GraphBuilder(self.0.trace(categories))
+    }
+
+    fn trace_content(&self, on: bool) -> Self {
+        GraphBuilder(self.0.trace_content(on))
+    }
+
+    fn trace_jsonl(&self, path: String) -> Self {
+        GraphBuilder(self.0.trace_jsonl(path))
+    }
+
+    fn trace_listener(&self, listener: Py<PyAny>) -> Self {
+        GraphBuilder(self.0.trace_listener(Arc::new(PyTraceListener(listener))))
     }
 
     fn laws(&self, path: String) -> Self {

@@ -416,6 +416,40 @@ def test_host_model_run_returns_text():
     assert len(model.requests) == 1
 
 
+class RecordCollector(troupekit.TraceListener):
+    """A trace listener that keeps every record it receives.
+
+    Input: none. Output: `lines` holds the JSONL records in order.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+        self.lock = threading.Lock()
+
+    def on_record(self, line):
+        """Keeps one record.
+
+        Input: one JSON object on one line. Output: none.
+        """
+        with self.lock:
+            self.lines.append(line)
+
+
+def test_trace_listener_receives_records():
+    """A traced run sends its records to a Python trace listener.
+
+    Input: a host model, `tracing(True)` and a collecting listener. Output:
+    passes when the first record is the header and an `agent.run` span starts.
+    """
+    collector = RecordCollector()
+    builder = host_agent(ScriptedModel(["traced"])).tracing(True).trace_listener(collector)
+    assert builder.build().run("hi") == "traced"
+    records = [json.loads(line) for line in collector.lines]
+    assert records[0]["t"] == "header"
+    assert any(r["t"] == "start" and r["name"] == "agent.run" for r in records)
+
+
 def test_host_tool_called_with_json_args():
     """A host tool receives the arguments the model asked for, as JSON.
 

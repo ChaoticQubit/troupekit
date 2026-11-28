@@ -1,5 +1,8 @@
 use crate::error::TroupekitError;
-use crate::host::{HostModel, HostTool, HostTransport, ModelBridge, ToolBridge, TransportBridge};
+use crate::host::{
+    HostModel, HostTool, HostTransport, ModelBridge, ToolBridge, TraceBridge, TraceListener,
+    TransportBridge,
+};
 use crate::records::{Progress, RunResult};
 use crate::stream::RunStream;
 use std::sync::Arc;
@@ -114,6 +117,26 @@ impl AgentBuilder {
 
     pub fn host_transport(&self, transport: Arc<dyn HostTransport>) -> Arc<Self> {
         Self::wrap(self.0.host_transport(Arc::new(TransportBridge(transport))))
+    }
+
+    pub fn tracing(&self, on: bool) -> Arc<Self> {
+        Self::wrap(self.0.tracing(on))
+    }
+
+    pub fn trace(&self, categories: Vec<String>) -> Arc<Self> {
+        Self::wrap(self.0.trace(categories))
+    }
+
+    pub fn trace_content(&self, on: bool) -> Arc<Self> {
+        Self::wrap(self.0.trace_content(on))
+    }
+
+    pub fn trace_jsonl(&self, path: String) -> Arc<Self> {
+        Self::wrap(self.0.trace_jsonl(path))
+    }
+
+    pub fn trace_listener(&self, listener: Arc<dyn TraceListener>) -> Arc<Self> {
+        Self::wrap(self.0.trace_listener(Arc::new(TraceBridge(listener))))
     }
 
     pub fn laws(&self, path: String) -> Arc<Self> {
