@@ -8,8 +8,8 @@ use tokio::sync::watch;
 use troupekit_agent::Limits;
 use troupekit_core::error::CoreError;
 use troupekit_core::ids::RunId;
-use troupekit_core::store::CheckpointStore;
-use troupekit_graph::{GraphIo, GraphOutcome, GraphRun, Stop};
+use troupekit_core::store::{CheckpointStore, ForkLink};
+use troupekit_graph::{GraphError, GraphIo, GraphOutcome, GraphRun, Stop};
 
 const DEFAULT_LEASE_MS: i64 = 300_000;
 const STORE_RETRY_MS: i64 = 1_000;
@@ -121,36 +121,48 @@ impl Runner {
         Ok(())
     }
 
-    /// Processes one claimed `lease`: load, step (timed as active work, or
-    /// stopped instead once over its time limit), save when it moved, then
-    /// queue the outcome. A save conflict returns `Lost`; store errors
-    /// reschedule the job after one second and return the error.
+    /// Processes one claimed `lease`: restore with its kept branch writes,
+    /// step durably (timed as active work, or stopped once over its time
+    /// limit), save when it moved, then queue the outcome. A conflict
+    /// returns `Lost`; store errors reschedule after one second, unsaved.
     pub async fn process(&self, lease: &Lease) -> Result<Processed, HostError> {
-        let cp = match self.checkpoints.latest(lease.run_id).await {
-            Ok(Some(cp)) => cp,
+        match self.checkpoints.latest(lease.run_id).await {
+            Ok(Some(_)) => {}
             Ok(None) => {
                 self.queue.fail(lease, "no checkpoint").await?;
                 return Err(HostError::NoCheckpoint(lease.run_id));
             }
             Err(e) => return Err(self.store_failed(lease, e).await),
-        };
-        let mut run = match GraphRun::from_checkpoint(&cp) {
+        }
+        let mut run = match GraphRun::restore(self.checkpoints.as_ref(), lease.run_id).await {
             Ok(run) => run,
+            Err(GraphError::Store(e)) => return Err(self.store_failed(lease, e).await),
             Err(e) => {
                 self.queue.fail(lease, &e.to_string()).await?;
                 return Err(e.into());
             }
         };
         let before = run.steps();
-        let outcome = if run.over_time() {
-            let limit_ms = run.time_limit_ms().expect("only a limited run is over time");
+        let stepped = if run.over_time() {
+            let limit_ms = run
+                .time_limit_ms()
+                .expect("only a limited run is over time");
             let _finished = run.stop(Stop::TimeLimit { limit_ms });
-            run.step(self.io.as_ref()).await
+            run.step_durable(self.io.as_ref(), self.checkpoints.as_ref())
+                .await
         } else {
             let started = self.now();
-            let outcome = run.step(self.io.as_ref()).await;
+            let stepped = run
+                .step_durable(self.io.as_ref(), self.checkpoints.as_ref())
+                .await;
             run.add_active_ms(u64::try_from(self.now() - started).unwrap_or(0));
-            outcome
+            stepped
+        };
+        let outcome = match stepped {
+            Ok(outcome) => outcome,
+            Err(GraphError::Store(CoreError::Conflict { .. })) => return Ok(Processed::Lost),
+            Err(GraphError::Store(e)) => return Err(self.store_failed(lease, e).await),
+            Err(e) => return Err(self.step_failed(lease, e).await),
         };
         let moved = run.steps() != before;
         if moved {
@@ -179,6 +191,10 @@ impl Runner {
     }
 
     async fn store_failed(&self, lease: &Lease, e: CoreError) -> HostError {
+        self.step_failed(lease, e.into()).await
+    }
+
+    async fn step_failed(&self, lease: &Lease, e: GraphError) -> HostError {
         let _ = self
             .queue
             .reschedule(lease, self.now() + STORE_RETRY_MS)
@@ -252,6 +268,32 @@ impl Runner {
         let mut run = self.load(run_id).await?;
         run.raise_budget(limits)?;
         self.save_and_enqueue(&run).await
+    }
+
+    /// Forks run `run_id` at its kept step `step` into a new run: saves
+    /// the child as its step 0, links it to the parent and enqueues it now.
+    /// Returns the child id, or `NoCheckpoint` for a missing run or step.
+    /// The parent run and its checkpoints never change.
+    pub async fn fork(&self, run_id: RunId, step: u64) -> Result<RunId, HostError> {
+        let history = self.checkpoints.history(run_id).await?;
+        let cp = history
+            .iter()
+            .find(|cp| cp.step == step)
+            .ok_or(HostError::NoCheckpoint(run_id))?;
+        let child = GraphRun::fork(cp)?;
+        assert_eq!(
+            child.parent(),
+            Some((run_id, step)),
+            "a fork links to its source"
+        );
+        assert_eq!(child.steps(), 0, "a fork starts at step 0");
+        self.checkpoints.save(child.checkpoint()).await?;
+        let _kept = self
+            .checkpoints
+            .link_fork(ForkLink::new(child.run_id(), run_id, step))
+            .await?;
+        self.queue.enqueue(child.run_id(), self.now()).await?;
+        Ok(child.run_id())
     }
 
     async fn load(&self, run_id: RunId) -> Result<GraphRun, HostError> {
