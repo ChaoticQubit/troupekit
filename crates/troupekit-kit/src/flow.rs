@@ -24,6 +24,7 @@ pub(crate) enum Part {
         id: String,
         prompt: String,
         routes: Vec<(String, String)>,
+        question: bool,
     },
     Parallel {
         from: String,
@@ -177,6 +178,7 @@ impl Graph {
             id: id.into(),
             prompt: prompt.into(),
             routes: Vec::new(),
+            question: false,
         });
         self
     }
@@ -204,6 +206,7 @@ impl Graph {
             id: id.into(),
             prompt: prompt.into(),
             routes,
+            question: true,
         });
         self
     }
@@ -231,6 +234,16 @@ impl Graph {
                 ));
             }
             maps.insert(id, body);
+        }
+        let reserved = [GATE, ROUTE, ITEMS, ITEM];
+        if let Some(n) = nodes
+            .iter()
+            .find(|n| reserved.iter().any(|r| n.ends_with(r)))
+        {
+            return Err(format!(
+                "node id `{n}` ends with a suffix kept for generated nodes ({})",
+                reserved.join(", ")
+            ));
         }
         let bodies: BTreeSet<&str> = maps.values().copied().collect();
         let linked = |n: &str| {
@@ -284,7 +297,12 @@ impl Graph {
                     joins.insert(id, from);
                     edges.extend(from.iter().map(|f| (f.clone(), id.clone())));
                 }
-                Part::Human { id, routes, .. } => {
+                Part::Human {
+                    id,
+                    routes,
+                    question,
+                    ..
+                } => {
                     if taken(id, &joins, &humans) || id.len() + GATE.len().max(ROUTE.len()) > MAX_ID
                     {
                         return Err(format!("human node id `{id}` is taken or too long"));
@@ -298,7 +316,7 @@ impl Graph {
                             ));
                         }
                     }
-                    if routes.len() == 1 {
+                    if *question && routes.len() < 2 {
                         return Err(format!("question `{id}` needs at least two routes"));
                     }
                     if !routes.is_empty() && self.edges.iter().any(|e| e.0 == *id) {
@@ -525,6 +543,7 @@ impl Graph {
                     id: h,
                     prompt,
                     routes,
+                    ..
                 } if h == id => Some((prompt, routes)),
                 _ => None,
             })
@@ -650,7 +669,7 @@ impl Graph {
             state.insert(join.clone(), text(kind));
             reducers.insert(join.clone(), text(name));
         }
-        let mut table = self.file_table(&topo.order[0], state, nodes, edges);
+        let mut table = self.file_table(&target(&topo.order[0]), state, nodes, edges);
         if !reducers.is_empty() {
             table.insert("reducers".into(), Toml::Table(reducers));
         }
@@ -717,9 +736,9 @@ pub(crate) fn items_tool(id: &str) -> String {
     format!("map__{id}")
 }
 
-/// The hidden step before a map node: reads the feeder's text, parses it
-/// as a JSON array and answers the items as a list of text (non-text items
-/// as JSON text). Anything else is an error output naming the map node.
+/// The hidden step before a map node: takes the feeder's list, or parses
+/// its text as a JSON array, and answers the items as a list of text
+/// (non-text items as JSON text). Else an error output naming the map.
 pub(crate) struct ItemsTool {
     spec: ToolSpec,
     map: String,
@@ -728,7 +747,7 @@ pub(crate) struct ItemsTool {
 
 impl ItemsTool {
     /// Builds the items step of map `map` fed by state key `feeder`.
-    /// Its schema takes one string argument named after the feeder.
+    /// Its schema takes one text or list argument named after the feeder.
     /// Returns the tool, registered by `build`.
     pub(crate) fn new(map: &str, feeder: &str) -> Self {
         let spec = ToolSpec {
@@ -736,7 +755,7 @@ impl ItemsTool {
             description: format!("parses the items of map `{map}`"),
             schema: json!({
                 "type": "object",
-                "properties": { feeder: { "type": "string" } },
+                "properties": { feeder: { "type": ["string", "array"] } },
                 "required": [feeder],
             }),
             hosted: None,
@@ -756,11 +775,11 @@ impl Tool for ItemsTool {
     }
 
     async fn call(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let raw = args
-            .get(&self.feeder)
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw) else {
+        let parsed = match args.get(&self.feeder) {
+            Some(Value::String(raw)) => serde_json::from_str::<Value>(raw).ok(),
+            other => other.cloned(),
+        };
+        let Some(Value::Array(items)) = parsed else {
             return Ok(ToolOutput::error(format!(
                 "map `{}`: the output of `{}` is not a JSON array",
                 self.map, self.feeder

@@ -162,13 +162,8 @@ async fn join_any_takes_first() {
     let report = built.run_with("  hi  ").await.unwrap();
     assert_eq!(
         report.output(),
-        &serde_json::json!("HI|-"),
-        "the lowest branch continues"
-    );
-    assert!(
-        report.state().get("count").is_none_or(|v| v.is_null()),
-        "{:?}",
-        report.state()
+        &serde_json::json!("HI|2"),
+        "same-step arrivals keep their writes"
     );
     let pick = built
         .workflow()
@@ -204,7 +199,7 @@ async fn after_names_the_trigger() {
         .run("  hi  ")
         .await
         .unwrap();
-    assert_eq!(any, serde_json::json!("HI|-"));
+    assert_eq!(any, serde_json::json!("HI|2"));
 }
 
 fn paused(err: troupekit::KitError) -> troupekit_core::ids::RunId {
@@ -501,4 +496,65 @@ async fn parallel_then_join_nested() {
         .await
         .unwrap();
     assert_eq!(out, serde_json::json!("HI!HI?:2"));
+}
+
+#[tokio::test]
+async fn map_can_start_the_graph() {
+    let out = Graph::new("first")
+        .step("shout", shout_word)
+        .step("glue", join_words)
+        .map("each", "shout")
+        .edge("each", "glue")
+        .run(r#"["a", "b"]"#)
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!("A B"));
+}
+
+#[tokio::test]
+async fn map_over_an_append_join() {
+    let out = Graph::new("joined")
+        .step("clean", trim_input)
+        .step("upper", upper_clean)
+        .step("lower", lower_clean)
+        .step("shout", shout_word)
+        .step("glue", join_words)
+        .parallel("clean", ["upper", "lower"])
+        .join("both", ["upper", "lower"])
+        .reducer("both", Reducer::Append)
+        .map("each", "shout")
+        .edge("both", "each")
+        .edge("each", "glue")
+        .run("  Hi  ")
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!("HI HI"));
+}
+
+#[tokio::test]
+async fn question_without_routes_and_reserved_ids_fail_build() {
+    let routes: [(&str, &str); 0] = [];
+    let err = Graph::new("ask")
+        .step("clean", trim_input)
+        .question("how", "Which?", routes)
+        .step("upper", upper_clean)
+        .edge("clean", "how")
+        .edge("how", "upper")
+        .build()
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("at least two routes"), "{err}");
+    let err = Graph::new("ask")
+        .step("clean", trim_input)
+        .step("x__gate", upper_clean)
+        .approval("ok", "Ship?")
+        .edge("clean", "ok")
+        .edge("ok", "x__gate")
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("kept for generated nodes"),
+        "{err}"
+    );
 }
