@@ -387,7 +387,7 @@ impl Agent {
 
     pub(crate) fn trace_secret(&self) -> Option<Secret> {
         crate::model::trace_secret(
-            self.model.as_deref().unwrap_or_default(),
+            &self.selector().unwrap_or_default(),
             self.api_key.clone(),
             self.api_key_env.as_deref(),
         )
