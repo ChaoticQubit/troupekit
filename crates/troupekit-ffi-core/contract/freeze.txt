@@ -29,6 +29,11 @@ AgentBuilder::memory
 AgentBuilder::laws
 AgentBuilder::law
 AgentBuilder::auto_laws
+AgentBuilder::tracing
+AgentBuilder::trace
+AgentBuilder::trace_content
+AgentBuilder::trace_jsonl
+AgentBuilder::trace_listener
 AgentBuilder::build
 AgentHandle
 AgentHandle::run
@@ -48,6 +53,11 @@ GraphBuilder::retries
 GraphBuilder::laws
 GraphBuilder::law
 GraphBuilder::auto_laws
+GraphBuilder::tracing
+GraphBuilder::trace
+GraphBuilder::trace_content
+GraphBuilder::trace_jsonl
+GraphBuilder::trace_listener
 GraphBuilder::build
 GraphHandle
 GraphHandle::run
@@ -71,6 +81,7 @@ FfiEventKind
 FfiUsage
 FfiPause
 EventListener
+TraceListener
 HostTool
 HostModel
 HostEmbedder

@@ -21,7 +21,9 @@ pub use error::{ErrorCode, FfiError};
 pub use graph::{GraphBuilder, GraphHandle};
 #[cfg(feature = "knowledge")]
 pub use host::HostEmbedder;
-pub use host::{EventListener, HostModel, HostTool, HostTransport, HttpSink, TokenSink};
+pub use host::{
+    EventListener, HostModel, HostTool, HostTransport, HttpSink, TokenSink, TraceListener,
+};
 pub use records::{
     FfiEvent, FfiEventKind, FfiPause, FfiUsage, GraphResult, HostError, HostHeader,
     HostHttpRequest, HostMessage, HostModelCaps, HostReply, HostRequest, Progress, RunResult,

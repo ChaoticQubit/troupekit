@@ -1,6 +1,6 @@
 use crate::agent::{parse_run_id, refuse_law, AgentBuilder};
 use crate::error::{ErrorCode, FfiError};
-use crate::host::{guarded, host_tool, HostTool};
+use crate::host::{guarded, host_tool, trace_categories, trace_sink, HostTool, TraceListener};
 use crate::records::{GraphResult, Progress};
 use crate::runtime::{check_input, spawn};
 use crate::stream::RunStream;
@@ -131,6 +131,44 @@ impl GraphBuilder {
     /// Output: the same builder, for chaining.
     pub fn auto_laws(self: &Arc<Self>, on: bool) -> Arc<Self> {
         self.update(|graph| Ok(graph.auto_laws(on)))
+    }
+
+    /// Turns tracing on with every category, or off. Default off.
+    /// Spans go to `trace_listener`, `trace_jsonl` or the default file.
+    /// Output: the same builder, for chaining.
+    pub fn tracing(self: &Arc<Self>, on: bool) -> Arc<Self> {
+        self.update(|graph| Ok(graph.tracing(on)))
+    }
+
+    /// Turns tracing on for the named categories only, such as `tools`
+    /// or `models`; an empty list turns it off. An unknown name fails
+    /// the build with `InvalidArgument`. Output: the same builder.
+    pub fn trace(self: &Arc<Self>, categories: Vec<String>) -> Arc<Self> {
+        self.update(|graph| Ok(graph.trace(trace_categories(&categories)?)))
+    }
+
+    /// Keeps prompt, reply and tool text in spans. Default off: spans
+    /// then hold byte counts only. Keys are scrubbed either way.
+    /// Output: the same builder, for chaining.
+    pub fn trace_content(self: &Arc<Self>, on: bool) -> Arc<Self> {
+        self.update(|graph| Ok(graph.trace_content(on)))
+    }
+
+    /// Writes trace records to the new JSON Lines file `path`; an
+    /// existing file is refused at build. Replaces `trace_listener`.
+    /// Output: the same builder, for chaining.
+    pub fn trace_jsonl(self: &Arc<Self>, path: String) -> Arc<Self> {
+        self.update(|graph| {
+            check_input("trace_jsonl", &path)?;
+            Ok(graph.trace_file(path))
+        })
+    }
+
+    /// Sends each trace record to `listener` instead of a file.
+    /// Replaces `trace_jsonl`; takes effect only with tracing on.
+    /// Output: the same builder, for chaining.
+    pub fn trace_listener(self: &Arc<Self>, listener: Arc<dyn TraceListener>) -> Arc<Self> {
+        self.update(|graph| Ok(graph.trace_to(trace_sink(listener))))
     }
 
     /// Checks the nodes, edges, agents, tools and storage and returns a

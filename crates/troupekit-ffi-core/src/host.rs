@@ -2,6 +2,7 @@ use crate::error::{ErrorCode, FfiError};
 use crate::records::{
     FfiEvent, HostError, HostHeader, HostHttpRequest, HostModelCaps, HostReply, HostRequest,
 };
+use crate::runtime::check_input;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -9,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use troupekit_core::http::{HttpError, HttpErrorKind};
 use troupekit_core::tool::ToolSpec;
 use troupekit_tools::{Tool, ToolContext, ToolError, ToolOutput};
+use troupekit_trace::{CallbackSink, Trace, TraceSink};
 
 pub(crate) const MAX_TOOL_NAME_BYTES: usize = 64;
 pub(crate) const MAX_TOOL_DESCRIPTION_BYTES: usize = 16 * 1024;
@@ -27,6 +29,50 @@ pub trait EventListener: Send + Sync {
     /// Input: the event. Output: none; a panic here is caught and
     /// stops only this listener.
     fn on_event(&self, event: FfiEvent);
+}
+
+/// Receives every trace record of a traced build or run, as the
+/// callback form of `trace_jsonl`. Called on the thread that writes the
+/// record, so it should return fast; keys are scrubbed before the call.
+pub trait TraceListener: Send + Sync {
+    /// Handles one record: one JSON object on one line, no newline.
+    /// Input: the record. Output: none; a panic here is caught and
+    /// turns this listener off for the rest of the trace.
+    fn on_record(&self, line: String);
+}
+
+/// Wraps `listener` as a trace sink that catches its panics.
+/// Input: the host listener. Output: the sink for `trace_to`.
+pub(crate) fn trace_sink(listener: Arc<dyn TraceListener>) -> Arc<dyn TraceSink> {
+    Arc::new(CallbackSink::new(move |line: &str| {
+        assert!(!line.contains('\n'), "a trace record is one line");
+        listener.on_record(line.to_owned());
+    }))
+}
+
+/// Parses trace category names as 0.3 spells them, such as `tools`.
+/// Input: the names. Output: the categories, or `InvalidArgument`
+/// naming the first unknown name and every known one.
+pub(crate) fn trace_categories(names: &[String]) -> Result<Vec<Trace>, FfiError> {
+    let mut found = Vec::with_capacity(names.len());
+    for name in names {
+        check_input("trace", name)?;
+        match name.parse::<Trace>() {
+            Ok(category) => found.push(category),
+            Err(_) => {
+                let known: Vec<&str> = Trace::ALL.iter().map(|t| t.as_str()).collect();
+                return Err(FfiError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "trace: unknown category `{name}`; known: {}",
+                        known.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+    assert_eq!(found.len(), names.len());
+    Ok(found)
 }
 
 /// A tool written in the host language: a name the model calls it by,

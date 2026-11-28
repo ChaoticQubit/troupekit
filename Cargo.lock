@@ -3156,6 +3156,7 @@ dependencies = [
  "troupekit-kit",
  "troupekit-providers",
  "troupekit-tools",
+ "troupekit-trace",
 ]
 
 [[package]]
