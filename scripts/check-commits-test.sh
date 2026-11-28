@@ -16,7 +16,8 @@ base="$(g rev-parse HEAD)"
 
 for subject in "feat: add a tool" "fix(store-sqlite): close the file" "fix(local,kit): two scopes" "docs(readme)!: drop the old API" \
   "chore(0.3): bump" "ci: pin the runner" "test: cover the queue" "refactor(kit): split the builder" \
-  "perf: skip a copy" "build: cargo profile" "style: rustfmt" "revert: feat: add a tool"; do
+  "perf: skip a copy" "build: cargo profile" "style: rustfmt" "revert: feat: add a tool" \
+  'Revert "feat: add a tool"' 'Revert "Revert "fix(kit): x""'; do
   c "$subject"
 done
 g checkout -q -b side
@@ -26,7 +27,8 @@ g merge -q --no-ff -m "Merge pull request #1 from someone/side" side
 run "$base" HEAD >/dev/null 2>&1 || fail "valid range rejected: $(run "$base" HEAD 2>&1)"
 
 for subject in "Add a tool" "feat:no space" "feat add a tool" "feature: add" "Feat: add" \
-  "feat(): empty scope" "feat(kit) : space" "fixup! feat: add a tool" "wip" "feat:"; do
+  "feat(): empty scope" "feat(kit) : space" "fixup! feat: add a tool" "wip" "feat:" \
+  'Revert feat: add a tool' 'Revert ""' 'revert "feat: add a tool"' 'Revert "feat: x" now'; do
   good="$(g rev-parse HEAD)"
   c "$subject"
   if out="$(run "$base" HEAD 2>&1)"; then

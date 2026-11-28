@@ -32,7 +32,7 @@ type(scope)!: subject
 - `!` marks a breaking change. Explain the break in the commit body.
 - The subject starts right after `: ` and says what the change does.
 
-CI runs `scripts/check-commits.sh` on every pull request and fails on any subject that does not match. Merge commits are skipped. Check your branch before you push:
+CI runs `scripts/check-commits.sh` on every pull request and fails on any subject that does not match. Merge commits are skipped, and the `Revert "..."` subject that GitHub's Revert button and `git revert` write is accepted. Check your branch before you push:
 
 ```sh
 sh scripts/check-commits.sh origin/main HEAD
