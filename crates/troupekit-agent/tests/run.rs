@@ -1056,6 +1056,42 @@ async fn tool_calls_carry_idempotency_keys() {
     assert_eq!(keys.lock().unwrap()[4], format!("{id}:4:0"));
 }
 
+#[tokio::test]
+async fn retries_count_survives_checkpoints() {
+    let limited =
+        || Err(ProviderError::new(ProviderErrorKind::RateLimited, "slow down").with_retry_after(1));
+    let s = setup(vec![limited(), limited(), text("hi")], PRICE);
+    let mut run = AgentRun::new(&persona(""), ask(), Limits::default(), &s.io)
+        .await
+        .unwrap();
+    assert_eq!(run.retries(), 0);
+    assert!(matches!(run.step(&s.io).await, StepOutcome::Retry { .. }));
+    assert_eq!(run.retries(), 1);
+    let mut run = AgentRun::from_checkpoint(&run.checkpoint()).unwrap();
+    assert_eq!(run.retries(), 1);
+    assert!(matches!(run.step(&s.io).await, StepOutcome::Retry { .. }));
+    assert_eq!(run.retries(), 2);
+    assert_eq!(
+        step_to_end(&mut run, &s.io).await,
+        StepOutcome::Done(json!("hi"))
+    );
+    assert_eq!(run.retries(), 2);
+}
+
+#[tokio::test]
+async fn checkpoint_without_retries_still_loads() {
+    let s = setup(vec![], PRICE);
+    let run = AgentRun::new(&persona(""), ask(), Limits::default(), &s.io)
+        .await
+        .unwrap();
+    let mut cp = run.checkpoint();
+    let state = cp.state.as_object_mut().unwrap();
+    assert!(state.remove("retries").is_some());
+    let old = AgentRun::from_checkpoint(&cp).unwrap();
+    assert_eq!(old.retries(), 0);
+    assert_eq!(old.run_id(), run.run_id());
+}
+
 fn traced(content: bool) -> (troupekit_trace::Tracer, Arc<troupekit_trace::MemorySink>) {
     let sink = Arc::new(troupekit_trace::MemorySink::default());
     let tracer = troupekit_trace::Tracer::builder()

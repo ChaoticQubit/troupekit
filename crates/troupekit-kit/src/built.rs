@@ -17,6 +17,13 @@ use troupekit_core::message::{Message, Role};
 use troupekit_core::store::CheckpointStore;
 use troupekit_trace::Trace;
 
+mod start;
+mod stream;
+
+pub use start::{Progress, MAX_STEPS_PER_WINDOW};
+pub(crate) use stream::{Queue, StreamIo};
+pub use stream::{RunStream, StreamSettings};
+
 const BASE_RETRY_MS: u64 = 500;
 const MAX_RETRY_MS: u64 = 30_000;
 
@@ -238,7 +245,7 @@ impl BuiltAgent {
             Some(store) => store.clone(),
             None => Arc::new(InMemCheckpoints::default()),
         };
-        self.finish(&mut run, store.as_ref()).await
+        self.finish(&inner.io, &mut run, store.as_ref()).await
     }
 
     /// Continues run `run_id` from its latest checkpoint, after a crash
@@ -264,7 +271,10 @@ impl BuiltAgent {
             ));
         };
         let mut run = AgentRun::from_checkpoint(&checkpoint)?;
-        Ok(self.finish(&mut run, store.as_ref()).await?.text)
+        Ok(self
+            .finish(&self.inner.io, &mut run, store.as_ref())
+            .await?
+            .text)
     }
 
     /// Returns the validated persona this agent runs.
@@ -281,12 +291,28 @@ impl BuiltAgent {
         &self.inner.laws
     }
 
+    /// Refuses a restored run whose saved retry count is past this agent's
+    /// cap, before any step: an earlier call already ended it with
+    /// `Retries`. A count equal to the cap may still take its last retry.
+    fn refuse_exhausted(&self, run: &AgentRun) -> Result<(), KitError> {
+        let retries = run.retries();
+        if retries <= self.inner.retries {
+            return Ok(());
+        }
+        assert!(retries > 0);
+        Err(KitError::Retries {
+            run_id: run.run_id(),
+            attempts: retries - 1,
+            last_error: "retries were used up by an earlier call".into(),
+        })
+    }
+
     async fn finish(
         &self,
+        io: &dyn AgentIo,
         run: &mut AgentRun,
         store: &dyn CheckpointStore,
     ) -> Result<RunOutcome, KitError> {
-        let io: &dyn AgentIo = &self.inner.io;
         match run.state().clone() {
             RunState::Done { output } => return Ok(self.outcome(run, output)),
             RunState::Failed { error } => {
@@ -303,14 +329,19 @@ impl BuiltAgent {
             }
             _ => {}
         }
-        let mut attempts = 0u32;
+        self.refuse_exhausted(run)?;
         loop {
-            match drive(run, io, store).await? {
+            let step = drive(run, io, store)
+                .await
+                .map_err(|e| KitError::in_run(run.run_id(), e.into()))?;
+            match step {
                 StepOutcome::Done(output) => return Ok(self.outcome(run, output)),
                 StepOutcome::Retry {
                     error,
                     retry_after_ms,
                 } => {
+                    assert!(run.retries() > 0);
+                    let attempts = run.retries() - 1;
                     if attempts >= self.inner.retries {
                         return Err(KitError::Retries {
                             run_id: run.run_id(),
@@ -319,7 +350,6 @@ impl BuiltAgent {
                         });
                     }
                     tokio::time::sleep(retry_delay(attempts, retry_after_ms)).await;
-                    attempts += 1;
                 }
                 StepOutcome::Paused(reason) => {
                     return Err(KitError::Paused {
@@ -337,7 +367,7 @@ impl BuiltAgent {
                     unreachable!("drive returns only a final, paused or retry outcome")
                 }
             }
-            assert!(attempts <= self.inner.retries);
+            assert!(run.retries() <= self.inner.retries);
         }
     }
 

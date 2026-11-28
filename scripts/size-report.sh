@@ -11,6 +11,9 @@ for arg in "$@"; do
   esac
 done
 
+export IPHONEOS_DEPLOYMENT_TARGET=16.0
+grep -q '\.iOS(\.v16)' Package.swift
+
 rows="a: b:--no-default-features+--features+sqlite c:--no-default-features+--features+sqlite,llama"
 targets="aarch64-apple-ios aarch64-linux-android"
 
@@ -22,10 +25,15 @@ artifact() {
   esac
 }
 
-strip_tool() {
+strip_file() {
   case "$1" in
-    aarch64-apple-ios) echo "xcrun strip -S" ;;
-    aarch64-linux-android) echo "${ANDROID_NDK_HOME:?ANDROID_NDK_HOME unset}/toolchains/llvm/prebuilt/$(uname -s | tr 'A-Z' 'a-z')-x86_64/bin/llvm-strip" ;;
+    aarch64-apple-ios) xcrun strip -S "$2" ;;
+    aarch64-linux-android)
+      ndk="${ANDROID_NDK_HOME:?ANDROID_NDK_HOME unset}"
+      host="$(uname -s | tr 'A-Z' 'a-z')-x86_64"
+      "$ndk/toolchains/llvm/prebuilt/$host/bin/llvm-strip" "$2"
+      ;;
+    *) echo "unknown target $1" >&2; exit 2 ;;
   esac
 }
 
@@ -60,7 +68,7 @@ for target in $targets; do
     end="$(date +%s)"
     file="$dir/$target/release/$(artifact "$target")"
     cp "$file" "$file.stripped"
-    $(strip_tool "$target") "$file.stripped"
+    strip_file "$target" "$file.stripped"
     bytes="$(wc -c < "$file.stripped" | tr -d ' ')"
     echo "| $target | ($name) | $bytes | $((end - start)) | $label |"
   done

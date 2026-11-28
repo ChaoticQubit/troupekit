@@ -16,5 +16,11 @@ name = "_troupekit"
 crate-type = ["cdylib"]
 
 [dependencies]
-troupekit-ffi-core = { path = "../troupekit-ffi-core", version = "0.3.0" }
+troupekit-ffi-core = { path = "../troupekit-ffi-core", version = "0.3.0", default-features = false }
 pyo3 = { version = "=0.30.1", features = ["abi3-py311"] }
+
+[features]
+default = ["sqlite", "reqwest", "knowledge"]
+sqlite = ["troupekit-ffi-core/sqlite"]
+reqwest = ["troupekit-ffi-core/reqwest"]
+knowledge = ["troupekit-ffi-core/knowledge"]

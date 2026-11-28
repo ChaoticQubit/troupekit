@@ -1,1 +1,2 @@
+mod adapter;
 mod smoke;

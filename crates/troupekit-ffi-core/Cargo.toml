@@ -9,6 +9,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version = "1.89"
+autotests = false
 
 [dependencies]
 troupekit-core.workspace = true
@@ -33,5 +34,9 @@ knowledge = ["troupekit-kit/knowledge", "dep:troupekit-context"]
 unused_dependencies = "allow"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 tempfile = "3"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

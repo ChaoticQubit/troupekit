@@ -12,30 +12,6 @@ FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "agent.toml"
 CHUNKS = ["Hello", " from", " the stub"]
 EVENTS_MAX = 10_000
 
-
-def catalog_for(base_url):
-    """Builds a catalog TOML naming one no-key vendor at the stub's URL.
-
-    Input: the stub base URL ending in `/v1`. Output: catalog TOML text with
-    vendor `stub` and model `stub-model`, the selector the fixture uses.
-    """
-    return f"""
-[[vendor]]
-id = "stub"
-name = "Stub"
-protocol = "openai_compatible"
-base_url = "{base_url}"
-auth = "none"
-
-[[vendor.model]]
-id = "stub-model"
-context_window = 8192
-input_usd_micros_per_mtok = 0
-output_usd_micros_per_mtok = 0
-price_verified = true
-"""
-
-
 @pytest.fixture
 def stub():
     """Runs one stub server for a test and stops it afterwards.
@@ -53,8 +29,8 @@ def build_agent(base_url):
     Input: the stub base URL. Output: a built `AgentHandle`.
     """
     text = FIXTURE.read_text(encoding="utf-8")
-    builder = troupekit.AgentBuilder.from_toml(text).catalog_toml(catalog_for(base_url))
-    return builder.build()
+    catalog = stub_server.catalog_for(base_url)
+    return troupekit.AgentBuilder.from_toml(text).catalog_toml(catalog).build()
 
 
 def test_pip_installed_toml_agent_answers(stub):

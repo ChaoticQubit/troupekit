@@ -11,7 +11,10 @@ compat="${WHEEL_COMPAT:-}"
   exit 2
 }
 
-venv="$(mktemp -d)/build-venv"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+venv="$work/build-venv"
+built="$work/wheel"
 "$python" -m venv "$venv"
 if [ -x "$venv/bin/python" ]; then
   vpy="$venv/bin/python"
@@ -23,15 +26,19 @@ fi
 set -- build --release --strip --locked \
   --manifest-path crates/troupekit-py/Cargo.toml \
   --interpreter "$vpy" \
-  --out "$out"
+  --out "$built"
 if [ -n "$compat" ]; then
   set -- "$@" --compatibility "$compat"
 fi
 "$vpy" -m maturin "$@"
 
-count="$(find "$out" -maxdepth 1 -name 'troupekit-*-abi3-*.whl' | wc -l | tr -d ' ')"
+count="$(find "$built" -maxdepth 1 -name 'troupekit-*-abi3-*.whl' | wc -l | tr -d ' ')"
 if [ "$count" != "1" ]; then
-  echo "expected exactly one abi3 wheel in $out, found $count" >&2
+  echo "expected exactly one abi3 wheel from this build, found $count" >&2
   exit 1
 fi
-find "$out" -maxdepth 1 -name 'troupekit-*-abi3-*.whl'
+wheel="$(find "$built" -maxdepth 1 -name 'troupekit-*-abi3-*.whl')"
+mkdir -p "$out"
+cp "$wheel" "$out/"
+test -f "$out/$(basename "$wheel")"
+echo "$out/$(basename "$wheel")"
