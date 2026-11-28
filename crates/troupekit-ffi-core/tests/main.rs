@@ -9,3 +9,4 @@ mod host_transport;
 mod knowledge;
 mod records;
 mod skeleton;
+mod trace;

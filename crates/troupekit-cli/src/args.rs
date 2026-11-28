@@ -5,7 +5,7 @@ use troupekit_trace::{Trace, TraceSet};
 /// Usage line printed for any bad call, with exit code 2.
 /// Lists every flag; the key is read from the variable named by
 /// `--key-env`, never from a flag.
-pub const USAGE: &str = "usage: troupekit ingest <dir> [--db FILE] [--index NAME] [--scope NAME] --embedder SELECTOR [--catalog FILE] [--key-env VAR] [--chunk-tokens N] [--overlap-tokens N] [--kind brute|hnsw] [--quant f32|f16|i8]";
+pub const USAGE: &str = "usage: troupekit ingest <dir> [--db FILE] [--index NAME] [--scope NAME] --embedder SELECTOR [--catalog FILE] [--key-env VAR] [--chunk-tokens N] [--overlap-tokens N] [--kind brute|hnsw] [--quant f32|f16|i8] [--max-remove-share PERCENT] [--allow-remove-all]";
 
 /// Usage line of `troupekit trace`, printed after `USAGE` for a bad call.
 /// `--html` without a value writes `<file>.html` next to the trace.
@@ -44,7 +44,8 @@ pub enum Quant {
 
 /// A parsed `troupekit ingest` call with every default applied.
 /// Built only by `parse`; the runner reads the fields.
-/// `chunk_tokens` and `overlap_tokens` are `None` for the library default.
+/// `chunk_tokens`, `overlap_tokens` and `max_remove_share` are `None`
+/// for the library default; `allow_remove_all` is off unless given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestArgs {
     pub dir: PathBuf,
@@ -58,6 +59,8 @@ pub struct IngestArgs {
     pub overlap_tokens: Option<usize>,
     pub kind: Kind,
     pub quant: Quant,
+    pub max_remove_share: Option<u8>,
+    pub allow_remove_all: bool,
 }
 
 fn number(flag: &str, value: &str, max: usize) -> Result<usize, String> {
@@ -102,11 +105,20 @@ pub fn parse(args: &[String]) -> Result<IngestArgs, String> {
     let mut overlap_tokens = None;
     let mut kind = None;
     let mut quant = None;
+    let mut max_remove_share = None;
+    let mut allow_remove_all = false;
     while let Some(arg) = it.next() {
         if !arg.starts_with("--") {
             if dir.replace(PathBuf::from(arg)).is_some() {
                 return Err(format!("unexpected argument {arg:?}"));
             }
+            continue;
+        }
+        if arg == "--allow-remove-all" {
+            if allow_remove_all {
+                return Err(format!("{arg} given twice"));
+            }
+            allow_remove_all = true;
             continue;
         }
         let value = it.next().ok_or_else(|| format!("{arg} needs a value"))?;
@@ -125,6 +137,10 @@ pub fn parse(args: &[String]) -> Result<IngestArgs, String> {
                 chunk_tokens.replace(n).is_some()
             }
             "--overlap-tokens" => overlap_tokens.replace(number(arg, value, MAX_TOKENS)?).is_some(),
+            "--max-remove-share" => {
+                let percent = u8::try_from(number(arg, value, 100)?).expect("at most 100");
+                max_remove_share.replace(percent).is_some()
+            }
             "--kind" => kind
                 .replace(match value.as_str() {
                     "brute" => Kind::Brute,
@@ -162,6 +178,8 @@ pub fn parse(args: &[String]) -> Result<IngestArgs, String> {
         overlap_tokens,
         kind: kind.unwrap_or(Kind::Brute),
         quant: quant.unwrap_or(Quant::F32),
+        max_remove_share,
+        allow_remove_all,
     })
 }
 
@@ -269,10 +287,12 @@ mod tests {
                 overlap_tokens: None,
                 kind: Kind::Brute,
                 quant: Quant::F32,
+                max_remove_share: None,
+                allow_remove_all: false,
             }
         );
         let a = parse(&args(&[
-            "ingest", "--db", "x.db", "--index", "kb", "--scope", "s", "--embedder", "openai/text-embedding-3-small", "--catalog", "c.toml", "--key-env", "MY_KEY", "--chunk-tokens", "300", "--overlap-tokens", "0", "--kind", "hnsw", "--quant", "i8", "folder",
+            "ingest", "--db", "x.db", "--index", "kb", "--scope", "s", "--embedder", "openai/text-embedding-3-small", "--catalog", "c.toml", "--key-env", "MY_KEY", "--chunk-tokens", "300", "--overlap-tokens", "0", "--kind", "hnsw", "--quant", "i8", "--max-remove-share", "80", "--allow-remove-all", "folder",
         ]))
         .unwrap();
         assert_eq!(a.dir, PathBuf::from("folder"));
@@ -282,6 +302,7 @@ mod tests {
         assert_eq!(a.catalog, Some(PathBuf::from("c.toml")));
         assert_eq!((a.chunk_tokens, a.overlap_tokens), (Some(300), Some(0)));
         assert_eq!((a.kind, a.quant), (Kind::Hnsw, Quant::I8));
+        assert_eq!((a.max_remove_share, a.allow_remove_all), (Some(80), true));
     }
 
     #[test]
@@ -305,6 +326,10 @@ mod tests {
             vec!["ingest", "d", "--embedder", "hashing:8", "--quant", "f64"],
             vec!["ingest", "d", "--embedder", "hashing:8", "--db", "a", "--db", "b"],
             vec!["ingest", "d", "--embedder", "hashing:8", "--key-env", ""],
+            vec!["ingest", "d", "--embedder", "hashing:8", "--max-remove-share", "101"],
+            vec!["ingest", "d", "--embedder", "hashing:8", "--max-remove-share", "-1"],
+            vec!["ingest", "d", "--embedder", "hashing:8", "--max-remove-share"],
+            vec!["ingest", "d", "--embedder", "hashing:8", "--allow-remove-all", "--allow-remove-all"],
         ] {
             assert!(parse(&args(&bad)).is_err(), "{bad:?}");
         }
@@ -318,6 +343,7 @@ mod tests {
         assert_eq!(a.key_env, "TROUPEKIT_EMBED_KEY");
         assert_eq!((a.chunk_tokens, a.overlap_tokens), (None, None));
         assert_eq!(a.db, PathBuf::from("./troupekit.db"));
+        assert_eq!((a.max_remove_share, a.allow_remove_all), (None, false));
         assert!(parse(&args(&["ingest", "d"])).is_err(), "no default embedder: a run must name one");
     }
 

@@ -118,8 +118,9 @@ impl<T> RunStream<T> {
         self.abort.abort();
     }
 
-    /// Waits for the run to end and returns its result, once.
-    /// Output: the outcome, the run's error, `Cancelled` after `cancel`,
+    /// Waits for the run to end and returns its result, once. Dropping
+    /// this future before the run ends cancels the run, like `cancel`.
+    /// Output: the outcome, the run's error, `Cancelled` after a cancel,
     /// or `Config` on a second call. A panic in the run resumes here.
     pub async fn finish(&self) -> Result<T, KitError> {
         let mut slot = self.task.lock().await;
@@ -129,6 +130,7 @@ impl<T> RunStream<T> {
                 "finish was already called for this stream",
             ));
         };
+        let _abort = AbortOnDrop(&self.abort);
         let joined = task.await;
         *slot = None;
         match joined {
@@ -141,10 +143,24 @@ impl<T> RunStream<T> {
     }
 }
 
+/// Aborts the run when dropped. Held by `finish` while it joins, so a
+/// `finish` future dropped mid-join (a timeout) stops the run; once the
+/// join is done the abort is a no-op on the finished task.
+struct AbortOnDrop<'a>(&'a AbortHandle);
+
+impl Drop for AbortOnDrop<'_> {
+    /// Aborts the run task. Output: none.
+    /// Safe on a task that has already ended.
+    /// Never blocks.
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl<T> Drop for RunStream<T> {
-    /// Cancels the run when the stream is dropped, so an unread stream,
-    /// or a dropped `finish` future, never keeps calling the model. The
-    /// checkpoint stays. A no-op once the run has ended.
+    /// Cancels the run when the stream is dropped, so an unread stream
+    /// never keeps calling the model; `finish` guards its own future the
+    /// same way. The checkpoint stays. A no-op once the run has ended.
     fn drop(&mut self) {
         self.abort.abort();
     }

@@ -271,6 +271,28 @@ impl std::fmt::Debug for SqliteVectors {
     }
 }
 
+/// Applies this handle's FTS5 `secure-delete` wish to the file, where the
+/// option is persistent and shared by every handle. It may be raised,
+/// never lowered: a handle asking for off on a file that has it on is
+/// refused, so one store cannot weaken deletes for another.
+/// Output: `Ok`, or `CoreError::Store` naming the conflict.
+fn fts_secure_delete(tx: &rusqlite::Transaction<'_>, wanted: bool) -> Result<(), CoreError> {
+    let stored: Option<i64> = tx
+        .query_row("SELECT v FROM chunk_fts_config WHERE k = 'secure-delete'", [], |row| row.get(0))
+        .optional()
+        .map_err(db)?;
+    let on = stored == Some(1);
+    if wanted && !on {
+        tx.execute("INSERT INTO chunk_fts (chunk_fts, rank) VALUES ('secure-delete', 1)", []).map_err(db)?;
+    }
+    if !wanted && on {
+        return Err(CoreError::Store(
+            "this file has FTS5 secure-delete on; a store with secure_delete(false) may not turn it off for other handles".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl SqliteStore {
     /// Opens the vector index `name`, creating it on first use.
     /// Input: a name of 1 to 64 chars in `[a-z0-9_]` and its settings.
@@ -284,11 +306,11 @@ impl SqliteStore {
         let name = name.to_string();
         let store = self.clone();
         let now_ms = self.inner.clock.now_ms();
-        let secure_delete = i64::from(self.inner.secure_delete);
+        let secure_delete = self.inner.secure_delete;
         let state = self
             .call(move |conn| {
                 let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db)?;
-                tx.execute("INSERT INTO chunk_fts (chunk_fts, rank) VALUES ('secure-delete', ?1)", [secure_delete]).map_err(db)?;
+                fts_secure_delete(&tx, secure_delete)?;
                 let row: Option<(i64, String, String)> = tx
                     .query_row(
                         "SELECT dims, kind, params_json FROM vector_index WHERE name = ?1",

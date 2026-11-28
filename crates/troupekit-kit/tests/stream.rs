@@ -368,3 +368,95 @@ async fn graph_stream_with_checks_capacity() {
     let err = built.stream_with("hi", bad).await.unwrap_err();
     assert!(err.to_string().contains("capacity"), "{err}");
 }
+
+#[tokio::test]
+async fn dropped_finish_future_aborts_the_run() {
+    let built = chunky(1, Duration::from_secs(600)).build().await.unwrap();
+    let mut stream = built.stream("hi").await.unwrap();
+    let waited = tokio::time::timeout(Duration::from_millis(50), stream.finish()).await;
+    assert!(waited.is_err(), "slow run finished");
+    let events = tokio::time::timeout(Duration::from_secs(10), drain(&mut stream))
+        .await
+        .expect("run kept going after its finish future was dropped");
+    assert!(events.len() < 10);
+    let err = stream.finish().await.unwrap_err();
+    assert!(
+        matches!(err, troupekit::KitError::Cancelled { .. }),
+        "{err:?}"
+    );
+}
+
+struct SavesThenFails {
+    inner: InMemCheckpoints,
+    left: std::sync::Mutex<usize>,
+}
+
+#[async_trait::async_trait]
+impl CheckpointStore for SavesThenFails {
+    async fn save(
+        &self,
+        cp: troupekit_core::store::Checkpoint,
+    ) -> Result<(), troupekit_core::error::CoreError> {
+        {
+            let mut left = self.left.lock().unwrap();
+            if *left == 0 {
+                return Err(troupekit_core::error::CoreError::InvalidMessage(
+                    "disk full".into(),
+                ));
+            }
+            *left -= 1;
+        }
+        self.inner.save(cp).await
+    }
+
+    async fn latest(
+        &self,
+        run_id: troupekit_core::ids::RunId,
+    ) -> Result<Option<troupekit_core::store::Checkpoint>, troupekit_core::error::CoreError> {
+        self.inner.latest(run_id).await
+    }
+}
+
+fn graph_on(store: Arc<SavesThenFails>) -> Graph {
+    Graph::new("pipeline")
+        .agent("draft", drafter())
+        .step("upper", upper_draft)
+        .checkpoints(Storage::custom(store))
+}
+
+fn saves(left: usize) -> Arc<SavesThenFails> {
+    Arc::new(SavesThenFails {
+        inner: InMemCheckpoints::default(),
+        left: std::sync::Mutex::new(left),
+    })
+}
+
+#[tokio::test]
+async fn graph_save_failure_mid_run_keeps_the_run_id() {
+    let store = saves(1);
+    let built = graph_on(store.clone()).build().await.unwrap();
+    let err = built.run_with("hi").await.unwrap_err();
+    let troupekit::KitError::InRun { run_id, source } = err else {
+        panic!("expected InRun, got {err:?}");
+    };
+    assert!(store.latest(run_id).await.unwrap().is_some());
+    assert!(
+        matches!(*source, troupekit::KitError::Store(_)),
+        "{source:?}"
+    );
+}
+
+#[tokio::test]
+async fn graph_resume_for_save_failure_keeps_the_run_id() {
+    let store = saves(1);
+    let built = graph_on(store.clone()).build().await.unwrap();
+    let run_id = built.start("hi").await.unwrap();
+    let err = built
+        .resume_for(run_id, Duration::from_secs(60))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, troupekit::KitError::InRun { run_id: id, .. } if id == run_id),
+        "{err:?}"
+    );
+}
