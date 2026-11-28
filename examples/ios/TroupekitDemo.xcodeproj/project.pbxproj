@@ -1,0 +1,319 @@
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+		51618982F7C42CD1FCFF6637 = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BFC72D182AEA9C081839521B;
+			proxyType = 1;
+			remoteGlobalIDString = FA50E5BA622CB5A98F805E7E;
+			remoteInfo = TroupekitDemo;
+		};
+
+		900D9B32875B79D8C7CA1434 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TroupekitDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D4BAD6F79872501046C64446 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TroupekitDemoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		09A26DC3EB6771E0A9CBC3DE = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "TroupekitDemo-Info.plist"; sourceTree = "<group>"; };
+
+		B42F27334969C573275632F9 = {isa = PBXFileSystemSynchronizedRootGroup; path = TroupekitDemo; sourceTree = "<group>"; };
+		40997D56D89FBB34C6712A37 = {isa = PBXFileSystemSynchronizedRootGroup; path = TroupekitDemoUITests; sourceTree = "<group>"; };
+
+		3029F5EB943F994734CBE700 = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3F194CFBB5344B0B6F368ED3 = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
+		499AD7F59543D813A40ABFFF = {
+			isa = PBXGroup;
+			children = (
+				09A26DC3EB6771E0A9CBC3DE,
+				B42F27334969C573275632F9,
+				40997D56D89FBB34C6712A37,
+				4B9A73BB92F52BF2B2858ECE,
+			);
+			sourceTree = "<group>";
+		};
+		4B9A73BB92F52BF2B2858ECE = {
+			isa = PBXGroup;
+			children = (
+				900D9B32875B79D8C7CA1434,
+				D4BAD6F79872501046C64446,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+
+		FA50E5BA622CB5A98F805E7E = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A34015880754EE1C69DBD640;
+			buildPhases = (
+				A38DA399D66A1A9AB074CA72,
+				3029F5EB943F994734CBE700,
+				BC543BE569501BC9039DD43D,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				B42F27334969C573275632F9,
+			);
+			name = TroupekitDemo;
+			packageProductDependencies = (
+			);
+			productName = TroupekitDemo;
+			productReference = 900D9B32875B79D8C7CA1434;
+			productType = "com.apple.product-type.application";
+		};
+		928A4725A77D8DE344E3DEB1 = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B52FABD099BADAE5577F0D14;
+			buildPhases = (
+				E91EAB2F52B2044751B6212A,
+				3F194CFBB5344B0B6F368ED3,
+				618C177FD4DB2BFB61B9800D,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3FD3D6B21496B33E0ED770D1,
+			);
+			fileSystemSynchronizedGroups = (
+				40997D56D89FBB34C6712A37,
+			);
+			name = TroupekitDemoUITests;
+			packageProductDependencies = (
+			);
+			productName = TroupekitDemoUITests;
+			productReference = D4BAD6F79872501046C64446;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+
+		BFC72D182AEA9C081839521B = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					FA50E5BA622CB5A98F805E7E = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					928A4725A77D8DE344E3DEB1 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = FA50E5BA622CB5A98F805E7E;
+					};
+				};
+			};
+			buildConfigurationList = 771ECEBBB193D875DFF845F2;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 499AD7F59543D813A40ABFFF;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4B9A73BB92F52BF2B2858ECE;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				FA50E5BA622CB5A98F805E7E,
+				928A4725A77D8DE344E3DEB1,
+			);
+		};
+
+		BC543BE569501BC9039DD43D = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		618C177FD4DB2BFB61B9800D = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
+		A38DA399D66A1A9AB074CA72 = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E91EAB2F52B2044751B6212A = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
+		3FD3D6B21496B33E0ED770D1 = {
+			isa = PBXTargetDependency;
+			target = FA50E5BA622CB5A98F805E7E;
+			targetProxy = 51618982F7C42CD1FCFF6637;
+		};
+
+		1095E3B146A3C172EE00999D = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		CF35B7E89CE0EFF9651557A1 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		530C89023A4E821D343FA68E = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "TroupekitDemo-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Troupekit Demo";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 0.4.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.troupekit.demo;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		8479F31D0DF8E83002236361 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "TroupekitDemo-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Troupekit Demo";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 0.4.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.troupekit.demo;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		7A5482ED7E219EF72BAF779A = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.4.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.troupekit.demo.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = TroupekitDemo;
+			};
+			name = Debug;
+		};
+		2BF71A64114247088464E32D = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.4.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.troupekit.demo.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = TroupekitDemo;
+			};
+			name = Release;
+		};
+
+		771ECEBBB193D875DFF845F2 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1095E3B146A3C172EE00999D,
+				CF35B7E89CE0EFF9651557A1,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A34015880754EE1C69DBD640 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				530C89023A4E821D343FA68E,
+				8479F31D0DF8E83002236361,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B52FABD099BADAE5577F0D14 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7A5482ED7E219EF72BAF779A,
+				2BF71A64114247088464E32D,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+	};
+	rootObject = BFC72D182AEA9C081839521B;
+}

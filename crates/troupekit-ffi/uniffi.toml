@@ -1,0 +1,8 @@
+[bindings.swift]
+module_name = "Troupekit"
+ffi_module_name = "TroupekitFFI"
+ffi_module_filename = "troupekitFFI"
+
+[bindings.kotlin]
+package_name = "dev.troupekit"
+cdylib_name = "troupekit_ffi"

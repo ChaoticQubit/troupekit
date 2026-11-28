@@ -3,6 +3,16 @@ target/
 /graphify-out
 .env
 .env.*
+/.build/
+/bindings/swift/TroupekitFFI.xcframework/
+/bindings/kotlin/.gradle/
+/bindings/kotlin/.kotlin/
+/bindings/kotlin/build/
+/bindings/kotlin/*/build/
+/bindings/kotlin/local.properties
+/bindings/kotlin/troupekit/src/main/jniLibs/
+__pycache__/
+.pytest_cache/
 CLAUDE.md
 AGENTS.md
 .claude/

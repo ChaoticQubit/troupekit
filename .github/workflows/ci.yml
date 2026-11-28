@@ -226,6 +226,8 @@ jobs:
   macos:
     name: macos
     runs-on: macos-latest
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: '16.0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -238,13 +240,15 @@ jobs:
             target
           key: macOS-all-${{ hashFiles('Cargo.lock') }}
       - name: add ios target
-        run: rustup target add aarch64-apple-ios
+        run: |
+          grep -q '\.iOS(\.v16)' Package.swift
+          rustup target add aarch64-apple-ios
       - name: build workspace
         if: ${{ !cancelled() }}
         run: cargo build --workspace --locked
       - name: build workspace for ios
         if: ${{ !cancelled() }}
-        run: cargo build --workspace --exclude troupekit-py --exclude troupekit-cli --locked --target aarch64-apple-ios
+        run: cargo build --workspace --exclude troupekit-cli --exclude troupekit-py --locked --target aarch64-apple-ios
       - name: build ios without the TLS stack
         if: ${{ !cancelled() }}
         run: cargo build -p troupekit --no-default-features --features sqlite --locked --target aarch64-apple-ios
@@ -254,6 +258,10 @@ jobs:
       - name: boundary
         if: ${{ !cancelled() && !startsWith(github.head_ref, 'release/') }}
         run: sh scripts/check-boundary.sh
+      - name: size report prints every row
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: test "$(sh scripts/size-report.sh --dry-run | grep -c '^build ')" = 6
       - name: test changed crates
         if: ${{ !cancelled() && !startsWith(github.head_ref, 'release/') }}
         shell: bash
@@ -297,11 +305,312 @@ jobs:
         shell: bash
         run: |
           for crate in troupekit troupekit-kit troupekit-ffi-core; do
-            if cargo tree -p "$crate" -e normal --locked | grep -E 'uniffi|pyo3'; then
+            tree="$(cargo tree -p "$crate" -e normal --locked)"
+            test -n "$tree"
+            if printf '%s\n' "$tree" | grep -E 'uniffi|pyo3'; then
               echo "$crate depends on a binding crate"
               exit 1
             fi
           done
+
+  bindings-msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: binding crates build on their rust-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          for crate in troupekit-ffi troupekit-ffi-core troupekit-py; do
+            grep -qx 'rust-version = "1.89"' "crates/$crate/Cargo.toml"
+          done
+          rustup toolchain install 1.89 --profile minimal
+          cargo +1.89 check --locked --all-targets -p troupekit-ffi -p troupekit-ffi-core -p troupekit-py
+
+  bindings-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: build the host library
+        run: cargo build -p troupekit-ffi --release --locked
+      - name: generate Swift and Kotlin
+        shell: bash
+        run: |
+          set -euo pipefail
+          lib=target/release/libtroupekit_ffi.so
+          test -f "$lib"
+          for language in swift kotlin; do
+            cargo run -p troupekit-ffi --features bindgen --release --locked --bin uniffi-bindgen -- \
+              generate --library "$lib" --language "$language" --out-dir "target/drift/$language"
+          done
+          test -f target/drift/swift/Troupekit.swift
+          test -f target/drift/kotlin/dev/troupekit/troupekit_ffi.kt
+      - name: checked-in bindings match the Rust code
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          while read -r generated checked; do
+            if [ ! -f "$checked" ]; then
+              echo "::error file=$checked::missing: take it from the bindings-generated artifact"
+              status=1
+              continue
+            fi
+            if ! cmp -s "$generated" "$checked"; then
+              echo "::error file=$checked::stale: regenerate with scripts/build-xcframework.sh or scripts/build-aar.sh"
+              diff -u "$checked" "$generated" | head -n 200 || true
+              status=1
+            fi
+          done <<'PAIRS'
+          target/drift/swift/Troupekit.swift bindings/swift/Sources/Troupekit/Troupekit.swift
+          target/drift/kotlin/dev/troupekit/troupekit_ffi.kt bindings/kotlin/troupekit/src/main/kotlin/dev/troupekit/troupekit_ffi.kt
+          PAIRS
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: bindings-generated
+          path: target/drift
+          if-no-files-found: error
+
+  kotlin-jvm:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c
+      - name: build the host library and the Kotlin bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p troupekit-ffi --release --locked
+          lib=""
+          for candidate in target/release/libtroupekit_ffi.so target/release/libtroupekit_ffi.dylib; do
+            if [ -f "$candidate" ]; then
+              lib="$candidate"
+            fi
+          done
+          test -n "$lib"
+          kotlin=bindings/kotlin/troupekit/src/main/kotlin/dev/troupekit/troupekit_ffi.kt
+          test -f "$kotlin"
+      - name: JVM contract runner
+        shell: bash
+        working-directory: bindings/kotlin
+        run: |
+          set -euo pipefail
+          test -f gradle/verification-metadata.xml
+          ./gradlew --no-daemon :troupekit:testDebugUnitTest
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: kotlin-test-reports-${{ matrix.runner }}
+          path: bindings/kotlin/troupekit/build/reports/tests/
+          if-no-files-found: warn
+
+  android-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: build the AAR with the emulator ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f bindings/kotlin/gradle/verification-metadata.xml
+          rustup target add aarch64-linux-android x86_64-linux-android
+          ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" sh scripts/build-aar.sh --emulator
+      - uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 34
+          arch: x86_64
+          working-directory: bindings/kotlin
+          script: ./gradlew --no-daemon :troupekit:connectedDebugAndroidTest
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: kotlin-test-reports-android
+          path: bindings/kotlin/troupekit/build/reports/androidTests/
+          if-no-files-found: warn
+
+  swift:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: build the XCFramework and the Swift bindings
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          sh scripts/build-xcframework.sh
+      - name: Swift contract runner
+        run: swift test
+
+  ffi-overhead:
+    if: contains(github.event.pull_request.labels.*.name, 'bench')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c
+      - name: build every binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          sh scripts/build-xcframework.sh
+          cargo build -p troupekit-ffi --release --locked
+          kotlin=bindings/kotlin/troupekit/src/main/kotlin/dev/troupekit/troupekit_ffi.kt
+          test -f "$kotlin"
+          sh scripts/build-wheel.sh dist
+          python3 -m venv bench-venv
+          bench-venv/bin/python -m pip install --quiet dist/troupekit-*-abi3-*.whl
+          cargo build -p troupekit-ffi --example overhead --release --locked
+      - name: quiet and loaded runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/overhead.txt"
+          : > "$out"
+          export TROUPEKIT_BENCH=1 TROUPEKIT_BENCH_OUT="$out"
+          run_all() {
+            export TROUPEKIT_BENCH_LABEL="$1"
+            cargo run -p troupekit-ffi --example overhead --release --locked >> "$out"
+            swift test -c release -Xswiftc -enable-testing --filter OverheadTests
+            (cd bindings/kotlin && ./gradlew --no-daemon :troupekit:testDebugUnitTest \
+              --tests dev.troupekit.contract.OverheadTest --rerun)
+            (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/bench-venv/bin/python" \
+              "$GITHUB_WORKSPACE/crates/troupekit-py/tests/bench_overhead.py")
+          }
+          hogs=()
+          load_on() {
+            for _ in $(seq "$(sysctl -n hw.ncpu)"); do
+              yes > /dev/null &
+              hogs+=("$!")
+            done
+          }
+          load_off() {
+            kill "${hogs[@]}"
+            hogs=()
+          }
+          export TROUPEKIT_BENCH_FIRST=quiet
+          run_all quiet
+          load_on
+          run_all loaded
+          export TROUPEKIT_BENCH_FIRST=loaded
+          run_all loaded
+          load_off
+          run_all quiet
+          cat "$out"
+          test "$(grep -c '^overhead ' "$out")" = 64
+          test "$(grep -c ' first=quiet$' "$out")" = 32
+          test "$(grep -c ' first=loaded$' "$out")" = 32
+          cp "$out" overhead.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: ffi-overhead
+          path: overhead.txt
+          if-no-files-found: error
+
+  binary-size:
+    if: contains(github.event.pull_request.labels.*.name, 'bench')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: stripped size of each troupekit-ffi row
+        shell: bash
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_LATEST_HOME:?no Android NDK on this runner}"
+          rustup target add aarch64-apple-ios aarch64-linux-android
+          bin="$ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+          export ANDROID_NDK_HOME="$ndk" ANDROID_NDK_ROOT="$ndk"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android26-clang"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$bin/aarch64-linux-android26-clang"
+          test -x "$CC_aarch64_linux_android"
+          sh scripts/size-report.sh --label=runner | tee size.md
+          test "$(grep -c '| runner |$' size.md)" = 6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: binary-size
+          path: size.md
+          if-no-files-found: error
+
+  wheels:
+    name: wheel ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-latest
+            container: ''
+            python: python3
+            compat: ''
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            python: /opt/python/cp311-cp311/bin/python3
+            compat: manylinux_2_28
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            python: /opt/python/cp311-cp311/bin/python3
+            compat: manylinux_2_28
+          - name: windows-x86_64
+            runner: windows-latest
+            container: ''
+            python: python
+            compat: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: rust in the manylinux container
+        if: matrix.container != ''
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: build wheel
+        shell: bash
+        env:
+          PYTHON: ${{ matrix.python }}
+          WHEEL_COMPAT: ${{ matrix.compat }}
+        run: sh scripts/build-wheel.sh dist
+      - name: pip install and end-to-end test
+        shell: bash
+        run: |
+          "${{ matrix.python }}" -m venv e2e-venv
+          if [ -x e2e-venv/bin/python ]; then py="$PWD/e2e-venv/bin/python"; else py="$PWD/e2e-venv/Scripts/python.exe"; fi
+          "$py" -m pip install --quiet dist/troupekit-*-abi3-*.whl "pytest==9.2.0"
+          cd "$RUNNER_TEMP"
+          "$py" -m pytest "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_smoke.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_e2e_toml.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_host_tool.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_freeze.py" "$GITHUB_WORKSPACE/crates/troupekit-py/tests/test_contract.py" --junitxml="$RUNNER_TEMP/pytest.xml"
+          "$py" -c 'import sys, xml.etree.ElementTree as tree; suite = tree.parse(sys.argv[1]).getroot().find("testsuite"); assert suite is not None; skipped = int(suite.get("skipped")); assert int(suite.get("tests")) > 0; sys.exit(f"{skipped} Python tests skipped or xfailed; every case must run" if skipped else 0)' "$RUNNER_TEMP/pytest.xml"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
 
   proofs:
     runs-on: ubuntu-latest
