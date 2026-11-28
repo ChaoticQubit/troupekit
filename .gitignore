@@ -13,3 +13,6 @@ target/
 /bindings/kotlin/troupekit/src/main/jniLibs/
 __pycache__/
 .pytest_cache/
+CLAUDE.md
+AGENTS.md
+.claude/
