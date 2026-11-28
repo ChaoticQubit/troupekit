@@ -17,7 +17,7 @@ struct AppleAdapterError: Error, CustomStringConvertible {
 /// Builds the boundary error type from a message, in one place for every adapter.
 /// Input: the message. Output: the generated `HostError` carrying it.
 func makeHostError(_ message: String) -> HostError {
-    HostError.Failed(message: message)
+    HostError.Failed(detail: message)
 }
 
 /// Maps any error raised inside an adapter to the boundary error type.
