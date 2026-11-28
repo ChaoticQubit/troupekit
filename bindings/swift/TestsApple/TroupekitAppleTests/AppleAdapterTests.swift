@@ -42,8 +42,6 @@ final class StubProtocol: URLProtocol {
         let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
         if let target = reply.redirect {
             client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: target), redirectResponse: response)
-            client?.urlProtocolDidFinishLoading(self)
-            return
         }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: reply.body)
