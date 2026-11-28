@@ -25,6 +25,8 @@ troupekit = { git = "https://github.com/ChaoticQubit/troupekit", tag = "v0.3.0" 
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
+Source: composed as in [Install](install.md).
+
 Troupekit is not on crates.io yet, so 0.3 is used as a git dependency on the `v0.3.0` tag.
 
 ## Write the agent

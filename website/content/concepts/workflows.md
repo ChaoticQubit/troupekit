@@ -27,6 +27,8 @@ fn count_chars(clean: String) -> usize {
 }
 ```
 
+Source: `crates/troupekit-kit/tests/graph.rs`
+
 ```rust
 let report = Graph::new("lab3")
     .step("clean", clean_text)

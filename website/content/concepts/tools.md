@@ -39,7 +39,11 @@ struct AddArgs {
     a: i64,
     b: i64,
 }
+```
 
+Source: `crates/troupekit-kit/tests/output.rs`, struct `AddArgs`
+
+```rust
 #[tokio::test]
 async fn tool_fn_form_err_reaches_model_as_error_output() {
     let mut registry = ToolRegistry::new();
@@ -59,7 +63,7 @@ async fn tool_fn_form_err_reaches_model_as_error_output() {
 }
 ```
 
-Source: `crates/troupekit-kit/tests/output.rs`
+Source: `crates/troupekit-kit/tests/output.rs`, test `tool_fn_form_err_reaches_model_as_error_output`
 
 ## Adding tools to an agent
 

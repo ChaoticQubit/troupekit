@@ -23,7 +23,7 @@ troupekit = { git = "https://github.com/ChaoticQubit/troupekit", tag = "v0.3.0" 
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-Source: the `repository` key of `Cargo.toml` and the tokio features of `crates/troupekit/Cargo.toml` `[dev-dependencies]`.
+Source: composed from the `repository` key of `Cargo.toml`, the `v0.3.0` tag and the tokio features of `crates/troupekit/Cargo.toml` `[dev-dependencies]`.
 
 ## Pick features
 
@@ -32,6 +32,8 @@ The default features are `sqlite`, `reqwest` and `kit`. Add others in the depend
 ```toml
 troupekit = { git = "https://github.com/ChaoticQubit/troupekit", tag = "v0.3.0", features = ["knowledge"] }
 ```
+
+Source: composed from the dependency line above and `crates/troupekit/Cargo.toml` `[features]`.
 
 | Feature | Adds |
 |---|---|
