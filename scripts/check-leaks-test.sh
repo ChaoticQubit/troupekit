@@ -23,7 +23,7 @@ clean="$(repo clean README.md \
   crates/troupekit-graph/src/patterns/handoff.rs \
   crates/troupekit-context/tests/fixtures/load/notes.txt \
   website/docs/intro.md \
-  scripts/claude-free.sh)"
+  scripts/notes-free.sh)"
 sh "$check" "$clean" >/dev/null || fail "clean tree rejected"
 
 n=0
